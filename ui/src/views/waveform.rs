@@ -11,8 +11,12 @@ pub fn draw(ui: &mut egui::Ui, audio_data: &[f32]) {
         .include_y(1.0)
         .include_y(-1.0)
         .allow_drag(false)
+        .allow_scroll(false)
         .allow_zoom(false)
+        .allow_boxed_zoom(false)
         .show_axes([false, false])
+        .show_x(false)
+        .show_y(false)
         .show(ui, |plot_ui| {
             plot_ui.line(line);
         });
