@@ -7,4 +7,3 @@ edition = "2024"
 minimeters-core = { path = "../core" }
 ringbuf = "0.4.8"
 eframe = "0.33.3"
-egui_plot = "0.34.1"
