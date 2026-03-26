@@ -2,6 +2,7 @@ use eframe::egui;
 use minimeters_core::audio::AudioEngine;
 use minimeters_core::buffer::AudioConsumer;
 use minimeters_core::dsp::DspProcessor;
+use crate::view_state::ViewStates;
 use crate::views;
 
 #[derive(PartialEq)]
@@ -21,6 +22,7 @@ pub struct App {
     
     new_samples: Vec<f32>,
     fps: usize,
+    view_states: ViewStates,
 }
 
 impl App {
@@ -34,6 +36,7 @@ impl App {
             window_size: 2048,
             new_samples: Vec::with_capacity(2048),
             fps: 60,
+            view_states: ViewStates::new(),
         }
     }
 }
@@ -72,11 +75,11 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.view_mode {
                 ViewMode::Waveform => {
-                    views::waveform::draw(ui, &self.audio_buffer);
+                    views::waveform::draw(ui, &self.audio_buffer, &mut self.view_states.waveform);
                 }
                 ViewMode::Spectrum => {
                     let fft_result = self.dsp.process(&self.audio_buffer);
-                    views::spectrum::draw(ui, &fft_result);
+                    views::spectrum::draw(ui, &fft_result, &mut self.view_states.spectrum);
                 }
             }
         });

@@ -3,6 +3,7 @@ use minimeters_core::buffer;
 use minimeters_core::audio::AudioEngine;
 
 mod app;
+mod view_state;
 mod views;
 use app::App;
 

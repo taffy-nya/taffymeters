@@ -1,6 +1,7 @@
 use eframe::egui;
+use crate::view_state::{ViewInteractionState, ZoomAnchor};
 
-pub fn draw(ui: &mut egui::Ui, fft_data: &[f32]) {
+pub fn draw(ui: &mut egui::Ui, fft_data: &[f32], state: &mut ViewInteractionState) {
     let sample_rate = 44100.0;
     let fft_size = (fft_data.len() * 2) as f32; 
     let hz_per_bin = sample_rate / fft_size;
@@ -75,6 +76,18 @@ pub fn draw(ui: &mut egui::Ui, fft_data: &[f32]) {
     let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::hover());
     let rect = response.rect;
 
+    if response.hovered() {
+        let scroll = ui.input(|i| {
+            let dy = i.smooth_scroll_delta.y;
+            if dy.abs() > f32::EPSILON {
+                dy
+            } else {
+                i.raw_scroll_delta.y
+            }
+        });
+        state.apply_scroll(scroll);
+    }
+
     if points.len() < 2 || rect.width() <= 1.0 || rect.height() <= 1.0 {
         return;
     }
@@ -89,12 +102,21 @@ pub fn draw(ui: &mut egui::Ui, fft_data: &[f32]) {
         let t = if last > 0.0 { i as f32 / last } else { 0.0 };
         let x = egui::lerp(rect.left()..=rect.right(), t);
         let y_norm = ((point[1] as f32 - y_min) / y_span).clamp(0.0, 1.0);
-        let y = egui::lerp(rect.bottom()..=rect.top(), y_norm);
+        let y = match state.anchor {
+            ZoomAnchor::Bottom => {
+                let scaled = (y_norm * state.y_zoom).clamp(0.0, 1.0);
+                egui::lerp(rect.bottom()..=rect.top(), scaled)
+            }
+            ZoomAnchor::Center => {
+                let centered = ((y_norm - 0.5) * state.y_zoom + 0.5).clamp(0.0, 1.0);
+                egui::lerp(rect.bottom()..=rect.top(), centered)
+            }
+        };
         screen_points.push(egui::pos2(x, y));
     }
 
     painter.add(egui::Shape::line(
         screen_points,
-        egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+        egui::Stroke::new(1.5, egui::Color32::LIGHT_BLUE),
     ));
 }
