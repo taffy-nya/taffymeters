@@ -43,13 +43,16 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Esc 或 Ctrl + W 关闭窗口
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::W))) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         self.new_samples.clear();
 
         // 读取音频数据
         use ringbuf::traits::Consumer;
-        while let Some(sample) = self.audio_consumer.try_pop() {
-            self.new_samples.push(sample);
-        }
+        self.new_samples.extend(self.audio_consumer.pop_iter());
 
         let new_len = self.new_samples.len();
         let mut should_repaint = false;
@@ -63,16 +66,47 @@ impl eframe::App for App {
             }
         }
 
-        // 绘制顶部工具栏
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.view_mode, ViewMode::Waveform, "Waveform");
-                ui.selectable_value(&mut self.view_mode, ViewMode::Spectrum, "Spectrum");
-            });
-        });
+        // 设置背景为半透明
+        let mut frame = egui::Frame::default();
+        frame.fill = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50); // 半透明黑色背景
 
         // 绘制主内容区域
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+            // 拖动边缘调整大小
+            let rect = ui.max_rect();
+            let border = 6.0;
+
+            let edges = [
+                (egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + border)), egui::CursorIcon::ResizeVertical, egui::ResizeDirection::North),
+                (egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - border), rect.max), egui::CursorIcon::ResizeVertical, egui::ResizeDirection::South),
+                (egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + border, rect.max.y)), egui::CursorIcon::ResizeHorizontal, egui::ResizeDirection::West),
+                (egui::Rect::from_min_max(egui::pos2(rect.max.x - border, rect.min.y), rect.max), egui::CursorIcon::ResizeHorizontal, egui::ResizeDirection::East),
+                (egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + border, rect.min.y + border)), egui::CursorIcon::ResizeNwSe, egui::ResizeDirection::NorthWest),
+                (egui::Rect::from_min_max(egui::pos2(rect.max.x - border, rect.min.y), egui::pos2(rect.max.x, rect.min.y + border)), egui::CursorIcon::ResizeNeSw, egui::ResizeDirection::NorthEast),
+                (egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - border), egui::pos2(rect.min.x + border, rect.max.y)), egui::CursorIcon::ResizeNeSw, egui::ResizeDirection::SouthWest),
+                (egui::Rect::from_min_max(egui::pos2(rect.max.x - border, rect.max.y - border), rect.max), egui::CursorIcon::ResizeNwSe, egui::ResizeDirection::SouthEast),
+            ];
+
+            let mut is_resizing = false;
+            for (index, (edge_rect, cursor, resize_dir)) in edges.into_iter().enumerate() {
+                let response = ui.interact(edge_rect, ui.id().with(("resize", index)), egui::Sense::drag());
+                if response.hovered() {
+                    ctx.set_cursor_icon(cursor);
+                }
+                if response.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(resize_dir));
+                    is_resizing = true;
+                }
+            }
+
+            // 任意位置拖拽窗口
+            let drag_rect = rect.shrink(border);
+            let drag_response = ui.interact(drag_rect, ui.id().with("window_drag"), egui::Sense::drag());
+            if !is_resizing && drag_response.dragged() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+
+            // 图表绘制区域
             match self.view_mode {
                 ViewMode::Waveform => {
                     views::waveform::draw(ui, &self.audio_buffer, &mut self.view_states.waveform);
@@ -81,6 +115,28 @@ impl eframe::App for App {
                     let fft_result = self.dsp.process(&self.audio_buffer);
                     views::spectrum::draw(ui, &fft_result, &mut self.view_states.spectrum);
                 }
+            }
+
+            // 悬浮工具栏 (HUD模式)
+            // 当鼠标靠近窗口顶部时显示工具栏
+            let pointer_pos = ctx.pointer_hover_pos();
+            let show_toolbar = pointer_pos.map_or(false, |pos| pos.y <= 40.0);
+
+            if show_toolbar {
+                egui::Area::new("overlay_toolbar".into())
+                    .fixed_pos(egui::pos2(border + 10.0, border + 10.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::window(&ctx.style())
+                            .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 200))
+                            .inner_margin(6.0)
+                            .corner_radius(4.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(&mut self.view_mode, ViewMode::Waveform, "Waveform");
+                                    ui.selectable_value(&mut self.view_mode, ViewMode::Spectrum, "Spectrum");
+                                });
+                            });
+                    });
             }
         });
 

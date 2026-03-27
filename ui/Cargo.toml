@@ -7,3 +7,7 @@ edition = "2024"
 minimeters-core = { path = "../core" }
 ringbuf = "0.4.8"
 eframe = "0.33.3"
+image = "0.25.10"
+
+[build-dependencies]
+winres = "0.1.12"
