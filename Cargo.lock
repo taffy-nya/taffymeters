@@ -2086,26 +2086,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "minimeters-core"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "ringbuf",
- "rustfft",
-]
-
-[[package]]
-name = "minimeters-ui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "image",
- "minimeters-core",
- "ringbuf",
- "winres",
-]
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3431,6 +3411,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "taffymeters-core"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "ringbuf",
+ "rustfft",
+]
+
+[[package]]
+name = "taffymeters-ui"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "image",
+ "ringbuf",
+ "taffymeters-core",
+ "winres",
 ]
 
 [[package]]

@@ -1,10 +1,10 @@
 [package]
-name = "minimeters-ui"
+name = "taffymeters-ui"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-minimeters-core = { path = "../core" }
+taffymeters-core = { path = "../core" }
 ringbuf = "0.4.8"
 eframe = "0.33.3"
 image = "0.25.10"

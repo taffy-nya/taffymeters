@@ -2,8 +2,8 @@
 
 use eframe::egui;
 use std::sync::Arc;
-use minimeters_core::buffer;
-use minimeters_core::audio::AudioStream;
+use taffymeters_core::buffer;
+use taffymeters_core::audio::AudioStream;
 
 mod app;
 mod views;
@@ -43,7 +43,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Minimeters",
+        "taffymeters",
         options,
         Box::new(|_cc| Ok(Box::new(App::new(consumer, audio_stream)))),
     )

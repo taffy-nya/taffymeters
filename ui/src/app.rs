@@ -1,7 +1,7 @@
 use eframe::egui;
-use minimeters_core::audio::AudioStream;
-use minimeters_core::buffer::AudioConsumer;
-use minimeters_core::dsp::DspProcessor;
+use taffymeters_core::audio::AudioStream;
+use taffymeters_core::buffer::AudioConsumer;
+use taffymeters_core::dsp::DspProcessor;
 use crate::views;
 
 #[derive(PartialEq)]
