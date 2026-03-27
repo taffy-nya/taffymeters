@@ -2,11 +2,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::Producer;
 use crate::buffer::AudioProducer;
 
-pub struct AudioEngine {
+pub struct AudioStream {
     _stream: cpal::Stream,
 }
 
-impl AudioEngine {
+impl AudioStream {
     pub fn new(mut producer: AudioProducer) -> Self {
         let host = cpal::default_host();
         let device = host.default_output_device().expect("找不到输出设备");

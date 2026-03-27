@@ -3,10 +3,9 @@
 use eframe::egui;
 use std::sync::Arc;
 use minimeters_core::buffer;
-use minimeters_core::audio::AudioEngine;
+use minimeters_core::audio::AudioStream;
 
 mod app;
-mod view_state;
 mod views;
 use app::App;
 
@@ -31,7 +30,7 @@ fn load_icon() -> egui::IconData {
 
 fn main() -> eframe::Result<()> {
     let (producer, consumer) = buffer::create_ring_buffer(8192);
-    let audio_engine = AudioEngine::new(producer);
+    let audio_stream = AudioStream::new(producer);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -46,6 +45,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Minimeters",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new(consumer, audio_engine)))),
+        Box::new(|_cc| Ok(Box::new(App::new(consumer, audio_stream)))),
     )
 }

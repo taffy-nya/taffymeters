@@ -23,7 +23,7 @@ impl DspProcessor {
     }
 
     /// 处理音频数据并返回幅度谱
-    pub fn process(&mut self, audio_data: &[f32]) -> Vec<f32> {
+    pub fn compute_fft(&mut self, audio_data: &[f32]) -> Vec<f32> {
         // 使用 Hann window 来减轻频谱泄漏的问题
         for (i, &sample) in audio_data.iter().take(self.fft_size).enumerate() {
             let window_multiplier = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (self.fft_size as f32 - 1.0)).cos());

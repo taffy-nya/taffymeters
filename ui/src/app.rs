@@ -1,42 +1,50 @@
 use eframe::egui;
-use minimeters_core::audio::AudioEngine;
+use minimeters_core::audio::AudioStream;
 use minimeters_core::buffer::AudioConsumer;
 use minimeters_core::dsp::DspProcessor;
-use crate::view_state::ViewStates;
 use crate::views;
 
 #[derive(PartialEq)]
 pub enum ViewMode {
-    Waveform,
+    Oscilloscope,
     Spectrum,
+    Spectrogram,
 }
 
 pub struct App {
     audio_consumer: AudioConsumer,
-    _audio_engine: AudioEngine,
+    _audio_stream: AudioStream,
     dsp: DspProcessor,
 
     view_mode: ViewMode,
     audio_buffer: Vec<f32>,
     window_size: usize,
-    
     new_samples: Vec<f32>,
+    
     fps: usize,
-    view_states: ViewStates,
+
+    waveform_view: views::oscilloscope::OscilloscopeView,
+    spectrum_view: views::spectrum::SpectrumView,
+    spectrogram_view: views::spectrogram::SpectrogramView, 
 }
 
 impl App {
-    pub fn new(consumer: AudioConsumer, engine: AudioEngine) -> Self {
+    pub fn new(consumer: AudioConsumer, stream: AudioStream) -> Self {
         Self {
             audio_consumer: consumer,
-            _audio_engine: engine,
+            _audio_stream: stream,
             dsp: DspProcessor::new(2048),
-            view_mode: ViewMode::Waveform,
+
+            view_mode: ViewMode::Oscilloscope,
             audio_buffer: vec![0.0; 2048],
             window_size: 2048,
             new_samples: Vec::with_capacity(2048),
+
             fps: 60,
-            view_states: ViewStates::new(),
+
+            waveform_view: views::oscilloscope::OscilloscopeView::new(),
+            spectrum_view: views::spectrum::SpectrumView::new(),
+            spectrogram_view: views::spectrogram::SpectrogramView::new(),
         }
     }
 }
@@ -108,12 +116,16 @@ impl eframe::App for App {
 
             // 图表绘制区域
             match self.view_mode {
-                ViewMode::Waveform => {
-                    views::waveform::draw(ui, &self.audio_buffer, &mut self.view_states.waveform);
+                ViewMode::Oscilloscope => {
+                    self.waveform_view.draw(ui, &self.audio_buffer);
                 }
                 ViewMode::Spectrum => {
-                    let fft_result = self.dsp.process(&self.audio_buffer);
-                    views::spectrum::draw(ui, &fft_result, &mut self.view_states.spectrum);
+                    let fft_result = self.dsp.compute_fft(&self.audio_buffer);
+                    self.spectrum_view.draw(ui, &fft_result);
+                }
+                ViewMode::Spectrogram => {
+                    let fft_result = self.dsp.compute_fft(&self.audio_buffer);
+                    self.spectrogram_view.draw(ui, &fft_result);
                 }
             }
 
@@ -132,8 +144,9 @@ impl eframe::App for App {
                             .corner_radius(4.0)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.selectable_value(&mut self.view_mode, ViewMode::Waveform, "Waveform");
+                                    ui.selectable_value(&mut self.view_mode, ViewMode::Oscilloscope, "Oscilloscope");
                                     ui.selectable_value(&mut self.view_mode, ViewMode::Spectrum, "Spectrum");
+                                    ui.selectable_value(&mut self.view_mode, ViewMode::Spectrogram, "Spectrogram");
                                 });
                             });
                     });

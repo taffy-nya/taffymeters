@@ -1,2 +1,3 @@
-pub mod waveform;
+pub mod oscilloscope;
 pub mod spectrum;
+pub mod spectrogram;
