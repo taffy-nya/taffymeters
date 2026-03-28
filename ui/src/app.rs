@@ -29,7 +29,7 @@ impl App {
             window_size,
             audio_data: AudioData::new(sample_rate, num_channels, window_size),
             scratch: vec![Vec::with_capacity(window_size * 4); num_channels],
-            layout: PanelLayout::single(ViewType::Oscilloscope),
+            layout: PanelLayout::new(ViewType::Oscilloscope),
             fps: 60,
         }
     }

@@ -64,6 +64,8 @@ impl View for SpectrogramView {
         let desired = ui.available_size_before_wrap();
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
 
+        if response.hovered() { self.handle_scroll(ui); }
+
         if let Some(tex) = &self.texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(tex.id(), response.rect, uv, egui::Color32::WHITE);
@@ -87,6 +89,17 @@ impl View for SpectrogramView {
     }
 }
 
+impl SpectrogramView {
+    fn handle_scroll(&mut self, ui: &mut egui::Ui) {
+        let scroll = ui.input(|i| {
+            let dy = i.smooth_scroll_delta.y;
+            if dy.abs() > f32::EPSILON { dy } else { i.raw_scroll_delta.y }
+        });
+        let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
+        self.max_history = ((self.max_history as f32) * factor).clamp(100.0, 2000.0) as usize;
+    }
+}
+
 /// 幅度 (0.0 ~ 2.5) -> 热力图颜色 (黑 -> 蓝 -> 紫 -> 红 -> 黄 -> 白)
 fn amplitude_to_color(val: f32) -> egui::Color32 {
     let t = (val / 2.5).clamp(0.0, 1.0);
@@ -94,5 +107,6 @@ fn amplitude_to_color(val: f32) -> egui::Color32 {
     let r = (t * 3.0 - 1.0).clamp(0.0, 1.0) * 255.0;
     let g = (t * 3.0 - 2.0).clamp(0.0, 1.0) * 255.0;
     let b = (t * 3.0).clamp(0.0, 1.0) * 255.0;
-    egui::Color32::from_rgb(r as u8, g as u8, b as u8)
+    let a = t * 255.0;
+    egui::Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
 }

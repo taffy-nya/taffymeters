@@ -3,7 +3,7 @@ use taffymeters_core::signal::AudioData;
 use super::traits::View;
 
 pub struct OscilloscopeView {
-    y_zoom: f32,
+    y_scale: f32,
     channel: ChannelMode,
 }
 
@@ -12,7 +12,7 @@ enum ChannelMode { Mono, Left, Right }
 
 impl OscilloscopeView {
     pub fn new() -> Self {
-        Self { y_zoom: 1.0, channel: ChannelMode::Mono }
+        Self { y_scale: 1.0, channel: ChannelMode::Mono }
     }
 }
 
@@ -22,14 +22,7 @@ impl View for OscilloscopeView {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
         let rect = response.rect;
 
-        if response.hovered() {
-            let scroll = ui.input(|i| {
-                let dy = i.smooth_scroll_delta.y;
-                if dy.abs() > f32::EPSILON { dy } else { i.raw_scroll_delta.y }
-            });
-            let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
-            self.y_zoom = (self.y_zoom * factor).clamp(0.2, 12.0);
-        }
+        if response.hovered() { self.handle_scroll(ui); }
 
         let audio: &[f32] = match self.channel {
             ChannelMode::Mono => &data.mono,
@@ -50,7 +43,7 @@ impl View for OscilloscopeView {
             .map(|(idx, &s)| {
                 let t = idx as f32 / denom;
                 let x = egui::lerp(rect.left()..=rect.right(), t);
-                let y = center_y - s.clamp(-1.0, 1.0) * half_h * self.y_zoom;
+                let y = center_y - s.clamp(-1.0, 1.0) * half_h * self.y_scale;
                 egui::pos2(x, y)
             })
             .collect();
@@ -59,14 +52,25 @@ impl View for OscilloscopeView {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Y Zoom");
-        ui.add(egui::Slider::new(&mut self.y_zoom, 0.2..=12.0).logarithmic(true));
+        ui.label("Y Scale");
+        ui.add(egui::Slider::new(&mut self.y_scale, 0.2..=10.0).logarithmic(true));
         ui.separator();
         ui.label("Stereo");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.channel, ChannelMode::Mono, "Mono");
             ui.radio_value(&mut self.channel, ChannelMode::Left, "Left");
+            ui.radio_value(&mut self.channel, ChannelMode::Mono, "Mono");
             ui.radio_value(&mut self.channel, ChannelMode::Right, "Right");
         });
+    }
+}
+
+impl OscilloscopeView {
+    fn handle_scroll(&mut self, ui: &mut egui::Ui) {
+        let scroll = ui.input(|i| {
+            let dy = i.smooth_scroll_delta.y;
+            if dy.abs() > f32::EPSILON { dy } else { i.raw_scroll_delta.y }
+        });
+        let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
+        self.y_scale = (self.y_scale * factor).clamp(0.2, 10.0);
     }
 }
