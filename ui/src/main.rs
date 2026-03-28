@@ -3,34 +3,26 @@
 use eframe::egui;
 use std::sync::Arc;
 use taffymeters_core::buffer;
-use taffymeters_core::audio::AudioStream;
+use taffymeters_core::audio::AudioCapture;
 
 mod app;
+mod panel;
 mod views;
+
 use app::App;
 
 fn load_icon() -> egui::IconData {
-    let (icon_rgba, icon_width, icon_height) = {
-        let icon_data = include_bytes!("../assets/taffy.ico");
-        let image = image::load_from_memory(icon_data)
-            .expect("Failed to open icon path")
-            .into_rgba8();
-            
-        let (width, height) = image.dimensions();
-        let rgba = image.into_raw();
-        (rgba, width, height)
-    };
-    
-    egui::IconData {
-        rgba: icon_rgba,
-        width: icon_width,
-        height: icon_height,
-    }
+    let icon_data = include_bytes!("../assets/taffy.ico");
+    let image = image::load_from_memory(icon_data)
+        .expect("Failed to open icon path")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData { rgba: image.into_raw(), width, height }
 }
 
 fn main() -> eframe::Result<()> {
-    let (producer, consumer) = buffer::create_ring_buffer(8192);
-    let audio_stream = AudioStream::new(producer);
+    let (producer, consumer) = buffer::create_ring_buffer(16384, 2);
+    let capture = AudioCapture::new(producer);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -45,6 +37,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "taffymeters",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new(consumer, audio_stream)))),
+        Box::new(|_cc| Ok(Box::new(App::new(consumer, capture)))),
     )
 }
