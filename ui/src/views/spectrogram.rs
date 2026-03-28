@@ -63,8 +63,9 @@ impl View for SpectrogramView {
 
         let desired = ui.available_size_before_wrap();
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
+        let rect = response.rect;
 
-        if response.hovered() { self.handle_scroll(ui); }
+        if ui.rect_contains_pointer(rect) { self.handle_scroll(ui); }
 
         if let Some(tex) = &self.texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));

@@ -3414,16 +3414,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "taffymeters-core"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "ringbuf",
- "rustfft",
-]
-
-[[package]]
-name = "taffymeters-ui"
+name = "taffymeters"
 version = "0.1.0"
 dependencies = [
  "eframe",
@@ -3431,6 +3422,15 @@ dependencies = [
  "ringbuf",
  "taffymeters-core",
  "winres",
+]
+
+[[package]]
+name = "taffymeters-core"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "ringbuf",
+ "rustfft",
 ]
 
 [[package]]

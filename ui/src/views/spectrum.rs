@@ -20,7 +20,7 @@ impl View for SpectrumView {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
         let rect = response.rect;
 
-        if response.hovered() { self.handle_scroll(ui); }
+        if ui.rect_contains_pointer(rect) { self.handle_scroll(ui); }
 
         let bands: Vec<f32> = self.mapper
             .map(&data.fft, data.sample_rate)
@@ -31,7 +31,7 @@ impl View for SpectrumView {
         if bands.len() < 2 || rect.width() <= 1.0 { return; }
 
         let y_max = 5.0_f32;
-        let last  = (bands.len() - 1) as f32;
+        let last = (bands.len() - 1) as f32;
 
         let points: Vec<egui::Pos2> = bands.iter().enumerate().map(|(i, &val)| {
             let t = i as f32 / last;

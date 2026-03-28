@@ -20,7 +20,7 @@ impl View for StereometerView {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
         let rect = response.rect;
 
-        if response.hovered() { self.handle_scroll(ui); }
+        if ui.rect_contains_pointer(rect) { self.handle_scroll(ui); }
 
         let center = rect.center();
         let radius = rect.size().min_elem() * 0.45;
