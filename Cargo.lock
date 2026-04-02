@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "taffymeters"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "image",
@@ -3426,7 +3426,7 @@ dependencies = [
 
 [[package]]
 name = "taffymeters-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "ringbuf",

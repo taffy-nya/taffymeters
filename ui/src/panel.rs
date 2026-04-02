@@ -38,6 +38,9 @@ impl Panel {
                 egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
             self.view.draw(&mut child, data);
+            if let Some(interval) = self.view.repaint_interval() {  // view 请求重绘
+                ui.ctx().request_repaint_after(interval);
+            }
         }
 
         let body = ui.interact(rect, ui.id().with(("body", salt)), egui::Sense::click_and_drag());
@@ -95,7 +98,7 @@ impl Panel {
                                     let btn = egui::Button::new(txt)
                                         .min_size(egui::vec2(w, 32.0))
                                         .fill(if sel { Color32::from_rgba_unmultiplied(100, 180, 255, 25) } else { Color32::TRANSPARENT });
-                                    if ui.add(btn).clicked() { out.switch_to = Some(vt); }
+                                    if ui.add(btn).clicked() { out.switch_to = Some(vt); out.close = true; }
                                 }
                             });
                         });

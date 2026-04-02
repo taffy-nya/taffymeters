@@ -31,7 +31,7 @@ impl View for SpectrogramView {
             .collect();
 
         self.history.push_front(column);
-        if self.history.len() > self.max_history { self.history.pop_back(); }
+        self.history.truncate(self.max_history);
 
         let w = self.max_history;
         let h = self.mapper.bands;
@@ -87,6 +87,11 @@ impl View for SpectrogramView {
             self.history.clear();
             self.texture = None;
         }
+    }
+
+    fn repaint_interval(&self) -> Option<std::time::Duration> {
+        // 流动动画需要持续重绘，始终以 60fps 刷新
+        Some(std::time::Duration::from_millis(16))
     }
 }
 

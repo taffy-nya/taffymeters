@@ -5,6 +5,7 @@ pub struct AudioData {
     pub fft: Vec<f32>,
     pub sample_rate: f32,
     pub num_channels: usize,
+    pub new_sample_count: usize,
 }
 
 impl AudioData {
@@ -15,6 +16,7 @@ impl AudioData {
             fft: Vec::new(),
             sample_rate,
             num_channels,
+            new_sample_count: 0,
         }
     }
 }

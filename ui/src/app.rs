@@ -53,6 +53,8 @@ impl App {
                 self.audio_data.channels.iter().map(|ch| ch[i]).sum::<f32>() / nc;
         }
         self.audio_data.fft = self.fft.compute(&self.audio_data.mono);
+        self.audio_data.new_sample_count =
+            self.scratch.iter().map(|b| b.len()).max().unwrap_or(0);
         true
     }
 }
