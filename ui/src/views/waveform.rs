@@ -152,18 +152,16 @@ impl View for WaveformView {
 
 impl WaveformView {
     fn handle_scroll(&mut self, ui: &mut egui::Ui) {
-        let (scroll, ctrl) = ui.input(|i| {
-            let dy = i.smooth_scroll_delta.y;
-            let dy = if dy.abs() > f32::EPSILON { dy } else { i.raw_scroll_delta.y };
-            (dy, i.modifiers.ctrl)
+        let (scroll, ctrl, zoom_delta) = ui.input(|i| {
+            (i.smooth_scroll_delta.y, i.modifiers.ctrl, i.zoom_delta())
         });
-        if scroll.abs() > f32::EPSILON {
-            let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
-            if ctrl {
-                self.flow_speed = (self.flow_speed * factor).clamp(20.0, 4000.0);
-            } else {
-                self.y_scale = (self.y_scale * factor).clamp(0.1, 20.0);
+        if ctrl {
+            if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                self.flow_speed = (self.flow_speed * zoom_delta).clamp(20.0, 4000.0);
             }
+        } else if scroll.abs() > f32::EPSILON {
+            let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
+            self.y_scale = (self.y_scale * factor).clamp(0.1, 20.0);
         }
     }
 }

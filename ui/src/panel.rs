@@ -39,14 +39,14 @@ impl Panel {
             );
             self.view.draw(&mut child, data);
             if let Some(interval) = self.view.repaint_interval() {  // view 请求重绘
-                ui.ctx().request_repaint_after(interval);
+                ui.request_repaint_after(interval);
             }
         }
 
         let body = ui.interact(rect, ui.id().with(("body", salt)), egui::Sense::click_and_drag());
         if body.secondary_clicked() { self.overlay_open = true; }
         if !self.overlay_open && body.dragged_by(egui::PointerButton::Primary) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            ui.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
         if self.overlay_open { return self.draw_overlay(ui, rect, salt, multi); }
@@ -74,7 +74,7 @@ impl Panel {
                 let bg = ui.allocate_rect(rect, egui::Sense::click_and_drag());
                 if bg.clicked() || bg.secondary_clicked() { out.close = true; }
                 if bg.dragged_by(egui::PointerButton::Primary) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    ui.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
                 let cr = rect.shrink(40.0);
@@ -213,9 +213,10 @@ impl Node {
             Node::Split { id, dir, ratio, a, b } => {
                 let (ra, div_rect, rb) = split_rect(rect, *dir, *ratio);
                 // 分割线 ratio 由拖拽直接修改，不经过任何 rebalance
+                let res_a = a.draw(ui, data, ra, counter, multi);
+                let res_b = b.draw(ui, data, rb, counter, multi);
                 draw_divider(ui, div_rect, *dir, ratio, rect, *id);
-                a.draw(ui, data, ra, counter, multi)
-                    .or_else(|| b.draw(ui, data, rb, counter, multi))
+                res_a.or(res_b)
             }
         }
     }
@@ -255,7 +256,7 @@ fn draw_divider(ui: &mut egui::Ui, div: egui::Rect, dir: Dir, ratio: &mut f32, p
     let resp = ui.interact(div, id, egui::Sense::drag());
 
     if resp.hovered() || resp.dragged() {
-        ui.ctx().set_cursor_icon(match dir {
+        ui.set_cursor_icon(match dir {
             Dir::H => egui::CursorIcon::ResizeHorizontal,
             Dir::V => egui::CursorIcon::ResizeVertical,
         });

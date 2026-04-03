@@ -316,7 +316,11 @@ impl View for LevelMeterView {
     }
 
     fn repaint_interval(&self) -> Option<std::time::Duration> {
-        // 峰值保持线需要平滑衰减，始终以 60fps 刷新
-        Some(std::time::Duration::from_millis(16))
+        // 峰值保持线需要平滑衰减
+        if self.left.peak_lufs == LUFS_MIN && self.right.peak_lufs == LUFS_MIN {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(16))
+        }
     }
 }

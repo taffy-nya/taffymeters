@@ -4,3 +4,10 @@ members = [
     "ui",
 ]
 resolver = "2"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
+panic = "abort"
+codegen-units = 1

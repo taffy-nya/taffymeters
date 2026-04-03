@@ -60,12 +60,12 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| {
+    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        if ui.input(|i| {
             i.key_pressed(egui::Key::Escape)
         || (i.modifiers.command && i.key_pressed(egui::Key::W))
         }) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
         let got_audio = self.tick_audio();
@@ -73,16 +73,15 @@ impl eframe::App for App {
         let bg = egui::Frame::default()
             .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50));
 
-        egui::CentralPanel::default().frame(bg).show(ctx, |ui| {
-            let data = self.audio_data.clone();
-            self.layout.draw(ui, &data);
+        egui::CentralPanel::default().frame(bg).show_inside(ui, |ui| {
+            self.layout.draw(ui, &self.audio_data);
         });
 
         egui::Area::new(egui::Id::new("window_resize_edges"))
             .order(egui::Order::Tooltip)
             .fixed_pos(egui::pos2(0.0, 0.0))
-            .show(ctx, |ui| {
-                self.handle_window_interactions(ui, ctx);
+            .show(ui.ctx(), |ui| {
+                self.handle_window_interactions(ui);
             });
 
         let delay = if got_audio {
@@ -90,13 +89,13 @@ impl eframe::App for App {
         } else {
             std::time::Duration::from_millis(50)
         };
-        ctx.request_repaint_after(delay);
+        ui.request_repaint_after(delay);
     }
 }
 
 impl App {
-    fn handle_window_interactions(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let rect = ctx.content_rect();
+    fn handle_window_interactions(&self, ui: &mut egui::Ui) {
+        let rect = ui.content_rect();
         let border = 6.0;
 
         let edges = [
@@ -112,9 +111,9 @@ impl App {
 
         for (i, (er, cursor, dir)) in edges.into_iter().enumerate() {
             let r = ui.interact(er, ui.id().with(("resize", i)), egui::Sense::drag());
-            if r.hovered() { ctx.set_cursor_icon(cursor); }
+            if r.hovered() { ui.set_cursor_icon(cursor); }
             if r.drag_started() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+                ui.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
             }
         }
     }

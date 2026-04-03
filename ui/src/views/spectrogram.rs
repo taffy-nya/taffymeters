@@ -97,10 +97,7 @@ impl View for SpectrogramView {
 
 impl SpectrogramView {
     fn handle_scroll(&mut self, ui: &mut egui::Ui) {
-        let scroll = ui.input(|i| {
-            let dy = i.smooth_scroll_delta.y;
-            if dy.abs() > f32::EPSILON { dy } else { i.raw_scroll_delta.y }
-        });
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
         self.max_history = ((self.max_history as f32) * factor).clamp(100.0, 2000.0) as usize;
     }

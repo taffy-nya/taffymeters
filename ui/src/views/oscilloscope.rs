@@ -66,10 +66,7 @@ impl View for OscilloscopeView {
 
 impl OscilloscopeView {
     fn handle_scroll(&mut self, ui: &mut egui::Ui) {
-        let scroll = ui.input(|i| {
-            let dy = i.smooth_scroll_delta.y;
-            if dy.abs() > f32::EPSILON { dy } else { i.raw_scroll_delta.y }
-        });
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
         self.y_scale = (self.y_scale * factor).clamp(0.2, 10.0);
     }
