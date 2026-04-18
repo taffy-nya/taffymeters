@@ -1,4 +1,5 @@
 pub mod traits;
+pub mod flow;
 pub mod oscilloscope;
 pub mod waveform;
 pub mod spectrum;

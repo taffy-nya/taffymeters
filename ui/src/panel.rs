@@ -67,7 +67,7 @@ impl Panel {
         egui::Area::new(egui::Id::new(("ov", salt)))
             .fixed_pos(rect.min)
             .order(egui::Order::Foreground)
-            .show(ui.ctx(), |ui| {
+            .show(ui, |ui| {
                 ui.set_clip_rect(rect);
                 ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 190));
 

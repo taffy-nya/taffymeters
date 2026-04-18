@@ -87,7 +87,7 @@ impl eframe::App for App {
         egui::Area::new(egui::Id::new("window_resize_edges"))
             .order(egui::Order::Tooltip)
             .fixed_pos(egui::pos2(0.0, 0.0))
-            .show(ui.ctx(), |ui| {
+            .show(ui, |ui| {
                 self.handle_window_interactions(ui);
             });
 

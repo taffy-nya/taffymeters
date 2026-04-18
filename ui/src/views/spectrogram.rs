@@ -2,19 +2,16 @@ use eframe::egui;
 use std::collections::VecDeque;
 use taffymeters_core::dsp::LogSpectrumMapper;
 use taffymeters_core::signal::AudioData;
+use super::flow::{Direction, FlowTexture};
 use super::traits::View;
 
 pub struct SpectrogramView {
     history: VecDeque<Vec<f32>>,
-    flow_speed: f32,    // px/s
+    flow_speed: f32,
     mapper: LogSpectrumMapper,
-    texture: Option<egui::TextureHandle>,
-    head: usize,
+    flow: FlowTexture,
     direction: Direction,
 }
-
-#[derive(PartialEq, Clone, Copy)]
-enum Direction { LtoR, RtoL, UtoD, DtoU }
 
 impl SpectrogramView {
     pub fn new() -> Self {
@@ -22,8 +19,7 @@ impl SpectrogramView {
             history: VecDeque::new(),
             flow_speed: 200.0,
             mapper: LogSpectrumMapper::new(300),
-            texture: None,
-            head: 0,
+            flow: FlowTexture::new(),
             direction: Direction::RtoL,
         }
     }
@@ -51,35 +47,21 @@ impl View for SpectrogramView {
         self.history.push_front(column);
         self.history.truncate(w);
 
-        match &mut self.texture {
-            Some(tex) if tex.size() == size => {
-                self.head = self.direction.advance(self.head, w);
-                let column = self.history.front().unwrap();
-                match self.direction {
-                    Direction::LtoR | Direction::RtoL => {
-                        tex.set_partial([self.head, 0], column_image(column, h), options);
-                    }
-                    Direction::UtoD | Direction::DtoU => {
-                        tex.set_partial([0, self.head], row_image(column, h), options);
-                    }
+        if self.flow.matches_size(size) {
+            let column = self.history.front().unwrap();
+            match self.direction {
+                Direction::LtoR | Direction::RtoL => {
+                    self.flow.push_patch(self.direction, w, column_image(column, h), options);
+                }
+                Direction::UtoD | Direction::DtoU => {
+                    self.flow.push_patch(self.direction, w, row_image(column, h), options);
                 }
             }
-            Some(tex) => {
-                tex.set(history_image(&self.history, w, h, self.direction), options);
-                self.head = 0;
-            }
-            None => {
-                self.texture = Some(ui.ctx().load_texture(
-                    "spectrogram", history_image(&self.history, w, h, self.direction), options)
-                );
-                self.head = 0;
-            }
+        } else {
+            self.flow.ensure(ui, "spectrogram", history_image(&self.history, w, h, self.direction), options);
         }
 
-        if let Some(tex) = &self.texture {
-            let uv = self.direction.uv(self.head, w, h);
-            painter.image(tex.id(), response.rect, uv, egui::Color32::WHITE);
-        }
+        self.flow.paint(&painter, response.rect, self.direction, w, h);
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -118,8 +100,7 @@ impl SpectrogramView {
     }
 
     fn reset_texture(&mut self) {
-        self.texture = None;
-        self.head = 0;
+        self.flow.reset();
     }
 
     fn handle_scroll(&mut self, ui: &mut egui::Ui) {
@@ -132,65 +113,6 @@ impl SpectrogramView {
         if (factor - 1.0).abs() > f32::EPSILON {
             self.flow_speed = (self.flow_speed * factor).clamp(20.0, 4000.0);
             self.reset_texture();
-        }
-    }
-}
-
-impl Direction {
-    fn history_pixels(self, rect: egui::Rect) -> f32 {
-        match self {
-            Direction::LtoR | Direction::RtoL => rect.width(),
-            Direction::UtoD | Direction::DtoU => rect.height(),
-        }
-    }
-
-    fn texture_size(self, history: usize, bands: usize) -> [usize; 2] {
-        match self {
-            Direction::LtoR | Direction::RtoL => [history, bands],
-            Direction::UtoD | Direction::DtoU => [bands, history],
-        }
-    }
-
-    fn advance(self, head: usize, len: usize) -> usize {
-        match self {
-            Direction::LtoR | Direction::UtoD => (head + len - 1) % len,
-            Direction::RtoL | Direction::DtoU => (head + 1) % len,
-        }
-    }
-
-    fn start(self, head: usize, len: usize) -> usize {
-        match self {
-            Direction::LtoR | Direction::UtoD => head,
-            Direction::RtoL | Direction::DtoU => (head + 1) % len,
-        }
-    }
-
-    fn history_pos(self, index: usize, len: usize) -> usize {
-        match self {
-            Direction::LtoR | Direction::UtoD => index,
-            Direction::RtoL | Direction::DtoU => (len - index) % len,
-        }
-    }
-
-    fn uv(self, head: usize, history: usize, bands: usize) -> egui::Rect {
-        let start = self.start(head, history) as f32 / history as f32;
-        match self {
-            Direction::LtoR | Direction::RtoL => {
-                let eps_x = 0.5 / history as f32;
-                let eps_y = 0.5 / bands as f32;
-                egui::Rect::from_min_max(
-                    egui::pos2(start + eps_x, eps_y),
-                    egui::pos2(start + 1.0 - eps_x, 1.0 - eps_y),
-                )
-            }
-            Direction::UtoD | Direction::DtoU => {
-                let eps_x = 0.5 / bands as f32;
-                let eps_y = 0.5 / history as f32;
-                egui::Rect::from_min_max(
-                    egui::pos2(eps_x, start + eps_y),
-                    egui::pos2(1.0 - eps_x, start + 1.0 - eps_y),
-                )
-            }
         }
     }
 }
