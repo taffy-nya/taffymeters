@@ -47,12 +47,19 @@ impl App {
             else { win.rotate_left(n); win[ws - n..].copy_from_slice(new_ch); }
         }
 
-        let nc = self.audio_data.num_channels as f32;
-        for i in 0..ws {
-            self.audio_data.mono[i] =
-                self.audio_data.channels.iter().map(|ch| ch[i]).sum::<f32>() / nc;
+        self.audio_data.mono.fill(0.0);
+        for ch in &self.audio_data.channels {
+            for (mono, &sample) in self.audio_data.mono.iter_mut().zip(ch) {
+                *mono += sample;
+            }
         }
-        self.audio_data.fft = self.fft.compute(&self.audio_data.mono);
+        if self.audio_data.num_channels > 0 {
+            let nc = self.audio_data.num_channels as f32;
+            for sample in &mut self.audio_data.mono {
+                *sample /= nc;
+            }
+        }
+        self.fft.compute_into(&self.audio_data.mono, &mut self.audio_data.fft);
         self.audio_data.new_sample_count =
             self.scratch.iter().map(|b| b.len()).max().unwrap_or(0);
         true
@@ -71,7 +78,7 @@ impl eframe::App for App {
         let got_audio = self.tick_audio();
 
         let bg = egui::Frame::default()
-            .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50));
+            .fill(egui::Color32::from_rgb(8, 8, 10));
 
         egui::CentralPanel::default().frame(bg).show_inside(ui, |ui| {
             self.layout.draw(ui, &self.audio_data);

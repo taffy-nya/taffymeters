@@ -11,3 +11,10 @@ lto = true
 opt-level = "s"
 panic = "abort"
 codegen-units = 1
+
+[profile.perf]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+incremental = true

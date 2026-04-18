@@ -57,9 +57,9 @@ impl View for OscilloscopeView {
         ui.separator();
         ui.label("Stereo");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.channel, ChannelMode::Left, "Left");
-            ui.radio_value(&mut self.channel, ChannelMode::Mono, "Mono");
-            ui.radio_value(&mut self.channel, ChannelMode::Right, "Right");
+            ui.selectable_value(&mut self.channel, ChannelMode::Left, "Left");
+            ui.selectable_value(&mut self.channel, ChannelMode::Mono, "Mono");
+            ui.selectable_value(&mut self.channel, ChannelMode::Right, "Right");
         });
     }
 }

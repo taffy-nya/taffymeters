@@ -83,7 +83,8 @@ impl View for WaveformView {
 
         if self.history.is_empty() { return; }
 
-        let hist: Vec<f32> = self.history.iter().copied().collect();
+        let y_scale = self.y_scale;
+        let hist = self.history.make_contiguous();
         let hist_len = hist.len() as f32;
 
         let width = rect.width() as usize;
@@ -109,12 +110,12 @@ impl View for WaveformView {
                 peak = peak.max(s.abs());
             }
 
-            let visual_amp = (peak * self.y_scale).clamp(0.0, 1.0);
+            let visual_amp = (peak * y_scale).clamp(0.0, 1.0);
             let color = amp_color(visual_amp);
 
-            let y_hi = (center_y - hi.clamp(-1.0, 1.0) * half_h * self.y_scale)
+            let y_hi = (center_y - hi.clamp(-1.0, 1.0) * half_h * y_scale)
                         .clamp(rect.min.y, rect.max.y);
-            let y_lo = (center_y - lo.clamp(-1.0, 1.0) * half_h * self.y_scale)
+            let y_lo = (center_y - lo.clamp(-1.0, 1.0) * half_h * y_scale)
                         .clamp(rect.min.y, rect.max.y);
             let y_top = y_hi.min(y_lo);
             let y_bot = y_hi.max(y_lo).max(y_top + 1.0);
@@ -138,9 +139,9 @@ impl View for WaveformView {
         ui.add_space(8.0);
         ui.label("Channel");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.channel, ChannelMode::Left,  "Left");
-            ui.radio_value(&mut self.channel, ChannelMode::Mono,  "Mono");
-            ui.radio_value(&mut self.channel, ChannelMode::Right, "Right");
+            ui.selectable_value(&mut self.channel, ChannelMode::Left,  "Left");
+            ui.selectable_value(&mut self.channel, ChannelMode::Mono,  "Mono");
+            ui.selectable_value(&mut self.channel, ChannelMode::Right, "Right");
         });
     }
 

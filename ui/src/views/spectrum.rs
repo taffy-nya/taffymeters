@@ -6,11 +6,16 @@ use super::traits::View;
 pub struct SpectrumView {
     y_scale: f32,
     mapper: LogSpectrumMapper,
+    bands: Vec<f32>,
 }
 
 impl SpectrumView {
     pub fn new() -> Self {
-        Self { y_scale: 1.0, mapper: LogSpectrumMapper::new(300) }
+        Self {
+            y_scale: 1.0,
+            mapper: LogSpectrumMapper::new(300),
+            bands: Vec::new(),
+        }
     }
 }
 
@@ -22,18 +27,17 @@ impl View for SpectrumView {
 
         if ui.rect_contains_pointer(rect) { self.handle_scroll(ui); }
 
-        let bands: Vec<f32> = self.mapper
-            .map(&data.fft, data.sample_rate)
-            .into_iter()
-            .map(LogSpectrumMapper::to_db)
-            .collect();
+        self.mapper.map_into(&data.fft, data.sample_rate, &mut self.bands);
+        for val in &mut self.bands {
+            *val = LogSpectrumMapper::to_db(*val);
+        }
 
-        if bands.len() < 2 || rect.width() <= 1.0 { return; }
+        if self.bands.len() < 2 || rect.width() <= 1.0 { return; }
 
         let y_max = 5.0_f32;
-        let last = (bands.len() - 1) as f32;
+        let last = (self.bands.len() - 1) as f32;
 
-        let points: Vec<egui::Pos2> = bands.iter().enumerate().map(|(i, &val)| {
+        let points: Vec<egui::Pos2> = self.bands.iter().enumerate().map(|(i, &val)| {
             let t = i as f32 / last;
             let x = egui::lerp(rect.left()..=rect.right(), t);
             let y_norm = (val / y_max).clamp(0.0, 1.0);
@@ -53,6 +57,7 @@ impl View for SpectrumView {
         let mut bands = self.mapper.bands;
         if ui.add(egui::Slider::new(&mut bands, 50..=600)).changed() {
             self.mapper = LogSpectrumMapper::new(bands);
+            self.bands.clear();
         }
     }
 }

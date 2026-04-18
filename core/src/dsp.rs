@@ -4,6 +4,7 @@ use std::sync::Arc;
 pub struct FftProcessor {
     fft_size: usize,
     fft: Arc<dyn Fft<f32>>,
+    window: Vec<f32>,
     complex_buf: Vec<Complex<f32>>,
     scratch_buf: Vec<Complex<f32>>,
 }
@@ -12,9 +13,16 @@ impl FftProcessor {
     pub fn new(fft_size: usize) -> Self {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
+        let window = (0..fft_size)
+            .map(|i| {
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32
+                    / (fft_size as f32 - 1.0)).cos())
+            })
+            .collect();
         Self {
             fft_size,
             fft: Arc::clone(&fft),
+            window,
             complex_buf: vec![Complex::zero(); fft_size],
             scratch_buf: vec![Complex::zero(); fft_size],
         }
@@ -22,13 +30,22 @@ impl FftProcessor {
 
     /// 对输入音频应用 Hann window 后做 FFT，返回前半段的幅度谱
     pub fn compute(&mut self, audio: &[f32]) -> Vec<f32> {
-        for (i, &s) in audio.iter().take(self.fft_size).enumerate() {
-            let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32
-                / (self.fft_size as f32 - 1.0)).cos());
-            self.complex_buf[i] = Complex::new(s * w, 0.0);
+        let mut out = Vec::new();
+        self.compute_into(audio, &mut out);
+        out
+    }
+
+    pub fn compute_into(&mut self, audio: &[f32], out: &mut Vec<f32>) {
+        for i in 0..self.fft_size {
+            let s = audio.get(i).copied().unwrap_or_default();
+            self.complex_buf[i] = Complex::new(s * self.window[i], 0.0);
         }
         self.fft.process_with_scratch(&mut self.complex_buf, &mut self.scratch_buf);
-        self.complex_buf.iter().take(self.fft_size / 2).map(|c| c.norm()).collect()
+
+        out.resize(self.fft_size / 2, 0.0);
+        for (dst, c) in out.iter_mut().zip(self.complex_buf.iter()) {
+            *dst = c.norm();
+        }
     }
 
     pub fn fft_size(&self) -> usize { self.fft_size }
@@ -52,9 +69,23 @@ impl LogSpectrumMapper {
 
     /// 把原始 FFT 幅度谱映射到 self.bands 个对数频带的线性幅度值
     pub fn map(&self, fft: &[f32], sample_rate: f32) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.map_into(fft, sample_rate, &mut out);
+        out
+    }
+
+    pub fn map_into(&self, fft: &[f32], sample_rate: f32, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(self.bands);
+
+        if fft.is_empty() {
+            out.resize(self.bands, 0.0);
+            return;
+        }
+
         let hz_per_bin = sample_rate / (fft.len() * 2) as f32;
 
-        (0..self.bands).map(|i| {
+        out.extend((0..self.bands).map(|i| {
             let t0 = i as f32 / self.bands as f32;
             let t1 = (i + 1) as f32 / self.bands as f32;
             let f0 = self.min_freq * (self.max_freq / self.min_freq).powf(t0);
@@ -62,7 +93,7 @@ impl LogSpectrumMapper {
             let b0 = f0 / hz_per_bin;
             let b1 = f1 / hz_per_bin;
             Self::avg_bins(fft, b0, b1)
-        }).collect()
+        }));
     }
 
     pub fn to_db(amp: f32) -> f32 {
