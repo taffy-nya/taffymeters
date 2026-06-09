@@ -1,73 +1,66 @@
 use eframe::egui;
-use taffymeters_core::signal::AudioData;
+use taffymeters_core::channel::ChannelMode;
+use taffymeters_core::frame::AudioFrame;
+use crate::theme::Theme;
+use super::components::{ScaleControl, channel_select_ui};
 use super::traits::View;
 
 pub struct OscilloscopeView {
-    y_scale: f32,
+    y_scale: ScaleControl,
     channel: ChannelMode,
+    theme: &'static Theme,
 }
-
-#[derive(PartialEq, Clone, Copy)]
-enum ChannelMode { Mono, Left, Right }
 
 impl OscilloscopeView {
     pub fn new() -> Self {
-        Self { y_scale: 1.0, channel: ChannelMode::Mono }
+        Self {
+            y_scale: ScaleControl::new(1.0, 0.2, 10.0),
+            channel: ChannelMode::Mono,
+            theme: crate::theme::dark(),
+        }
     }
 }
 
 impl View for OscilloscopeView {
-    fn draw(&mut self, ui: &mut egui::Ui, data: &AudioData) {
-        let desired = ui.available_size_before_wrap();
-        let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
-        let rect = response.rect;
+    fn handle_input(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        if ui.rect_contains_pointer(rect) {
+            self.y_scale.handle_scroll(ui);
+        }
+    }
 
-        if ui.rect_contains_pointer(rect) { self.handle_scroll(ui); }
+    fn draw(&mut self, ui: &mut egui::Ui, _frame: &AudioFrame, rect: egui::Rect) {
+        if rect.width() <= 1.0 { return; }
 
-        let audio: &[f32] = match self.channel {
-            ChannelMode::Mono => &data.mono,
-            ChannelMode::Left => data.channels.first().map(|v| v.as_slice()).unwrap_or(&data.mono),
-            ChannelMode::Right => data.channels.get(1).map(|v| v.as_slice()).unwrap_or(&data.mono),
-        };
+        let audio = _frame.channel_data(self.channel);
+        if audio.len() < 2 { return; }
 
-        if audio.len() < 2 || rect.width() <= 1.0 { return; }
+        let (response, painter) = ui.allocate_painter(rect.size(), egui::Sense::hover());
+        let r = response.rect;
 
-        let step = ((audio.len() as f32) / rect.width()).ceil() as usize;
+        let step = ((audio.len() as f32) / r.width()).ceil() as usize;
         let step = step.max(1);
         let count = ((audio.len() - 1) / step) + 1;
         let denom = (count.saturating_sub(1)).max(1) as f32;
-        let half_h = rect.height() * 0.5;
-        let center_y = rect.center().y;
+        let half_h = r.height() * 0.5;
+        let center_y = r.center().y;
 
         let points: Vec<egui::Pos2> = audio.iter().step_by(step).enumerate()
             .map(|(idx, &s)| {
                 let t = idx as f32 / denom;
-                let x = egui::lerp(rect.left()..=rect.right(), t);
-                let y = center_y - s.clamp(-1.0, 1.0) * half_h * self.y_scale;
+                let x = egui::lerp(r.left()..=r.right(), t);
+                let y = center_y - s.clamp(-1.0, 1.0) * half_h * self.y_scale.value;
                 egui::pos2(x, y)
             })
             .collect();
 
-        painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, egui::Color32::LIGHT_BLUE)));
+        painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, self.theme.line)));
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.label("Y Scale");
-        ui.add(egui::Slider::new(&mut self.y_scale, 0.2..=10.0).logarithmic(true));
+        ui.add(egui::Slider::new(&mut self.y_scale.value, 0.2..=10.0).logarithmic(true));
         ui.separator();
         ui.label("Stereo");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.channel, ChannelMode::Left, "Left");
-            ui.selectable_value(&mut self.channel, ChannelMode::Mono, "Mono");
-            ui.selectable_value(&mut self.channel, ChannelMode::Right, "Right");
-        });
-    }
-}
-
-impl OscilloscopeView {
-    fn handle_scroll(&mut self, ui: &mut egui::Ui) {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        let factor = (1.0 + scroll * 0.001).clamp(0.8, 1.25);
-        self.y_scale = (self.y_scale * factor).clamp(0.2, 10.0);
+        channel_select_ui(ui, &mut self.channel);
     }
 }

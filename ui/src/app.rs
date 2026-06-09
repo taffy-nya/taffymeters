@@ -1,68 +1,29 @@
 use eframe::egui;
 use taffymeters_core::audio::AudioCapture;
-use taffymeters_core::buffer::AudioConsumer;
-use taffymeters_core::dsp::FftProcessor;
-use taffymeters_core::signal::AudioData;
+use taffymeters_core::audio::AudioConsumer;
+use taffymeters_core::config::DEFAULT_WINDOW_SIZE;
+use taffymeters_core::processor::AudioProcessor;
 use crate::panel::PanelLayout;
+use crate::theme;
 use crate::views::ViewType;
 
 pub struct App {
-    consumer: AudioConsumer,
+    processor: AudioProcessor,
     _capture: AudioCapture,
-    fft: FftProcessor,
-    window_size: usize,
-    audio_data: AudioData,
-    scratch: Vec<Vec<f32>>,
     layout: PanelLayout,
-    fps: usize,
+    theme: &'static theme::Theme,
 }
 
 impl App {
     pub fn new(consumer: AudioConsumer, capture: AudioCapture) -> Self {
         let sample_rate = capture.sample_rate as f32;
         let num_channels = capture.num_channels;
-        let window_size = 2048;
         Self {
-            consumer,
+            processor: AudioProcessor::new(consumer, sample_rate, num_channels, DEFAULT_WINDOW_SIZE),
             _capture: capture,
-            fft: FftProcessor::new(window_size),
-            window_size,
-            audio_data: AudioData::new(sample_rate, num_channels, window_size),
-            scratch: vec![Vec::with_capacity(window_size * 4); num_channels],
-            layout: PanelLayout::new(ViewType::Oscilloscope),
-            fps: 60,
+            layout: PanelLayout::new(ViewType::OscilloscopeView),
+            theme: theme::dark(),
         }
-    }
-
-    fn tick_audio(&mut self) -> bool {
-        for b in &mut self.scratch { b.clear(); }
-        if !self.consumer.pop_into(&mut self.scratch) { return false; }
-
-        let ws = self.window_size;
-        for (ch, new_ch) in self.scratch.iter().enumerate() {
-            if new_ch.is_empty() { continue; }
-            let win = &mut self.audio_data.channels[ch];
-            let n = new_ch.len();
-            if n >= ws { win.copy_from_slice(&new_ch[n - ws..]); }
-            else { win.rotate_left(n); win[ws - n..].copy_from_slice(new_ch); }
-        }
-
-        self.audio_data.mono.fill(0.0);
-        for ch in &self.audio_data.channels {
-            for (mono, &sample) in self.audio_data.mono.iter_mut().zip(ch) {
-                *mono += sample;
-            }
-        }
-        if self.audio_data.num_channels > 0 {
-            let nc = self.audio_data.num_channels as f32;
-            for sample in &mut self.audio_data.mono {
-                *sample /= nc;
-            }
-        }
-        self.fft.compute_into(&self.audio_data.mono, &mut self.audio_data.fft);
-        self.audio_data.new_sample_count =
-            self.scratch.iter().map(|b| b.len()).max().unwrap_or(0);
-        true
     }
 }
 
@@ -75,13 +36,16 @@ impl eframe::App for App {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        let got_audio = self.tick_audio();
+        let got_audio = self.processor.tick();
 
         let bg = egui::Frame::default()
-            .fill(egui::Color32::from_rgb(8, 8, 10));
+            .fill(self.theme.background);
 
         egui::CentralPanel::default().frame(bg).show_inside(ui, |ui| {
-            self.layout.draw(ui, &self.audio_data);
+            let view_needs = self.layout.draw(ui, self.processor.frame(), self.theme);
+            if view_needs {
+                ui.request_repaint_after(std::time::Duration::from_millis(16));
+            }
         });
 
         egui::Area::new(egui::Id::new("window_resize_edges"))
@@ -91,12 +55,11 @@ impl eframe::App for App {
                 self.handle_window_interactions(ui);
             });
 
-        let delay = if got_audio {
-            std::time::Duration::from_millis(1000 / self.fps as u64)
+        if got_audio {
+            ui.request_repaint_after(std::time::Duration::from_millis(16));
         } else {
-            std::time::Duration::from_millis(50)
-        };
-        ui.request_repaint_after(delay);
+            ui.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }
 

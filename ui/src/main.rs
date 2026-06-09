@@ -2,11 +2,13 @@
 
 use eframe::{egui, egui_wgpu, wgpu};
 use std::sync::Arc;
-use taffymeters_core::buffer;
+use taffymeters_core::audio;
 use taffymeters_core::audio::AudioCapture;
+use taffymeters_core::config::{DEFAULT_BUFFER_CAPACITY, DEFAULT_NUM_CHANNELS};
 
 mod app;
 mod panel;
+mod theme;
 mod views;
 
 use app::App;
@@ -33,8 +35,14 @@ fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result<()> {
-    let (producer, consumer) = buffer::create_ring_buffer(16384, 2);
-    let capture = AudioCapture::new(producer);
+    let (producer, consumer) = audio::create_ring_buffer(DEFAULT_BUFFER_CAPACITY, DEFAULT_NUM_CHANNELS);
+    let capture = match AudioCapture::new(producer) {
+        Ok(capture) => capture,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
