@@ -2,11 +2,15 @@ pub struct LogSpectrumMapper {
     pub bands: usize,
     pub min_freq: f32,
     pub max_freq: f32,
+    pub tilt: f32,
+    pub ref_freq: f32,
 }
+
+const TILT_BASE: f32 = 20.0 * std::f32::consts::LOG10_2;
 
 impl LogSpectrumMapper {
     pub fn new(bands: usize) -> Self {
-        Self { bands, min_freq: 20.0, max_freq: 20_000.0 }
+        Self { bands, min_freq: 20.0, max_freq: 20_000.0, tilt: 4.5, ref_freq: 1000.0 }
     }
 
     pub fn map(&self, fft: &[f32], sample_rate: f32) -> Vec<f32> {
@@ -25,6 +29,7 @@ impl LogSpectrumMapper {
         }
 
         let hz_per_bin = sample_rate / (fft.len() * 2) as f32;
+        let tilt_exp = self.tilt / TILT_BASE; 
 
         out.extend((0..self.bands).map(|i| {
             let t0 = i as f32 / self.bands as f32;
@@ -33,7 +38,11 @@ impl LogSpectrumMapper {
             let f1 = self.min_freq * (self.max_freq / self.min_freq).powf(t1);
             let b0 = f0 / hz_per_bin;
             let b1 = f1 / hz_per_bin;
-            Self::avg_bins(fft, b0, b1)
+            let mut amp = Self::avg_bins(fft, b0, b1);
+            let f_mid = (f0 * f1).sqrt();
+            let tilt_factor = (f_mid / self.ref_freq).powf(tilt_exp);
+            amp *= tilt_factor;
+            amp
         }));
     }
 

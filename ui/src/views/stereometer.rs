@@ -84,7 +84,6 @@ impl View for StereometerView {
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.label("Scale");
         ui.add(egui::Slider::new(&mut self.scale.value, 0.5..=10.0).logarithmic(true));
-        ui.separator();
         ui.label("Point Alpha");
         ui.add(egui::Slider::new(&mut self.point_alpha, 20u8..=255));
     }

@@ -38,9 +38,7 @@ impl View for SpectrumView {
         if rect.width() <= 1.0 { return; }
 
         self.mapper.map_into(&frame.fft, frame.sample_rate, &mut self.bands);
-        for val in &mut self.bands {
-            *val = LogSpectrumMapper::to_db(*val);
-        }
+        for val in &mut self.bands { *val = LogSpectrumMapper::to_db(*val); }
 
         if self.bands.len() < 2 { return; }
 
@@ -65,11 +63,16 @@ impl View for SpectrumView {
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.label("Y Scale");
         ui.add(egui::Slider::new(&mut self.y_scale.value, 0.2..=10.0).logarithmic(true));
-        ui.separator();
         ui.label("Band Count");
         let mut bands = self.mapper.bands;
         if ui.add(egui::Slider::new(&mut bands, 50..=600)).changed() {
             self.mapper = LogSpectrumMapper::new(bands);
+            self.bands.clear();
+        }
+        ui.label("Tilt (dB)");
+        let mut tilt = self.mapper.tilt;
+        if ui.add(egui::Slider::new(&mut tilt, -9.0..=9.0)).changed() {
+            self.mapper.tilt = tilt;
             self.bands.clear();
         }
     }

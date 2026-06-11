@@ -94,7 +94,6 @@ impl View for SpectrogramView {
         if ui.add(egui::Slider::new(&mut self.flow_speed, 20.0..=4000.0).logarithmic(true)).changed() {
             self.reset_texture();
         }
-        ui.separator();
         ui.label("Band Count");
         let mut bands = self.mapper.bands;
         if ui.add(egui::Slider::new(&mut bands, 50..=600)).changed() {
@@ -102,7 +101,13 @@ impl View for SpectrogramView {
             self.history.clear();
             self.reset_texture();
         }
-        ui.separator();
+        ui.label("Tilt (dB)");
+        let mut tilt = self.mapper.tilt;
+        if ui.add(egui::Slider::new(&mut tilt, -9.0..=9.0)).changed() {
+            self.mapper.tilt = tilt;
+            self.history.clear();
+            self.reset_texture();
+        }
         ui.label("Direction");
         ui.horizontal(|ui| {
             if ui.selectable_value(&mut self.direction, Direction::LtoR, "From Left").changed() { self.reset_texture(); }

@@ -61,7 +61,6 @@ impl View for OscilloscopeView {
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.label("Y Scale");
         ui.add(egui::Slider::new(&mut self.y_scale.value, 0.2..=10.0).logarithmic(true));
-        ui.separator();
         ui.label("Stereo");
         channel_select_ui(ui, &mut self.channel);
     }
