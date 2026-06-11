@@ -1,8 +1,10 @@
 use eframe::egui;
 use taffymeters_core::frame::AudioFrame;
 use crate::theme::Theme;
-use super::components::ScaleControl;
-use super::traits::View;
+use super::{
+    components::ScaleControl,
+    traits::View,
+};
 
 pub struct StereometerView {
     point_alpha: u8,

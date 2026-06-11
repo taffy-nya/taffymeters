@@ -1,8 +1,6 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChannelMode {
-    Mono,
-    Left,
-    Right,
+    Mono, Left, Right,
 }
 
 impl ChannelMode {

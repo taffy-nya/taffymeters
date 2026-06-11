@@ -1,8 +1,9 @@
 use eframe::egui::{self, Color32};
 use taffymeters_core::frame::AudioFrame;
-use crate::views::ViewType;
-use crate::views::View;
-use crate::theme::Theme;
+use crate::{
+    views::{View, ViewType},
+    theme::Theme,
+};
 use super::action::PanelAction;
 
 pub struct Panel {

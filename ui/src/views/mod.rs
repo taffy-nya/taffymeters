@@ -7,6 +7,7 @@ pub mod spectrum;
 pub mod spectrogram;
 pub mod stereometer;
 pub mod levelmeter;
+pub mod empty;
 
 pub use traits::View;
 
@@ -43,4 +44,5 @@ register_views! {
     spectrogram::SpectrogramView   => "Spectrogram",
     stereometer::StereometerView   => "Stereometer",
     levelmeter::LevelMeterView     => "Level Meter",
+    empty::EmptyView               => "Empty",
 }

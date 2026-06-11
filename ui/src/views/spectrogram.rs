@@ -1,10 +1,14 @@
 use eframe::egui;
 use std::collections::VecDeque;
-use taffymeters_core::dsp::LogSpectrumMapper;
-use taffymeters_core::frame::AudioFrame;
+use taffymeters_core::{
+    dsp::LogSpectrumMapper,
+    frame::AudioFrame,
+};
 use crate::theme::Theme;
-use super::flow::{Direction, FlowTexture};
-use super::traits::View;
+use super::{
+    flow::{Direction, FlowTexture},
+    traits::View,
+};
 
 pub struct SpectrogramView {
     history: VecDeque<Vec<f32>>,

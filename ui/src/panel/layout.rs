@@ -1,10 +1,14 @@
 use eframe::egui;
 use taffymeters_core::frame::AudioFrame;
-use crate::views::ViewType;
-use crate::theme::Theme;
-use super::action::{Dir, PanelAction};
-use super::node::{DrawCtx, Node};
-use super::tree::{do_split, do_remove};
+use crate::{
+    views::ViewType,
+    theme::Theme,
+};
+use super::{
+    action::{Dir, PanelAction},
+    node::{DrawCtx, Node},
+    tree::{do_split, do_remove},
+};
 
 pub struct PanelLayout {
     root: Node,

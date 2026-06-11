@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 use eframe::egui::{self, Rect, Stroke, pos2, vec2};
-use taffymeters_core::config::DEFAULT_SAMPLE_RATE;
-use taffymeters_core::dsp::kweighting::Biquad;
-use taffymeters_core::frame::AudioFrame;
+use taffymeters_core::{
+    config::DEFAULT_SAMPLE_RATE,
+    dsp::kweighting::Biquad,
+    frame::AudioFrame,
+};
 use crate::theme::Theme;
 use super::traits::View;
 

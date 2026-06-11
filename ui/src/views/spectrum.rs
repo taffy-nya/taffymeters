@@ -1,9 +1,13 @@
 use eframe::egui;
-use taffymeters_core::dsp::LogSpectrumMapper;
-use taffymeters_core::frame::AudioFrame;
+use taffymeters_core::{
+    dsp::LogSpectrumMapper,
+    frame::AudioFrame,
+};
 use crate::theme::Theme;
-use super::components::ScaleControl;
-use super::traits::View;
+use super::{
+    components::ScaleControl,
+    traits::View,
+};
 
 pub struct SpectrumView {
     y_scale: ScaleControl,

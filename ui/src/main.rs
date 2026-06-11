@@ -2,9 +2,10 @@
 
 use eframe::{egui, egui_wgpu, wgpu};
 use std::sync::Arc;
-use taffymeters_core::audio;
-use taffymeters_core::audio::AudioCapture;
-use taffymeters_core::config::{DEFAULT_BUFFER_CAPACITY, DEFAULT_NUM_CHANNELS};
+use taffymeters_core::{
+    audio::{self, AudioCapture},
+    config::{DEFAULT_BUFFER_CAPACITY, DEFAULT_NUM_CHANNELS},
+};
 
 mod app;
 mod panel;

@@ -1,6 +1,8 @@
 use eframe::egui;
-use taffymeters_core::channel::ChannelMode;
-use taffymeters_core::frame::AudioFrame;
+use taffymeters_core::{
+    channel::ChannelMode,
+    frame::AudioFrame,
+};
 use crate::theme::Theme;
 use super::components::{ScaleControl, channel_select_ui};
 use super::traits::View;

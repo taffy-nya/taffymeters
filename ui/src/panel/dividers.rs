@@ -31,9 +31,9 @@ pub fn split_rect(rect: egui::Rect, dir: Dir, ratio: f32) -> (egui::Rect, egui::
     }
 }
 
-pub fn draw_divider(ui: &mut egui::Ui, div: egui::Rect, dir: Dir, ratio: &mut f32, parent: egui::Rect, split_id: u64, theme: &Theme) {
+pub fn draw_divider(ui: &mut egui::Ui, div: egui::Rect, dir: Dir, ratio: &mut f32, parent: egui::Rect, split_id: u64, theme: &Theme) -> egui::Response {
     let id = ui.id().with(("div", split_id));
-    let resp = ui.interact(div, id, egui::Sense::drag());
+    let resp = ui.interact(div, id, egui::Sense::click_and_drag());
 
     if resp.hovered() || resp.dragged() {
         ui.set_cursor_icon(match dir {
@@ -65,4 +65,6 @@ pub fn draw_divider(ui: &mut egui::Ui, div: egui::Rect, dir: Dir, ratio: &mut f3
             Stroke::new(1.0, color),
         ),
     };
+
+    resp
 }

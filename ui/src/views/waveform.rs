@@ -1,11 +1,15 @@
 use std::collections::VecDeque;
 use eframe::egui;
-use taffymeters_core::channel::ChannelMode;
-use taffymeters_core::frame::AudioFrame;
+use taffymeters_core::{
+    channel::ChannelMode,
+    frame::AudioFrame,
+};
 use crate::theme::Theme;
-use super::components::{ScaleControl, channel_select_ui};
-use super::flow::{Direction, FlowTexture};
-use super::traits::View;
+use super::{
+    components::{ScaleControl, channel_select_ui},
+    flow::{Direction, FlowTexture},
+    traits::View,
+};
 
 pub struct WaveformView {
     history: VecDeque<f32>,

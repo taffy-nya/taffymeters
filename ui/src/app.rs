@@ -1,11 +1,14 @@
 use eframe::egui;
-use taffymeters_core::audio::AudioCapture;
-use taffymeters_core::audio::AudioConsumer;
-use taffymeters_core::config::DEFAULT_WINDOW_SIZE;
-use taffymeters_core::processor::AudioProcessor;
-use crate::panel::PanelLayout;
-use crate::theme;
-use crate::views::ViewType;
+use taffymeters_core::{
+    audio::{AudioCapture, AudioConsumer},
+    config::DEFAULT_WINDOW_SIZE,
+    processor::AudioProcessor,
+};
+use crate::{
+    panel::PanelLayout,
+    theme,
+    views::ViewType,
+};
 
 pub struct App {
     processor: AudioProcessor,
@@ -38,8 +41,7 @@ impl eframe::App for App {
 
         let got_audio = self.processor.tick();
 
-        let bg = egui::Frame::default()
-            .fill(self.theme.background);
+        let bg = egui::Frame::default() .fill(self.theme.background);
 
         egui::CentralPanel::default().frame(bg).show_inside(ui, |ui| {
             let view_needs = self.layout.draw(ui, self.processor.frame(), self.theme);

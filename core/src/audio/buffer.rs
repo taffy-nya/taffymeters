@@ -1,5 +1,7 @@
-use ringbuf::{HeapRb, HeapProd, HeapCons};
-use ringbuf::traits::{Split, Producer, Consumer};
+use ringbuf::{
+    HeapRb, HeapProd, HeapCons,
+    traits::{Split, Producer, Consumer},
+};
 
 pub struct AudioProducer {
     channels: Vec<HeapProd<f32>>,
