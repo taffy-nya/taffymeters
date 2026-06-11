@@ -2,17 +2,15 @@ use std::collections::VecDeque;
 use super::action::Dir;
 use super::node::Node;
 
-static SPLIT_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-fn next_split_id() -> u64 {
+static SPLIT_ID_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn next_split_id() -> usize {
     SPLIT_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-pub fn do_split(node: Node, target: usize, counter: &mut usize, dir: Dir) -> (Node, bool) {
+pub fn do_split(node: Node, target_id: usize, dir: Dir) -> (Node, bool) {
     match node {
         Node::Leaf(panel) => {
-            let id = *counter;
-            *counter += 1;
-            if id != target { return (Node::Leaf(panel), false); }
+            if panel.id != target_id { return (Node::Leaf(panel), false); }
             let vt = panel.view_type;
             let new_node = Node::Split {
                 id: next_split_id(),
@@ -25,67 +23,56 @@ pub fn do_split(node: Node, target: usize, counter: &mut usize, dir: Dir) -> (No
             (new_node, true)
         }
         Node::Split { id, dir: sd, ratio, dragged, a, b } => {
-            let a_count = a.leaf_count();
-            if *counter + a_count > target {
-                let (new_a, hit) = do_split(*a, target, counter, dir);
+            let (new_a, hit_a) = do_split(*a, target_id, dir);
+            if hit_a {
                 let mut new_node = Node::Split { id, dir: sd, ratio, dragged, a: Box::new(new_a), b };
-                if hit && sd == dir && is_chain_not_dragged(&new_node, dir) {
+                if sd == dir && is_chain_not_dragged(&new_node, dir) {
                     new_node = rebalance_chain(new_node, dir);
                 }
-                (new_node, hit)
-            } else {
-                *counter += a_count;
-                let (new_b, hit) = do_split(*b, target, counter, dir);
-                let mut new_node = Node::Split { id, dir: sd, ratio, dragged, a, b: Box::new(new_b) };
-                if hit && sd == dir && is_chain_not_dragged(&new_node, dir) {
-                    new_node = rebalance_chain(new_node, dir);
-                }
-                (new_node, hit)
+                return (new_node, true);
             }
+            let (new_b, hit_b) = do_split(*b, target_id, dir);
+            if hit_b {
+                let mut new_node = Node::Split { id, dir: sd, ratio, dragged, a: Box::new(new_a), b: Box::new(new_b) };
+                if sd == dir && is_chain_not_dragged(&new_node, dir) {
+                    new_node = rebalance_chain(new_node, dir);
+                }
+                return (new_node, true);
+            }
+            let new_node = Node::Split { id, dir: sd, ratio, dragged, a: Box::new(new_a), b: Box::new(new_b) };
+            (new_node, false)
         }
     }
 }
 
-pub fn do_remove(node: Node, target: usize, counter: &mut usize) -> (Node, bool) {
+pub fn do_remove(node: Node, target_id: usize) -> (Node, bool) {
     match node {
         Node::Leaf(panel) => {
-            let id = *counter;
-            *counter += 1;
-            (Node::Leaf(panel), id == target)
+            let hit = panel.id == target_id;
+            (Node::Leaf(panel), hit)
         }
         Node::Split { id, dir, ratio, dragged, a, b } => {
-            let a_count = a.leaf_count();
-
-            if *counter + a_count > target {
-                let (new_a, hit) = do_remove(*a, target, counter);
-                if hit {
-                    let mut b = *b;
-                    if is_chain_not_dragged(&b, dir) {
-                        b = rebalance_chain(b, dir);
-                    } 
-                    return (b, false);
+            let (new_a, hit_a) = do_remove(*a, target_id);
+            if hit_a {
+                let mut b = *b;
+                if is_chain_not_dragged(&b, dir) {
+                    b = rebalance_chain(b, dir);
                 }
-                let mut new_node = Node::Split { id, dir, ratio, dragged, a: Box::new(new_a), b };
-                if is_chain_not_dragged(&new_node, dir) {
-                    new_node = rebalance_chain(new_node, dir);
-                }
-                (new_node, false)
-            } else {
-                *counter += a_count;
-                let (new_b, hit) = do_remove(*b, target, counter);
-                if hit {
-                    let mut a = *a;
-                    if is_chain_not_dragged(&a, dir) {
-                        a = rebalance_chain(a, dir);
-                    } 
-                    return (a, false);
-                }
-                let mut new_node = Node::Split { id, dir, ratio, dragged, a, b: Box::new(new_b) };
-                if is_chain_not_dragged(&new_node, dir) {
-                    new_node = rebalance_chain(new_node, dir);
-                }
-                (new_node, false)
+                return (b, false);
             }
+            let (new_b, hit_b) = do_remove(*b, target_id);
+            if hit_b {
+                let mut a = new_a;
+                if is_chain_not_dragged(&a, dir) {
+                    a = rebalance_chain(a, dir);
+                }
+                return (a, false);
+            }
+            let mut new_node = Node::Split { id, dir, ratio, dragged, a: Box::new(new_a), b: Box::new(new_b) };
+            if is_chain_not_dragged(&new_node, dir) {
+                new_node = rebalance_chain(new_node, dir);
+            }
+            (new_node, false)
         }
     }
 }
@@ -123,4 +110,3 @@ fn rebuild_chain(mut nodes: VecDeque<Node>, dir: Dir) -> Node {
     let b = rebuild_chain(nodes, dir);
     Node::Split { id: next_split_id(), dir, ratio, dragged: false, a: Box::new(a), b: Box::new(b) }
 }
-

@@ -24,34 +24,17 @@ impl PanelLayout {
         let multi = self.root.leaf_count() > 1;
 
         let mut repaint_needed = false;
-        let mut counter = 0;
-        let mut ctx = DrawCtx {
-            ui,
-            frame,
-            counter: &mut counter,
-            multi,
-            repaint_needed: &mut repaint_needed,
-            theme,
-        };
+        let mut ctx = DrawCtx { ui, frame, multi, repaint_needed: &mut repaint_needed, theme };
         let result = self.root.draw(rect, &mut ctx);
-        let Some((target, action)) = result else { return repaint_needed };
+        let Some(action) = result else { return repaint_needed };
 
         let old = std::mem::replace(&mut self.root, Node::leaf(ViewType::OscilloscopeView));
 
         self.root = match action {
-            PanelAction::SplitRight => {
-                let (new_root, _) = do_split(old, target, &mut 0, Dir::H);
-                new_root
-            }
-            PanelAction::SplitDown => {
-                let (new_root, _) = do_split(old, target, &mut 0, Dir::V);
-                new_root
-            }
-            PanelAction::Remove => {
-                let (new_root, _) = do_remove(old, target, &mut 0);
-                new_root
-            }
-            PanelAction::None => old,
+            PanelAction::SplitRight(id) => do_split(old, id, Dir::H).0,
+            PanelAction::SplitDown(id)  => do_split(old, id, Dir::V).0,
+            PanelAction::Remove(id)     => do_remove(old, id).0,
+            PanelAction::None           => old,
         };
         repaint_needed
     }

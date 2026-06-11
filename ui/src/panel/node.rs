@@ -13,7 +13,6 @@ use super::{
 pub struct DrawCtx<'a> {
     pub ui: &'a mut egui::Ui,
     pub frame: &'a AudioFrame,
-    pub counter: &'a mut usize,
     pub multi: bool,
     pub repaint_needed: &'a mut bool,
     pub theme: &'a Theme,
@@ -21,7 +20,7 @@ pub struct DrawCtx<'a> {
 
 pub enum Node {
     Leaf(Panel),
-    Split { id: u64, dir: Dir, ratio: f32, dragged: bool, a: Box<Node>, b: Box<Node> },
+    Split { id: usize, dir: Dir, ratio: f32, dragged: bool, a: Box<Node>, b: Box<Node> },
 }
 
 impl Node {
@@ -34,14 +33,12 @@ impl Node {
         }
     }
 
-    pub fn draw(&mut self, rect: egui::Rect, ctx: &mut DrawCtx<'_>) -> Option<(usize, PanelAction)> {
+    pub fn draw(&mut self, rect: egui::Rect, ctx: &mut DrawCtx<'_>) -> Option<PanelAction> {
         match self {
             Node::Leaf(panel) => {
-                let id = *ctx.counter;
-                *ctx.counter += 1;
                 if panel.view.needs_repaint() { *ctx.repaint_needed = true; }
-                let act = panel.draw(ctx.ui, ctx.frame, rect, id, ctx.multi, ctx.theme);
-                if matches!(act, PanelAction::None) { None } else { Some((id, act)) }
+                let act = panel.draw(ctx.ui, ctx.frame, rect, ctx.multi, ctx.theme);
+                if matches!(act, PanelAction::None) { None } else { Some(act) }
             }
             Node::Split { id, dir, ratio, dragged, a, b } => {
                 let (ra, div_rect, rb) = split_rect(rect, *dir, *ratio);
