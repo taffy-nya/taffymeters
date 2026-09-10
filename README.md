@@ -1,38 +1,44 @@
 # taffymeters
 
-A lightweight audio visualization tool for Windows, inspired by MiniMeters.
-Runs as a small always-on-top transparent window that sits over your desktop or other applications.
+面向 Windows 的轻量音频可视化工具。当前重构阶段已跑通单条原生
+Spectrum 路径，由默认播放端点的 WASAPI loopback 真实驱动。
 
-## Features
+## 当前能力
 
-- Oscilloscope, spectrum analyzer, and spectrogram views
-- Stereo goniometer (stereometer) for stereo field visualization
-- Flexible panel layout: split any panel horizontally or vertically, drag dividers to resize
-- Right-click any panel to switch its view or adjust settings
-- Frameless, transparent, always-on-top window with drag-to-move and edge resize
+- 按设备实际格式建立有界系统音频采集
+- 在独立 worker 中执行 `Input → Channel → FFT`
+- 使用 periodic Hann FFT 和 peak-dBFS 标定
+- 支持 Left、Right、Mono mix 及设备描述中的全部离散声道
+- 通过注册入口创建 Spectrum Module 和可替换的默认折线风格
+- 可 resize、置顶并支持暂停／恢复的原生窗口
 
-## Building
+旧视图和 BSP 布局保留在 `tmp/prev_src`，只作为后续迁移参考；
+它们尚未在新架构中实现。
 
-Requires Rust 1.85 or later.
+## 构建
 
-```
+需要 Rust 1.85 或更高版本、Windows，以及可用的播放端点。
+
+```text
 cargo build --release
 ```
 
-The compiled binary will be at `target/release/taffymeters.exe`.
+生成的程序位于 `target/release/taffymeters.exe`。
 
-## Usage
+## 使用
 
-Run the application and it will capture your default audio output device.
-Drag the window anywhere on screen. Resize by dragging the window edges.
+运行程序后会采集默认音频播放端点。界面会按设备实际声道数生成
+全部声道选择入口；快捷键 `1`、`2`、`M` 分别选择 Left、Right 和
+Mono average。`Space` 暂停／恢复采集，`Escape` 关闭窗口。
 
-To split a panel, hover over its right or bottom edge and click the "+" that appears.
-To change a panel's view or close it, right-click anywhere inside it.
+## 项目结构
 
-## Project Structure
-
-```
+```text
 taffymeters/
-  core/   Audio capture, ring buffer, FFT processing
-  ui/     egui-based interface, panel layout, visualizations
+  src/audio/       输入描述、系统采集和有界块传输
+  src/dataflow/    Channel、标定 FFT、worker 和快照
+  src/builtins/    注册式 Spectrum Module 和默认折线风格
+  src/module.rs    Module／风格注册及 Spectrum 坐标
+  src/render.rs    宿主绘制接口和 egui 适配器
+  src/app.rs       原生应用外壳
 ```
