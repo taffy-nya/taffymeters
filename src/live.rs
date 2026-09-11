@@ -2,7 +2,10 @@ use std::{error::Error, fmt, sync::Arc};
 
 use crate::{
     audio::{OpenSystemInput, SourceState, SourceTelemetry, SystemCapture, create_block_transport},
-    dataflow::{ChannelSelection, ControlError, FftConfig, SpectrumController, SpectrumDataflow},
+    dataflow::{
+        ChannelSelection, ControlError, FftConfig, RuntimeMetrics, SharedAnalysisId,
+        SpectrumController, SpectrumDataflow, SpectrumRequest, SpectrumSubscription,
+    },
     snapshot::SpectrumReader,
 };
 
@@ -28,6 +31,7 @@ impl Default for LiveSpectrumConfig {
 pub struct LiveSpectrum {
     capture: Option<SystemCapture>,
     dataflow: Option<SpectrumDataflow>,
+    primary: Option<SpectrumSubscription>,
     reader: SpectrumReader,
     controller: SpectrumController,
     telemetry: Arc<SourceTelemetry>,
@@ -70,11 +74,12 @@ impl LiveSpectrum {
             Arc::clone(&descriptor),
             processing_endpoint,
             Arc::clone(&telemetry),
-            config.fft,
-            config.initial_channel,
         );
-        let controller = dataflow.controller();
-        let reader = dataflow.reader();
+        let primary = dataflow
+            .subscribe(SpectrumRequest::new(config.initial_channel, config.fft))
+            .map_err(LiveSpectrumError::Control)?;
+        let controller = primary.controller();
+        let reader = primary.reader();
         let mut capture_endpoint = capture_endpoint;
         capture_endpoint.set_worker(dataflow.worker_thread());
         let capture = input
@@ -84,6 +89,7 @@ impl LiveSpectrum {
         Ok(Self {
             capture: Some(capture),
             dataflow: Some(dataflow),
+            primary: Some(primary),
             reader,
             controller,
             telemetry,
@@ -112,7 +118,9 @@ impl LiveSpectrum {
             .expect("capture exists while runtime is live");
         if self.paused {
             let continuity = self.telemetry.advance_continuity();
-            self.controller
+            self.dataflow
+                .as_ref()
+                .expect("dataflow exists while runtime is live")
                 .resume_at(continuity)
                 .map_err(LiveSpectrumError::Control)?;
             capture
@@ -128,11 +136,42 @@ impl LiveSpectrum {
             Ok(SourceState::Paused)
         }
     }
+
+    pub fn subscribe(
+        &self,
+        request: SpectrumRequest,
+    ) -> Result<SpectrumSubscription, LiveSpectrumError> {
+        self.dataflow
+            .as_ref()
+            .expect("dataflow exists while runtime is live")
+            .subscribe(request)
+            .map_err(LiveSpectrumError::Control)
+    }
+
+    pub fn subscribe_shared(
+        &self,
+        request: SpectrumRequest,
+        binding: SharedAnalysisId,
+    ) -> Result<SpectrumSubscription, LiveSpectrumError> {
+        self.dataflow
+            .as_ref()
+            .expect("dataflow exists while runtime is live")
+            .subscribe_shared(request, binding)
+            .map_err(LiveSpectrumError::Control)
+    }
+
+    pub fn dataflow_metrics(&self) -> RuntimeMetrics {
+        self.dataflow
+            .as_ref()
+            .expect("dataflow exists while runtime is live")
+            .metrics()
+    }
 }
 
 impl Drop for LiveSpectrum {
     fn drop(&mut self) {
         self.capture.take();
+        self.primary.take();
         self.dataflow.take();
     }
 }

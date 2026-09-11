@@ -8,7 +8,7 @@ use crate::{
         SpectrumStyleFactory,
     },
     render::{Color, Point, RenderTarget, Stroke, TextStyle},
-    snapshot::{SpectrumReader, SpectrumSnapshot},
+    snapshot::{SpectrumReader, SpectrumSnapshotSet},
 };
 
 pub const SPECTRUM_MODULE_ID: &str = "taffymeters.spectrum";
@@ -71,7 +71,7 @@ impl SpectrumStyle for LineSpectrumStyle {
         self.points.clear();
         for (index, dbfs) in context
             .snapshot
-            .bins_dbfs
+            .spectrum_dbfs
             .iter()
             .copied()
             .enumerate()
@@ -102,14 +102,14 @@ struct SpectrumModule {
     reader: SpectrumReader,
     style: Box<dyn SpectrumStyle>,
     coordinates: SpectrumCoordinates,
-    latest: Option<Arc<SpectrumSnapshot>>,
+    latest: Option<Arc<SpectrumSnapshotSet>>,
     label_version: u64,
     label: String,
     status_line: String,
 }
 
 impl SpectrumModule {
-    fn update_label(&mut self, snapshot: &SpectrumSnapshot) {
+    fn update_label(&mut self, snapshot: &SpectrumSnapshotSet) {
         if self.label_version == snapshot.result_version {
             return;
         }
@@ -118,7 +118,7 @@ impl SpectrumModule {
         let first_bin = (self.coordinates.min_frequency_hz / snapshot.fft.bin_hz).ceil() as usize;
         let last_bin = (self.coordinates.max_frequency_hz / snapshot.fft.bin_hz).floor() as usize;
         let peak = snapshot
-            .bins_dbfs
+            .spectrum_dbfs
             .iter()
             .enumerate()
             .take(last_bin.saturating_add(1))
@@ -164,10 +164,10 @@ impl SpectrumModule {
 impl Module for SpectrumModule {
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
         let requested_channel = self.reader.requested_channel();
-        self.latest = self
-            .reader
-            .latest()
-            .filter(|snapshot| snapshot.channel == requested_channel);
+        let requested_revision = self.reader.requested_revision();
+        self.latest = self.reader.latest().filter(|snapshot| {
+            snapshot.channel == requested_channel && snapshot.config_revision == requested_revision
+        });
         if let Some(error) = self.reader.analysis_error() {
             self.status_line.clear();
             let _ = write!(self.status_line, "Channel error: {error}");
@@ -261,7 +261,7 @@ mod tests {
             AudioDescriptor, ChannelLayout, Generation, SourceId, SourceState, SourceTelemetry,
             create_block_transport,
         },
-        dataflow::{ChannelSelection, FftConfig, SpectrumDataflow},
+        dataflow::{ChannelSelection, FftConfig, SpectrumDataflow, SpectrumRequest},
         module::{ModuleFrame, ModuleServices, Registry},
         render::{Rect, Stroke},
     };
@@ -302,16 +302,16 @@ mod tests {
         let telemetry = Arc::new(SourceTelemetry::new());
         let (mut capture, processing) =
             create_block_transport(2, 2, 32, Arc::clone(&telemetry)).unwrap();
-        let dataflow = SpectrumDataflow::spawn(
-            descriptor,
-            processing,
-            Arc::clone(&telemetry),
-            FftConfig::new(32, 32, -160.0).unwrap(),
-            ChannelSelection::Left,
-        );
+        let dataflow = SpectrumDataflow::spawn(descriptor, processing, Arc::clone(&telemetry));
+        let subscription = dataflow
+            .subscribe(SpectrumRequest::new(
+                ChannelSelection::Left,
+                FftConfig::new(32, 32, -160.0).unwrap(),
+            ))
+            .unwrap();
         capture.set_worker(dataflow.worker_thread());
-        let reader = dataflow.reader();
-        let controller = dataflow.controller();
+        let reader = subscription.reader();
+        let controller = subscription.controller();
         capture.write(&[0.25_f32; 64]);
         let deadline = Instant::now() + Duration::from_secs(1);
         while reader.latest().is_none() {

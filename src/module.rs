@@ -2,7 +2,7 @@ use std::{collections::HashMap, error::Error, fmt, sync::Arc, time::Duration};
 
 use crate::{
     render::{Point, Rect, RenderTarget},
-    snapshot::{SpectrumReader, SpectrumSnapshot},
+    snapshot::{SpectrumReader, SpectrumSnapshotSet},
 };
 
 pub struct ModuleServices {
@@ -35,7 +35,7 @@ pub trait ModuleFactory: Send + Sync {
 }
 
 pub struct SpectrumStyleContext<'a> {
-    pub snapshot: &'a SpectrumSnapshot,
+    pub snapshot: &'a SpectrumSnapshotSet,
     pub coordinates: &'a SpectrumCoordinates,
     pub rect: Rect,
     pub monotonic_time: Duration,
