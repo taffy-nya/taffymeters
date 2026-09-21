@@ -530,6 +530,53 @@ impl Module for StereometerModule {
     }
 }
 
+const METER_FLOOR_DBFS: f32 = -60.0;
+const METER_PEAK_HOLD: Duration = Duration::from_secs(3);
+const METER_PEAK_FALL_DB_PER_SECOND: f32 = 18.0;
+
+#[derive(Clone, Copy)]
+struct MeterPeakHold {
+    value_dbfs: f32,
+    hold_until: Duration,
+    last_update: Duration,
+}
+
+impl Default for MeterPeakHold {
+    fn default() -> Self {
+        Self {
+            value_dbfs: METER_FLOOR_DBFS,
+            hold_until: Duration::ZERO,
+            last_update: Duration::ZERO,
+        }
+    }
+}
+
+impl MeterPeakHold {
+    fn update(&mut self, measurement_dbfs: Option<f32>, now: Duration) -> bool {
+        let target = measurement_dbfs.unwrap_or(METER_FLOOR_DBFS);
+        let decay_start = self.last_update.max(self.hold_until);
+        if now > decay_start && self.value_dbfs > target {
+            let elapsed = now.saturating_sub(decay_start).as_secs_f32();
+            self.value_dbfs =
+                (self.value_dbfs - METER_PEAK_FALL_DB_PER_SECOND * elapsed).max(target);
+        }
+        if measurement_dbfs.is_some() && target >= self.value_dbfs {
+            self.value_dbfs = target;
+            self.hold_until = now + METER_PEAK_HOLD;
+        }
+        self.last_update = now;
+        self.value_dbfs > target
+    }
+}
+
+fn amplitude_to_dbfs(amplitude: f32) -> f32 {
+    if amplitude <= 0.001 {
+        METER_FLOOR_DBFS
+    } else {
+        (20.0 * amplitude.log10()).clamp(METER_FLOOR_DBFS, 3.0)
+    }
+}
+
 struct LevelMeterFactory;
 
 impl ModuleFactory for LevelMeterFactory {
@@ -548,8 +595,8 @@ impl ModuleFactory for LevelMeterFactory {
     ) -> Result<Box<dyn Module>, RegistryError> {
         Ok(Box::new(LevelMeterModule {
             reader: services.time_domain.clone(),
-            held_lufs: Vec::new(),
-            hold_until: Vec::new(),
+            peak_holds: Vec::new(),
+            last_result_version: 0,
             bars: Vec::with_capacity(12),
             text: String::with_capacity(64),
         }))
@@ -558,8 +605,8 @@ impl ModuleFactory for LevelMeterFactory {
 
 struct LevelMeterModule {
     reader: TimeDomainReader,
-    held_lufs: Vec<f32>,
-    hold_until: Vec<Duration>,
+    peak_holds: Vec<MeterPeakHold>,
+    last_result_version: u64,
     bars: Vec<ColoredRect>,
     text: String,
 }
@@ -570,23 +617,27 @@ impl Module for LevelMeterModule {
             waiting(&mut frame);
             return repaint(100);
         };
-        let shown_channels = snapshot.momentary_lufs.len().min(8);
-        self.held_lufs.resize(shown_channels, -60.0);
-        self.hold_until.resize(shown_channels, Duration::ZERO);
+        let shown_channels = snapshot
+            .momentary_lufs
+            .len()
+            .min(snapshot.sample_peaks.len())
+            .min(8);
+        self.peak_holds
+            .resize(shown_channels, MeterPeakHold::default());
+        let is_new_snapshot = snapshot.result_version != self.last_result_version;
+        self.last_result_version = snapshot.result_version;
         let gap = 5.0;
         let width =
             (frame.rect.width() - gap * (shown_channels + 1) as f32) / shown_channels.max(1) as f32;
         self.bars.clear();
         let mut animating = false;
         for channel in 0..shown_channels {
-            let current = snapshot.momentary_lufs[channel].clamp(-60.0, 3.0);
-            if current >= self.held_lufs[channel] {
-                self.held_lufs[channel] = current;
-                self.hold_until[channel] = frame.monotonic_time + Duration::from_secs(3);
-            } else if frame.monotonic_time >= self.hold_until[channel] {
-                self.held_lufs[channel] = (self.held_lufs[channel] - 0.5).max(current);
-                animating |= self.held_lufs[channel] > current;
-            }
+            let current_lufs = snapshot.momentary_lufs[channel].clamp(-60.0, 3.0);
+            let current_peak_dbfs = amplitude_to_dbfs(snapshot.sample_peaks[channel]);
+            animating |= self.peak_holds[channel].update(
+                is_new_snapshot.then_some(current_peak_dbfs),
+                frame.monotonic_time,
+            );
             let left = frame.rect.min.x + gap + channel as f32 * (width + gap);
             let bar = Rect {
                 min: Point {
@@ -602,7 +653,7 @@ impl Module for LevelMeterModule {
                 rect: bar,
                 color: Color::rgba(20, 28, 34, 220),
             });
-            let normalized = ((current + 60.0) / 63.0).clamp(0.0, 1.0);
+            let normalized = ((current_lufs + 60.0) / 63.0).clamp(0.0, 1.0);
             self.bars.push(ColoredRect {
                 rect: Rect {
                     min: Point {
@@ -613,7 +664,7 @@ impl Module for LevelMeterModule {
                 },
                 color: meter_color(normalized),
             });
-            let peak = ((self.held_lufs[channel] + 60.0) / 63.0).clamp(0.0, 1.0);
+            let peak = ((self.peak_holds[channel].value_dbfs + 60.0) / 63.0).clamp(0.0, 1.0);
             let peak_y = bar.max.y - bar.height() * peak;
             self.bars.push(ColoredRect {
                 rect: Rect {
@@ -630,7 +681,13 @@ impl Module for LevelMeterModule {
             });
             self.text.clear();
             use std::fmt::Write as _;
-            let _ = write!(self.text, "{} {:.1}", channel + 1, current);
+            let _ = write!(
+                self.text,
+                "{} {:.1} LUFS / {:.1} dBFS",
+                channel + 1,
+                current_lufs,
+                current_peak_dbfs
+            );
             frame.renderer.text(
                 frame.rect,
                 Point {
@@ -815,5 +872,21 @@ mod tests {
 
         assert_eq!(first_target.polylines, 0);
         assert_eq!(second_target.polylines, 1);
+    }
+
+    #[test]
+    fn meter_peak_uses_dbfs_and_decays_by_elapsed_time() {
+        assert!((amplitude_to_dbfs(0.5) - -6.020_6).abs() < 0.001);
+
+        let mut peak = MeterPeakHold::default();
+        assert!(!peak.update(Some(-6.0), Duration::ZERO));
+        assert_eq!(peak.value_dbfs, -6.0);
+        assert!(peak.update(None, Duration::from_secs(2)));
+        assert_eq!(peak.value_dbfs, -6.0);
+
+        assert!(peak.update(None, Duration::from_secs(5)));
+        assert!((peak.value_dbfs - -42.0).abs() < 0.001);
+        assert!(!peak.update(None, Duration::from_secs(10)));
+        assert_eq!(peak.value_dbfs, METER_FLOOR_DBFS);
     }
 }

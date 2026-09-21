@@ -66,6 +66,7 @@ impl ModuleFactory for SpectrumModuleFactory {
             },
             latest: None,
             label_version: 0,
+            label_frequency_range: None,
             label: String::with_capacity(192),
             status_line: String::with_capacity(256),
             hover_line: String::with_capacity(128),
@@ -290,6 +291,7 @@ struct SpectrumModule {
     coordinates: SpectrumCoordinates,
     latest: Option<Arc<SpectrumSnapshotSet>>,
     label_version: u64,
+    label_frequency_range: Option<(u32, u32)>,
     label: String,
     status_line: String,
     hover_line: String,
@@ -298,10 +300,17 @@ struct SpectrumModule {
 
 impl SpectrumModule {
     fn update_label(&mut self, snapshot: &SpectrumSnapshotSet) {
-        if self.label_version == snapshot.result_version {
+        let frequency_range = (
+            self.coordinates.min_frequency_hz.to_bits(),
+            self.coordinates.max_frequency_hz.to_bits(),
+        );
+        if self.label_version == snapshot.result_version
+            && self.label_frequency_range == Some(frequency_range)
+        {
             return;
         }
         self.label_version = snapshot.result_version;
+        self.label_frequency_range = Some(frequency_range);
         self.label.clear();
         let peak = self
             .coordinates
@@ -665,6 +674,50 @@ mod tests {
         pixel.draw(context, &mut target);
         assert_eq!(target.polylines, 0);
         assert!(target.rectangles > 100);
+    }
+
+    #[test]
+    fn peak_label_recomputes_when_frequency_range_changes_without_new_audio() {
+        let descriptor = Arc::new(
+            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
+                .unwrap(),
+        );
+        let telemetry = Arc::new(SourceTelemetry::new());
+        let (_capture, processing) =
+            create_block_transport(2, 4, 64, Arc::clone(&telemetry)).unwrap();
+        let dataflow = SpectrumDataflow::spawn(Arc::clone(&descriptor), processing, telemetry);
+        let subscription = dataflow
+            .subscribe(SpectrumRequest::new(
+                ChannelSelection::MonoAverage,
+                FftConfig::new(32, 16, -160.0).unwrap(),
+            ))
+            .unwrap();
+        let mut module = SpectrumModule {
+            reader: subscription.reader(),
+            style: LineSpectrumStyleFactory.create(),
+            style_id: DEFAULT_SPECTRUM_STYLE_ID,
+            coordinates: SpectrumCoordinates {
+                min_frequency_hz: 20.0,
+                max_frequency_hz: 20_000.0,
+                min_dbfs: -100.0,
+                max_dbfs: 0.0,
+            },
+            latest: None,
+            label_version: 0,
+            label_frequency_range: None,
+            label: String::new(),
+            status_line: String::new(),
+            hover_line: String::new(),
+            grid: Vec::new(),
+        };
+        let snapshot = snapshot();
+
+        module.update_label(&snapshot);
+        let full_range_label = module.label.clone();
+        module.coordinates.max_frequency_hz = 5_000.0;
+        module.update_label(&snapshot);
+
+        assert_ne!(module.label, full_range_label);
     }
 
     #[test]

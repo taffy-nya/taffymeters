@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{
     LiveSpectrum,
-    audio::{AudioDescriptor, ChannelLayout, SourceState},
+    audio::{AudioDescriptor, ChannelLayout, SourceState, SourceStatus},
     builtins::{self, SPECTRUM_MODULE_ID},
     dataflow::ChannelSelection,
     module::{Module, ModuleFrame, ModuleServices, Registry, RegistryError},
@@ -84,7 +84,12 @@ impl App {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if ui.input(|input| input.key_pressed(egui::Key::Space)) {
+        if ui.input(|input| input.key_pressed(egui::Key::Space))
+            && matches!(
+                self.live.reader().source_status().state,
+                SourceState::Running | SourceState::Paused
+            )
+        {
             self.toggle_pause();
         }
         if ui.input(|input| input.key_pressed(egui::Key::M)) {
@@ -177,13 +182,23 @@ impl App {
             {
                 self.select_channel(ChannelSelection::MonoAverage);
             }
-            let paused = self.live.reader().source_status().state == SourceState::Paused;
+            let status = self.live.reader().source_status();
+            let status_color = match status.state {
+                SourceState::Starting | SourceState::Running => egui::Color32::LIGHT_GRAY,
+                SourceState::Paused => egui::Color32::YELLOW,
+                SourceState::DeviceLost | SourceState::Stopped => egui::Color32::LIGHT_RED,
+            };
+            ui.colored_label(status_color, source_status_text(&status));
+            let button_label = match status.state {
+                SourceState::Paused => "Space: Resume",
+                SourceState::Starting => "Starting…",
+                SourceState::Running => "Space: Pause",
+                SourceState::DeviceLost => "Device lost",
+                SourceState::Stopped => "Stopped",
+            };
+            let can_toggle = matches!(status.state, SourceState::Running | SourceState::Paused);
             if ui
-                .button(if paused {
-                    "Space: Resume"
-                } else {
-                    "Space: Pause"
-                })
+                .add_enabled(can_toggle, egui::Button::new(button_label))
                 .clicked()
             {
                 self.toggle_pause();
@@ -208,6 +223,29 @@ fn channel_for_index(layout: ChannelLayout, index: u16) -> ChannelSelection {
         (ChannelLayout::Stereo, 1) => ChannelSelection::Right,
         _ => ChannelSelection::Discrete(index),
     }
+}
+
+fn source_status_text(status: &SourceStatus) -> String {
+    use std::fmt::Write as _;
+
+    let state = match status.state {
+        SourceState::Starting => "STARTING",
+        SourceState::Running => "RUNNING",
+        SourceState::Paused => "PAUSED",
+        SourceState::DeviceLost => "DEVICE LOST",
+        SourceState::Stopped => "STOPPED",
+    };
+    let mut text = format!("Source: {state}");
+    if status.dropped_blocks > 0 {
+        let _ = write!(text, " | dropped {}", status.dropped_blocks);
+    }
+    if status.invalid_samples > 0 {
+        let _ = write!(text, " | invalid {}", status.invalid_samples);
+    }
+    if let Some(detail) = &status.detail {
+        let _ = write!(text, " | {detail}");
+    }
+    text
 }
 
 impl eframe::App for App {
@@ -279,6 +317,21 @@ mod tests {
                 (2, ChannelSelection::Discrete(2)),
                 (3, ChannelSelection::Discrete(3)),
             ]
+        );
+    }
+
+    #[test]
+    fn shared_source_status_exposes_failures_and_telemetry() {
+        let status = SourceStatus {
+            state: SourceState::DeviceLost,
+            dropped_blocks: 3,
+            invalid_samples: 7,
+            detail: Some("endpoint unavailable".to_owned()),
+        };
+
+        assert_eq!(
+            source_status_text(&status),
+            "Source: DEVICE LOST | dropped 3 | invalid 7 | endpoint unavailable"
         );
     }
 }

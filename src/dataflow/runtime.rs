@@ -30,6 +30,8 @@ use super::{
 
 const CONTROL_QUEUE_CAPACITY: usize = 16;
 const COMMAND_BUDGET_PER_TICK: usize = 16;
+const TIME_HISTORY_SECONDS: usize = 10;
+const TIME_SNAPSHOT_HZ: usize = 30;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeMetrics {
@@ -698,6 +700,14 @@ struct Processor {
     time_history_frames: usize,
     time_result_version: u64,
     time_gap_pending: bool,
+    time_pending_samples: Vec<f32>,
+    time_pending_start_frame: Option<u64>,
+    time_pending_source_sequence: u64,
+    time_pending_frames: usize,
+    time_publish_interval_frames: usize,
+    time_lufs: Vec<f32>,
+    time_block_peaks: Vec<f32>,
+    time_publish_peaks: Vec<f32>,
     level_analyzer: LevelAnalyzer,
 }
 
@@ -709,6 +719,8 @@ impl Processor {
     ) -> Self {
         let channel_count = descriptor.channel_count as usize;
         let level_analyzer = LevelAnalyzer::new(descriptor.sample_rate_hz, channel_count);
+        let time_publish_interval_frames =
+            (descriptor.sample_rate_hz as usize).div_ceil(TIME_SNAPSHOT_HZ);
         Self {
             descriptor,
             subscriptions: HashMap::new(),
@@ -730,6 +742,14 @@ impl Processor {
             time_history_frames: 0,
             time_result_version: 0,
             time_gap_pending: false,
+            time_pending_samples: Vec::with_capacity(time_publish_interval_frames * channel_count),
+            time_pending_start_frame: None,
+            time_pending_source_sequence: 0,
+            time_pending_frames: 0,
+            time_publish_interval_frames,
+            time_lufs: vec![-60.0; channel_count],
+            time_block_peaks: vec![0.0; channel_count],
+            time_publish_peaks: vec![0.0; channel_count],
             level_analyzer,
         }
     }
@@ -990,6 +1010,10 @@ impl Processor {
         }
         self.expected_sequence = None;
         self.expected_start_frame = None;
+        self.time_pending_samples.clear();
+        self.time_pending_start_frame = None;
+        self.time_pending_frames = 0;
+        self.time_publish_peaks.fill(0.0);
         self.time_gap_pending = true;
         self.level_analyzer.reset();
         self.discontinuity_count = self.discontinuity_count.wrapping_add(1);
@@ -1054,17 +1078,55 @@ impl Processor {
 
     fn publish_time_domain(&mut self, block: &AudioBlock) {
         let channels = self.descriptor.channel_count as usize;
-        let samples = Arc::<[f32]>::from(block.samples(channels));
+        let samples = block.samples(channels);
+        self.level_analyzer
+            .process(samples, &mut self.time_lufs, &mut self.time_block_peaks);
+
+        if self.time_pending_frames == 0 {
+            self.time_pending_start_frame = Some(block.start_frame);
+            self.time_pending_source_sequence = block.sequence;
+            self.time_publish_peaks.fill(0.0);
+        }
+        for (published, block_peak) in self
+            .time_publish_peaks
+            .iter_mut()
+            .zip(&self.time_block_peaks)
+        {
+            *published = published.max(*block_peak);
+        }
+        self.time_pending_samples.extend_from_slice(samples);
+        self.time_pending_frames = self.time_pending_frames.saturating_add(block.frame_count);
+
+        if self.time_pending_frames >= self.time_publish_interval_frames {
+            self.publish_pending_time_domain();
+        }
+    }
+
+    fn publish_pending_time_domain(&mut self) {
+        if self.time_pending_frames == 0 {
+            return;
+        }
+        let channels = self.descriptor.channel_count as usize;
+        let frame_count = self.time_pending_frames;
+        let start_frame = self
+            .time_pending_start_frame
+            .take()
+            .expect("pending time-domain samples have a start frame");
+        let samples = Arc::<[f32]>::from(std::mem::replace(
+            &mut self.time_pending_samples,
+            Vec::with_capacity(self.time_publish_interval_frames * channels),
+        ));
         let chunk = Arc::new(AudioChunk {
-            start_frame: block.start_frame,
-            frame_count: block.frame_count,
-            source_sequence: block.sequence,
+            start_frame,
+            frame_count,
+            source_sequence: self.time_pending_source_sequence,
             discontinuity_before: std::mem::take(&mut self.time_gap_pending),
-            interleaved: Arc::clone(&samples),
+            interleaved: samples,
         });
-        self.time_history_frames = self.time_history_frames.saturating_add(block.frame_count);
+        self.time_pending_frames = 0;
+        self.time_history_frames = self.time_history_frames.saturating_add(frame_count);
         self.time_history.push_back(chunk);
-        let max_frames = self.descriptor.sample_rate_hz as usize * 10;
+        let max_frames = self.descriptor.sample_rate_hz as usize * TIME_HISTORY_SECONDS;
         while self.time_history_frames > max_frames && self.time_history.len() > 1 {
             if let Some(oldest) = self.time_history.pop_front() {
                 self.time_history_frames =
@@ -1072,17 +1134,16 @@ impl Processor {
             }
         }
 
-        let (momentary_lufs, sample_peaks) = self.level_analyzer.process(&samples);
         self.time_result_version = self.time_result_version.wrapping_add(1);
-        let processed_through_frame = block.start_frame.saturating_add(block.frame_count as u64);
+        let processed_through_frame = start_frame.saturating_add(frame_count as u64);
         self.time_slot.store(Some(Arc::new(TimeDomainSnapshot {
             descriptor: Arc::clone(&self.descriptor),
             result_version: self.time_result_version,
             processed_through_frame,
             discontinuity_count: self.discontinuity_count,
             chunks: self.time_history.iter().cloned().collect(),
-            momentary_lufs: momentary_lufs.into(),
-            sample_peaks: sample_peaks.into(),
+            momentary_lufs: Arc::from(self.time_lufs.clone()),
+            sample_peaks: Arc::from(self.time_publish_peaks.clone()),
         })));
     }
 
@@ -1803,11 +1864,11 @@ mod tests {
         );
     }
     #[test]
-    fn time_domain_history_and_levels_advance_without_ui_reads() {
-        let (mut capture, dataflow, _) = fixture(2, 8, 64);
+    fn time_domain_publication_is_bounded_and_advances_without_ui_reads() {
+        let (mut capture, dataflow, telemetry) = fixture(2, 128, 16);
         let reader = dataflow.time_domain_reader();
-        let mut stereo = Vec::with_capacity(256);
-        for frame in 0..128 {
+        let mut stereo = Vec::with_capacity(1_600 * 2);
+        for frame in 0..1_600 {
             let phase = 2.0 * PI * 1_000.0 * frame as f32 / 48_000.0;
             stereo.extend_from_slice(&[phase.sin() * 0.5, phase.cos() * 0.25]);
         }
@@ -1816,7 +1877,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let snapshot = loop {
             if let Some(snapshot) = reader.latest()
-                && snapshot.processed_through_frame >= 128
+                && snapshot.processed_through_frame >= 1_600
             {
                 break snapshot;
             }
@@ -1827,11 +1888,13 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         };
 
-        assert_eq!(snapshot.chunks.len(), 2);
+        assert_eq!(snapshot.result_version, 1);
+        assert_eq!(snapshot.chunks.len(), 1);
         assert_eq!(snapshot.chunks[0].start_frame, 0);
-        assert_eq!(snapshot.chunks[1].start_frame, 64);
+        assert_eq!(snapshot.chunks[0].frame_count, 1_600);
         assert_eq!(snapshot.momentary_lufs.len(), 2);
         assert!(snapshot.momentary_lufs.iter().all(|level| *level > -60.0));
         assert!(snapshot.sample_peaks[0] > snapshot.sample_peaks[1]);
+        assert_eq!(telemetry.snapshot().dropped_blocks, 0);
     }
 }

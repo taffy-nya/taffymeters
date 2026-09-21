@@ -22,17 +22,20 @@ impl LevelAnalyzer {
         }
     }
 
-    pub(super) fn process(&mut self, interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    pub(super) fn process(&mut self, interleaved: &[f32], lufs: &mut [f32], peaks: &mut [f32]) {
         let channel_count = self.channels.len();
-        let mut peaks = vec![0.0_f32; channel_count];
+        assert_eq!(lufs.len(), channel_count);
+        assert_eq!(peaks.len(), channel_count);
+        peaks.fill(0.0);
         for frame in interleaved.chunks_exact(channel_count) {
             for (index, (&sample, channel)) in frame.iter().zip(&mut self.channels).enumerate() {
                 peaks[index] = peaks[index].max(sample.abs());
                 channel.process(sample);
             }
         }
-        let lufs = self.channels.iter().map(ChannelLevel::lufs).collect();
-        (lufs, peaks)
+        for (output, channel) in lufs.iter_mut().zip(&self.channels) {
+            *output = channel.lufs();
+        }
     }
 }
 
