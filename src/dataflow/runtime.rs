@@ -5,7 +5,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        mpsc::{Receiver, Sender, TryRecvError, channel, sync_channel},
+        mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle, Thread},
     time::Duration,
@@ -23,6 +23,9 @@ use super::{
     fft::StreamingFft,
     processing::{HistoryState, PeakState, SmoothState, apply_center_and_gain, apply_tilt},
 };
+
+const CONTROL_QUEUE_CAPACITY: usize = 16;
+const COMMAND_BUDGET_PER_TICK: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeMetrics {
@@ -64,7 +67,7 @@ pub struct SpectrumController {
 
 struct SubscriptionControl {
     id: u64,
-    commands: Sender<Command>,
+    commands: SyncSender<Command>,
     worker: Thread,
     request: Mutex<SpectrumRequest>,
     requested_channel: Arc<AtomicU32>,
@@ -107,7 +110,7 @@ pub(crate) struct SpectrumDataflow {
 
 #[derive(Clone)]
 struct RuntimeController {
-    commands: Sender<Command>,
+    commands: SyncSender<Command>,
     worker: Thread,
     next_subscription_id: Arc<AtomicU64>,
     descriptor: Arc<AudioDescriptor>,
@@ -134,6 +137,7 @@ enum Command {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlError {
+    Busy,
     Stopped,
     SubscriptionClosed,
     SharedBindingMismatch(SharedAnalysisId),
@@ -143,6 +147,7 @@ pub enum ControlError {
 impl fmt::Display for ControlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Busy => f.write_str("dataflow control queue is busy"),
             Self::Stopped => f.write_str("dataflow worker has stopped"),
             Self::SubscriptionClosed => f.write_str("spectrum subscription is closed"),
             Self::SharedBindingMismatch(id) => {
@@ -256,12 +261,14 @@ impl SpectrumController {
     }
 
     fn send(&self, command: Command) -> Result<(), ControlError> {
-        self.inner
-            .commands
-            .send(command)
-            .map_err(|_| ControlError::Stopped)?;
-        self.inner.worker.unpark();
-        Ok(())
+        match self.inner.commands.try_send(command) {
+            Ok(()) => {
+                self.inner.worker.unpark();
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(ControlError::Busy),
+            Err(TrySendError::Disconnected(_)) => Err(ControlError::Stopped),
+        }
     }
 }
 
@@ -271,7 +278,7 @@ impl SpectrumDataflow {
         mut endpoint: ProcessingEndpoint,
         telemetry: Arc<SourceTelemetry>,
     ) -> Self {
-        let (command_sender, command_receiver) = channel();
+        let (command_sender, command_receiver) = sync_channel(CONTROL_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let metrics = Arc::new(Metrics::default());
@@ -383,11 +390,14 @@ impl RuntimeController {
     }
 
     fn send(&self, command: Command) -> Result<(), ControlError> {
-        self.commands
-            .send(command)
-            .map_err(|_| ControlError::Stopped)?;
-        self.worker.unpark();
-        Ok(())
+        match self.commands.try_send(command) {
+            Ok(()) => {
+                self.worker.unpark();
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(ControlError::Busy),
+            Err(TrySendError::Disconnected(_)) => Err(ControlError::Stopped),
+        }
     }
 }
 
@@ -862,13 +872,22 @@ impl Processor {
             entry.2 |= subscription.should_evaluate();
         }
         self.pipelines.retain(|key, _| desired.contains_key(key));
+        let current_frontier = self.current_frontier;
         for (key, (request, subscribers, active)) in desired {
-            let pipeline = self
-                .pipelines
-                .entry(key)
-                .or_insert_with(|| Pipeline::new(request));
-            pipeline.subscribers = subscribers;
-            pipeline.active = active;
+            if let Some(pipeline) = self.pipelines.get_mut(&key) {
+                if !pipeline.active && active && request.is_stateful() {
+                    pipeline.mark_gap();
+                    pipeline.minimum_frontier =
+                        current_frontier.saturating_add(key.fft.window_size as u64);
+                }
+                pipeline.subscribers = subscribers;
+                pipeline.active = active;
+            } else {
+                let mut pipeline = Pipeline::new(request);
+                pipeline.subscribers = subscribers;
+                pipeline.active = active;
+                self.pipelines.insert(key, pipeline);
+            }
         }
         let desired_fft: HashSet<_> = self
             .pipelines
@@ -1048,7 +1067,8 @@ fn run_worker(
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Acquire) {
-        loop {
+        let mut command_budget_exhausted = true;
+        for _ in 0..COMMAND_BUDGET_PER_TICK {
             match commands.try_recv() {
                 Ok(Command::Add {
                     subscription,
@@ -1066,14 +1086,17 @@ fn run_worker(
                 Ok(Command::ResetState(id)) => processor.reset_state(id),
                 Ok(Command::Remove(id)) => processor.remove_subscription(id),
                 Ok(Command::ResumeBoundary(continuity)) => processor.resume_at(continuity),
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    command_budget_exhausted = false;
+                    break;
+                }
                 Err(TryRecvError::Disconnected) => return,
             }
         }
         if let Some(block) = endpoint.try_pop() {
             processor.process_block(&block);
             endpoint.recycle(block);
-        } else {
+        } else if !command_budget_exhausted {
             thread::park_timeout(Duration::from_millis(5));
         }
     }
@@ -1159,6 +1182,16 @@ mod tests {
                 "metrics did not settle: {actual:?}"
             );
             thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn retry_busy(mut operation: impl FnMut() -> Result<(), ControlError>) {
+        loop {
+            match operation() {
+                Ok(()) => return,
+                Err(ControlError::Busy) => thread::yield_now(),
+                Err(error) => panic!("unexpected control error: {error}"),
+            }
         }
     }
 
@@ -1356,7 +1389,7 @@ mod tests {
             } else {
                 FftConfig::new(64, 32, -160.0).unwrap()
             };
-            subscription.controller().set_fft(fft).unwrap();
+            retry_busy(|| subscription.controller().set_fft(fft));
         }
         wait_metrics(
             &dataflow,
@@ -1558,21 +1591,19 @@ mod tests {
             scope.spawn(|| {
                 for _ in 0..ROUNDS {
                     start.wait();
-                    channel_controller
-                        .set_channel(ChannelSelection::Right)
-                        .unwrap();
+                    retry_busy(|| channel_controller.set_channel(ChannelSelection::Right));
                     finish.wait();
                 }
             });
             scope.spawn(|| {
                 for _ in 0..ROUNDS {
                     start.wait();
-                    fft_controller.set_fft(target_fft).unwrap();
+                    retry_busy(|| fft_controller.set_fft(target_fft));
                     finish.wait();
                 }
             });
             for _ in 0..ROUNDS {
-                controller.update_request(base).unwrap();
+                retry_busy(|| controller.update_request(base));
                 start.wait();
                 finish.wait();
                 let request = controller.request().unwrap();
@@ -1609,5 +1640,96 @@ mod tests {
         assert_eq!(current.processed_through_frame, 64);
         assert_eq!(current.history.len(), 3);
         assert!(Arc::ptr_eq(&existing.history, &current.history));
+    }
+
+    #[test]
+    fn sustained_control_load_keeps_audio_processing_fair_and_bounded() {
+        let (mut capture, dataflow, _) = fixture(1, 128, 32);
+        let mut request = SpectrumRequest::new(
+            ChannelSelection::MonoAverage,
+            FftConfig::new(32, 16, -160.0).unwrap(),
+        );
+        request.history = Some(HistoryConfig::new(1.0).unwrap());
+        let subscription = dataflow.subscribe(request).unwrap();
+        let controller = subscription.controller();
+        let stop = AtomicBool::new(false);
+        let busy_count = AtomicUsize::new(0);
+        let processed = thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut visible = false;
+                while !stop.load(Ordering::Acquire) {
+                    match controller.set_visible(visible) {
+                        Ok(()) => visible = !visible,
+                        Err(ControlError::Busy) => {
+                            busy_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => panic!("unexpected control error: {error}"),
+                    }
+                }
+            });
+            capture.write(&mono_tone(4_096, 3_000.0));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let processed = loop {
+                if let Some(snapshot) = subscription.reader().latest()
+                    && snapshot.processed_through_frame >= 4_096
+                {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::yield_now();
+            };
+            stop.store(true, Ordering::Release);
+            processed
+        });
+        assert!(processed, "control traffic starved queued audio blocks");
+        assert!(
+            busy_count.load(Ordering::Relaxed) > 0,
+            "bounded control queue never applied backpressure"
+        );
+    }
+
+    #[test]
+    fn shared_analysis_reactivation_marks_history_discontinuity() {
+        let (mut capture, dataflow, _) = fixture(1, 8, 128);
+        let mut request = SpectrumRequest::new(
+            ChannelSelection::MonoAverage,
+            FftConfig::new(32, 16, -160.0).unwrap(),
+        );
+        request.history = Some(HistoryConfig::new(1.0).unwrap());
+        let first = dataflow
+            .subscribe_shared(request, SharedAnalysisId(42))
+            .unwrap();
+        capture.write(&mono_tone(64, 3_000.0));
+        let before_pause = wait_for(&first.reader(), 1, 64);
+        assert_eq!(before_pause.history.len(), 3);
+
+        first.controller().set_analysis_paused(true).unwrap();
+        wait_metrics(
+            &dataflow,
+            RuntimeMetrics {
+                subscriptions: 1,
+                pipelines: 1,
+                ..RuntimeMetrics::default()
+            },
+        );
+        let joined = dataflow
+            .subscribe_shared(request, SharedAnalysisId(42))
+            .unwrap();
+        let inherited = joined
+            .reader()
+            .latest()
+            .expect("reactivating subscriber receives retained history");
+        assert_eq!(inherited.processed_through_frame, 64);
+        assert_eq!(inherited.history.len(), 3);
+
+        capture.write(&mono_tone(32, 3_000.0));
+        let reactivated = wait_for(&joined.reader(), 1, 96);
+        assert_eq!(reactivated.history.len(), 4);
+        assert!(
+            reactivated.history.last().unwrap().discontinuity_before,
+            "reactivated shared state must not imply continuous analysis"
+        );
     }
 }
