@@ -2,6 +2,7 @@ mod channel;
 mod fft;
 mod processing;
 mod runtime;
+mod time;
 
 pub use channel::{ChannelError, ChannelSelection};
 pub use fft::{FftConfig, FftMetadata, WindowFunction};

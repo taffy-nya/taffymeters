@@ -9,9 +9,18 @@ use crate::{
     render::{EguiRenderTarget, Point, Rect},
 };
 use eframe::egui;
+
+struct ModuleEntry {
+    id: &'static str,
+    label: &'static str,
+    module: Box<dyn Module>,
+}
+
 pub struct App {
     live: LiveSpectrum,
-    module: Box<dyn Module>,
+    registry: Registry,
+    modules: Vec<ModuleEntry>,
+    active_module: usize,
     selected_channel: ChannelSelection,
     started_at: Instant,
     control_error: Option<String>,
@@ -23,11 +32,27 @@ impl App {
         let selected_channel = reader.requested_channel();
         let mut registry = Registry::default();
         builtins::register(&mut registry)?;
-        let module =
-            registry.create_module(SPECTRUM_MODULE_ID, &ModuleServices { spectrum: reader })?;
+        let services = ModuleServices {
+            spectrum: reader,
+            time_domain: live.time_domain_reader(),
+        };
+        let mut modules = Vec::new();
+        for (id, label) in registry.module_types() {
+            modules.push(ModuleEntry {
+                id,
+                label,
+                module: registry.create_module(id, &services)?,
+            });
+        }
+        let active_module = modules
+            .iter()
+            .position(|entry| entry.id == SPECTRUM_MODULE_ID)
+            .unwrap_or_default();
         Ok(Self {
             live,
-            module,
+            registry,
+            modules,
+            active_module,
             selected_channel,
             started_at: Instant::now(),
             control_error: None,
@@ -38,6 +63,9 @@ impl App {
         match self.live.set_channel(channel) {
             Ok(()) => {
                 self.selected_channel = channel;
+                for entry in &mut self.modules {
+                    entry.module.set_channel(channel);
+                }
                 self.control_error = None;
             }
             Err(error) => self.control_error = Some(error.to_string()),
@@ -78,12 +106,59 @@ impl App {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
+            ui.label("Module:");
+            let mut selected_module = self.active_module;
+            egui::ComboBox::from_id_salt("module-selector")
+                .selected_text(self.modules[self.active_module].label)
+                .show_ui(ui, |ui| {
+                    for (index, entry) in self.modules.iter().enumerate() {
+                        ui.selectable_value(&mut selected_module, index, entry.label);
+                    }
+                });
+            self.active_module = selected_module;
+
+            let style_options = self.modules[self.active_module].module.style_options();
+            if !style_options.is_empty() {
+                ui.separator();
+                ui.label("Style:");
+                let active_style = self.modules[self.active_module].module.active_style();
+                let active_label = style_options
+                    .iter()
+                    .find(|option| Some(option.id) == active_style)
+                    .map_or("Select", |option| option.label);
+                let mut selected_style = None;
+                egui::ComboBox::from_id_salt("style-selector")
+                    .selected_text(active_label)
+                    .show_ui(ui, |ui| {
+                        for option in style_options {
+                            if ui
+                                .selectable_label(active_style == Some(option.id), option.label)
+                                .clicked()
+                            {
+                                selected_style = Some(option.id);
+                            }
+                        }
+                    });
+                if let Some(style_id) = selected_style
+                    && let Err(error) = self.modules[self.active_module]
+                        .module
+                        .set_style(style_id, &self.registry)
+                {
+                    self.control_error = Some(error.to_string());
+                }
+                if ui.button("Clear visual state").clicked() {
+                    self.modules[self.active_module].module.clear_visual_state();
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Channel:");
             let descriptor = self.live.reader().descriptor().clone();
             for (index, channel) in channel_options(&descriptor) {
                 let label = match channel {
                     ChannelSelection::Left => "1: Left".to_owned(),
                     ChannelSelection::Right => "2: Right".to_owned(),
-                    ChannelSelection::Discrete(_) => format!("{}: Ch {index}", index + 1),
+                    ChannelSelection::Discrete(_) => format!("{}: Ch {}", index + 1, index + 1),
                     ChannelSelection::MonoAverage => unreachable!(),
                 };
                 if ui
@@ -156,10 +231,21 @@ impl eframe::App for App {
                         y: area.max.y,
                     },
                 };
+                let pointer = ui
+                    .input(|input| input.pointer.hover_pos())
+                    .map(|position| Point {
+                        x: position.x,
+                        y: position.y,
+                    });
+                let scroll_delta_y = ui.input(|input| input.smooth_scroll_delta.y);
+                let zoom_delta = ui.input(egui::InputState::zoom_delta);
                 let mut renderer = EguiRenderTarget::new(ui.painter_at(area));
-                let response = self.module.draw(ModuleFrame {
+                let response = self.modules[self.active_module].module.draw(ModuleFrame {
                     rect,
                     monotonic_time: self.started_at.elapsed(),
+                    pointer,
+                    scroll_delta_y,
+                    zoom_delta,
                     renderer: &mut renderer,
                 });
                 if let Some(delay) = response.repaint_after {

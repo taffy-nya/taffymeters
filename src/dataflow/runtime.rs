@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
     sync::{
@@ -15,13 +15,17 @@ use arc_swap::ArcSwapOption;
 
 use crate::{
     audio::{AudioBlock, AudioDescriptor, ProcessingEndpoint, SourceTelemetry},
-    snapshot::{SpectrumHistoryFrame, SpectrumReader, SpectrumSnapshotSet},
+    snapshot::{
+        AudioChunk, SpectrumHistoryFrame, SpectrumReader, SpectrumSnapshotSet, TimeDomainReader,
+        TimeDomainSnapshot,
+    },
 };
 
 use super::{
     ChannelError, ChannelSelection, FftConfig, RequestError, SharedAnalysisId, SpectrumRequest,
     fft::StreamingFft,
     processing::{HistoryState, PeakState, SmoothState, apply_center_and_gain, apply_tilt},
+    time::LevelAnalyzer,
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 16;
@@ -116,6 +120,7 @@ struct RuntimeController {
     descriptor: Arc<AudioDescriptor>,
     telemetry: Arc<SourceTelemetry>,
     metrics: Arc<Metrics>,
+    time_domain: TimeDomainReader,
 }
 
 enum Command {
@@ -284,10 +289,15 @@ impl SpectrumDataflow {
         let metrics = Arc::new(Metrics::default());
         let worker_metrics = Arc::clone(&metrics);
         let worker_descriptor = Arc::clone(&descriptor);
+        let time_slot = Arc::new(ArcSwapOption::<TimeDomainSnapshot>::empty());
+        let worker_time_slot = Arc::clone(&time_slot);
+        let time_domain =
+            TimeDomainReader::new(time_slot, Arc::clone(&descriptor), Arc::clone(&telemetry));
         let worker = thread::Builder::new()
             .name("taffymeters-dataflow".to_owned())
             .spawn(move || {
-                let mut processor = Processor::new(worker_descriptor, worker_metrics);
+                let mut processor =
+                    Processor::new(worker_descriptor, worker_metrics, worker_time_slot);
                 run_worker(&mut processor, &mut endpoint, command_receiver, worker_stop);
             })
             .expect("failed to create dataflow worker");
@@ -298,6 +308,7 @@ impl SpectrumDataflow {
             descriptor,
             telemetry,
             metrics,
+            time_domain,
         };
         Self {
             runtime,
@@ -331,6 +342,10 @@ impl SpectrumDataflow {
 
     pub(crate) fn worker_thread(&self) -> Thread {
         self.runtime.worker.clone()
+    }
+
+    pub(crate) fn time_domain_reader(&self) -> TimeDomainReader {
+        self.runtime.time_domain.clone()
     }
 }
 
@@ -678,10 +693,22 @@ struct Processor {
     minimum_continuity: u64,
     active_continuity: u64,
     current_frontier: u64,
+    time_slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
+    time_history: VecDeque<Arc<AudioChunk>>,
+    time_history_frames: usize,
+    time_result_version: u64,
+    time_gap_pending: bool,
+    level_analyzer: LevelAnalyzer,
 }
 
 impl Processor {
-    fn new(descriptor: Arc<AudioDescriptor>, metrics: Arc<Metrics>) -> Self {
+    fn new(
+        descriptor: Arc<AudioDescriptor>,
+        metrics: Arc<Metrics>,
+        time_slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
+    ) -> Self {
+        let channel_count = descriptor.channel_count as usize;
+        let level_analyzer = LevelAnalyzer::new(descriptor.sample_rate_hz, channel_count);
         Self {
             descriptor,
             subscriptions: HashMap::new(),
@@ -698,6 +725,12 @@ impl Processor {
             minimum_continuity: 0,
             active_continuity: 0,
             current_frontier: 0,
+            time_slot,
+            time_history: VecDeque::new(),
+            time_history_frames: 0,
+            time_result_version: 0,
+            time_gap_pending: false,
+            level_analyzer,
         }
     }
 
@@ -957,6 +990,8 @@ impl Processor {
         }
         self.expected_sequence = None;
         self.expected_start_frame = None;
+        self.time_gap_pending = true;
+        self.level_analyzer.reset();
         self.discontinuity_count = self.discontinuity_count.wrapping_add(1);
     }
 
@@ -984,6 +1019,7 @@ impl Processor {
         self.expected_sequence = Some(block.sequence.wrapping_add(1));
         self.expected_start_frame =
             Some(block.start_frame.saturating_add(block.frame_count as u64));
+        self.publish_time_domain(block);
 
         let channels = self.descriptor.channel_count as usize;
         self.pending.clear();
@@ -1014,6 +1050,40 @@ impl Processor {
             self.publish(evaluation);
         }
         self.pending = pending;
+    }
+
+    fn publish_time_domain(&mut self, block: &AudioBlock) {
+        let channels = self.descriptor.channel_count as usize;
+        let samples = Arc::<[f32]>::from(block.samples(channels));
+        let chunk = Arc::new(AudioChunk {
+            start_frame: block.start_frame,
+            frame_count: block.frame_count,
+            source_sequence: block.sequence,
+            discontinuity_before: std::mem::take(&mut self.time_gap_pending),
+            interleaved: Arc::clone(&samples),
+        });
+        self.time_history_frames = self.time_history_frames.saturating_add(block.frame_count);
+        self.time_history.push_back(chunk);
+        let max_frames = self.descriptor.sample_rate_hz as usize * 10;
+        while self.time_history_frames > max_frames && self.time_history.len() > 1 {
+            if let Some(oldest) = self.time_history.pop_front() {
+                self.time_history_frames =
+                    self.time_history_frames.saturating_sub(oldest.frame_count);
+            }
+        }
+
+        let (momentary_lufs, sample_peaks) = self.level_analyzer.process(&samples);
+        self.time_result_version = self.time_result_version.wrapping_add(1);
+        let processed_through_frame = block.start_frame.saturating_add(block.frame_count as u64);
+        self.time_slot.store(Some(Arc::new(TimeDomainSnapshot {
+            descriptor: Arc::clone(&self.descriptor),
+            result_version: self.time_result_version,
+            processed_through_frame,
+            discontinuity_count: self.discontinuity_count,
+            chunks: self.time_history.iter().cloned().collect(),
+            momentary_lufs: momentary_lufs.into(),
+            sample_peaks: sample_peaks.into(),
+        })));
     }
 
     fn publish(&mut self, evaluation: Evaluation) {
@@ -1731,5 +1801,37 @@ mod tests {
             reactivated.history.last().unwrap().discontinuity_before,
             "reactivated shared state must not imply continuous analysis"
         );
+    }
+    #[test]
+    fn time_domain_history_and_levels_advance_without_ui_reads() {
+        let (mut capture, dataflow, _) = fixture(2, 8, 64);
+        let reader = dataflow.time_domain_reader();
+        let mut stereo = Vec::with_capacity(256);
+        for frame in 0..128 {
+            let phase = 2.0 * PI * 1_000.0 * frame as f32 / 48_000.0;
+            stereo.extend_from_slice(&[phase.sin() * 0.5, phase.cos() * 0.25]);
+        }
+        capture.write(&stereo);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let snapshot = loop {
+            if let Some(snapshot) = reader.latest()
+                && snapshot.processed_through_frame >= 128
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for time-domain history"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+
+        assert_eq!(snapshot.chunks.len(), 2);
+        assert_eq!(snapshot.chunks[0].start_frame, 0);
+        assert_eq!(snapshot.chunks[1].start_frame, 64);
+        assert_eq!(snapshot.momentary_lufs.len(), 2);
+        assert!(snapshot.momentary_lufs.iter().all(|level| *level > -60.0));
+        assert!(snapshot.sample_peaks[0] > snapshot.sample_peaks[1]);
     }
 }

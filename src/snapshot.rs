@@ -9,6 +9,59 @@ use crate::audio::{AudioDescriptor, SourceStatus};
 use crate::dataflow::{ChannelError, ChannelSelection, FftMetadata};
 
 #[derive(Clone, Debug)]
+pub struct AudioChunk {
+    pub start_frame: u64,
+    pub frame_count: usize,
+    pub source_sequence: u64,
+    pub discontinuity_before: bool,
+    pub interleaved: Arc<[f32]>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TimeDomainSnapshot {
+    pub descriptor: Arc<AudioDescriptor>,
+    pub result_version: u64,
+    pub processed_through_frame: u64,
+    pub discontinuity_count: u64,
+    pub chunks: Arc<[Arc<AudioChunk>]>,
+    pub momentary_lufs: Arc<[f32]>,
+    pub sample_peaks: Arc<[f32]>,
+}
+
+#[derive(Clone)]
+pub struct TimeDomainReader {
+    slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
+    descriptor: Arc<AudioDescriptor>,
+    telemetry: Arc<crate::audio::SourceTelemetry>,
+}
+
+impl TimeDomainReader {
+    pub(crate) fn new(
+        slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
+        descriptor: Arc<AudioDescriptor>,
+        telemetry: Arc<crate::audio::SourceTelemetry>,
+    ) -> Self {
+        Self {
+            slot,
+            descriptor,
+            telemetry,
+        }
+    }
+
+    pub fn latest(&self) -> Option<Arc<TimeDomainSnapshot>> {
+        self.slot.load_full()
+    }
+
+    pub fn descriptor(&self) -> &Arc<AudioDescriptor> {
+        &self.descriptor
+    }
+
+    pub fn source_status(&self) -> SourceStatus {
+        self.telemetry.snapshot()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct SpectrumHistoryFrame {
     pub processed_through_frame: u64,
     pub discontinuity_before: bool,

@@ -6,6 +6,7 @@ pub mod audio;
 pub mod builtins;
 pub mod dataflow;
 pub mod module;
+pub mod plotting;
 pub mod render;
 pub mod snapshot;
 
@@ -48,7 +49,7 @@ fn main() -> eframe::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: low_power_wgpu_options(),
         viewport: egui::ViewportBuilder::default()
-            .with_title("Taffymeters Phase 2")
+            .with_title("Taffymeters Phase 3")
             .with_inner_size([900.0, 420.0])
             .with_min_inner_size([480.0, 240.0])
             .with_always_on_top(),

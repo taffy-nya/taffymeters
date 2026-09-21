@@ -3,12 +3,12 @@ use std::{error::Error, fmt, sync::Arc};
 use crate::{
     audio::{OpenSystemInput, SourceState, SourceTelemetry, SystemCapture, create_block_transport},
     dataflow::{
-        ChannelSelection, ControlError, FftConfig, RuntimeMetrics, SharedAnalysisId,
-        SpectrumController, SpectrumDataflow, SpectrumRequest, SpectrumSubscription,
+        ChannelSelection, ControlError, FftConfig, HistoryConfig, PeakConfig, RuntimeMetrics,
+        SharedAnalysisId, SpectrumController, SpectrumDataflow, SpectrumRequest,
+        SpectrumSubscription,
     },
-    snapshot::SpectrumReader,
+    snapshot::{SpectrumReader, TimeDomainReader},
 };
-
 #[derive(Clone, Copy, Debug)]
 pub struct LiveSpectrumConfig {
     pub fft: FftConfig,
@@ -33,6 +33,7 @@ pub struct LiveSpectrum {
     dataflow: Option<SpectrumDataflow>,
     primary: Option<SpectrumSubscription>,
     reader: SpectrumReader,
+    time_domain: TimeDomainReader,
     controller: SpectrumController,
     telemetry: Arc<SourceTelemetry>,
     paused: bool,
@@ -75,11 +76,15 @@ impl LiveSpectrum {
             processing_endpoint,
             Arc::clone(&telemetry),
         );
+        let mut request = SpectrumRequest::new(config.initial_channel, config.fft);
+        request.peak = Some(PeakConfig::new(1_000.0, 18.0).expect("default peak is valid"));
+        request.history = Some(HistoryConfig::new(8.0).expect("default spectrum history is valid"));
         let primary = dataflow
-            .subscribe(SpectrumRequest::new(config.initial_channel, config.fft))
+            .subscribe(request)
             .map_err(LiveSpectrumError::Control)?;
         let controller = primary.controller();
         let reader = primary.reader();
+        let time_domain = dataflow.time_domain_reader();
         let mut capture_endpoint = capture_endpoint;
         capture_endpoint.set_worker(dataflow.worker_thread());
         let capture = input
@@ -92,6 +97,7 @@ impl LiveSpectrum {
             primary: Some(primary),
             reader,
             controller,
+            time_domain,
             telemetry,
             paused: false,
         })
@@ -103,6 +109,10 @@ impl LiveSpectrum {
 
     pub fn controller(&self) -> SpectrumController {
         self.controller.clone()
+    }
+
+    pub fn time_domain_reader(&self) -> TimeDomainReader {
+        self.time_domain.clone()
     }
 
     pub fn set_channel(&self, channel: ChannelSelection) -> Result<(), LiveSpectrumError> {

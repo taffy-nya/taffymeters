@@ -1,17 +1,23 @@
 use std::{collections::HashMap, error::Error, fmt, sync::Arc, time::Duration};
 
 use crate::{
+    dataflow::ChannelSelection,
+    plotting::SpectrumCoordinates,
     render::{Point, Rect, RenderTarget},
-    snapshot::{SpectrumReader, SpectrumSnapshotSet},
+    snapshot::{SpectrumReader, SpectrumSnapshotSet, TimeDomainReader, TimeDomainSnapshot},
 };
 
 pub struct ModuleServices {
     pub spectrum: SpectrumReader,
+    pub time_domain: TimeDomainReader,
 }
 
 pub struct ModuleFrame<'a> {
     pub rect: Rect,
     pub monotonic_time: Duration,
+    pub pointer: Option<Point>,
+    pub scroll_delta_y: f32,
+    pub zoom_delta: f32,
     pub renderer: &'a mut dyn RenderTarget,
 }
 
@@ -20,12 +26,35 @@ pub struct ModuleResponse {
     pub repaint_after: Option<Duration>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StyleOption {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
 pub trait Module: Send {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse;
+
+    fn set_channel(&mut self, _channel: ChannelSelection) {}
+
+    fn style_options(&self) -> &'static [StyleOption] {
+        &[]
+    }
+
+    fn active_style(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn set_style(&mut self, _style_id: &str, _registry: &Registry) -> Result<(), RegistryError> {
+        Err(RegistryError::StylesUnsupported)
+    }
+
+    fn clear_visual_state(&mut self) {}
 }
 
 pub trait ModuleFactory: Send + Sync {
     fn type_id(&self) -> &'static str;
+    fn display_name(&self) -> &'static str;
 
     fn create(
         &self,
@@ -43,43 +72,43 @@ pub struct SpectrumStyleContext<'a> {
 
 pub trait SpectrumStyle: Send {
     fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget);
+    fn clear(&mut self) {}
 }
 
 pub trait SpectrumStyleFactory: Send + Sync {
     fn style_id(&self) -> &'static str;
+    fn display_name(&self) -> &'static str;
     fn create(&self) -> Box<dyn SpectrumStyle>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpectrumCoordinates {
-    pub min_frequency_hz: f32,
-    pub max_frequency_hz: f32,
-    pub min_dbfs: f32,
-    pub max_dbfs: f32,
+pub struct OscilloscopeStyleContext<'a> {
+    pub snapshot: &'a TimeDomainSnapshot,
+    pub channel: ChannelSelection,
+    pub rect: Rect,
+    pub y_scale: f32,
+    pub monotonic_time: Duration,
 }
 
-impl SpectrumCoordinates {
-    pub fn point(&self, frequency_hz: f32, dbfs: f32, rect: Rect) -> Point {
-        let frequency = frequency_hz.clamp(self.min_frequency_hz, self.max_frequency_hz);
-        let x_fraction = (frequency / self.min_frequency_hz).ln()
-            / (self.max_frequency_hz / self.min_frequency_hz).ln();
-        let y_fraction = ((dbfs - self.min_dbfs) / (self.max_dbfs - self.min_dbfs)).clamp(0.0, 1.0);
-        Point {
-            x: rect.min.x + x_fraction * rect.width(),
-            y: rect.max.y - y_fraction * rect.height(),
-        }
-    }
+pub trait OscilloscopeStyle: Send {
+    fn draw(
+        &mut self,
+        context: OscilloscopeStyleContext<'_>,
+        renderer: &mut dyn RenderTarget,
+    ) -> ModuleResponse;
+    fn clear(&mut self) {}
+}
 
-    pub fn frequency_at_x(&self, x: f32, rect: Rect) -> f32 {
-        let fraction = ((x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
-        self.min_frequency_hz * (self.max_frequency_hz / self.min_frequency_hz).powf(fraction)
-    }
+pub trait OscilloscopeStyleFactory: Send + Sync {
+    fn style_id(&self) -> &'static str;
+    fn display_name(&self) -> &'static str;
+    fn create(&self) -> Box<dyn OscilloscopeStyle>;
 }
 
 #[derive(Default)]
 pub struct Registry {
     modules: HashMap<String, Arc<dyn ModuleFactory>>,
     spectrum_styles: HashMap<String, Arc<dyn SpectrumStyleFactory>>,
+    oscilloscope_styles: HashMap<String, Arc<dyn OscilloscopeStyleFactory>>,
 }
 
 impl Registry {
@@ -108,6 +137,19 @@ impl Registry {
         Ok(())
     }
 
+    pub fn register_oscilloscope_style(
+        &mut self,
+        factory: impl OscilloscopeStyleFactory + 'static,
+    ) -> Result<(), RegistryError> {
+        let id = factory.style_id();
+        if self.oscilloscope_styles.contains_key(id) {
+            return Err(RegistryError::DuplicateStyle(id.to_owned()));
+        }
+        self.oscilloscope_styles
+            .insert(id.to_owned(), Arc::new(factory));
+        Ok(())
+    }
+
     pub fn create_module(
         &self,
         id: &str,
@@ -119,9 +161,30 @@ impl Registry {
             .create(services, self)
     }
 
+    pub fn module_types(&self) -> Vec<(&'static str, &'static str)> {
+        let mut modules: Vec<_> = self
+            .modules
+            .values()
+            .map(|factory| (factory.type_id(), factory.display_name()))
+            .collect();
+        modules.sort_unstable_by_key(|(_, label)| *label);
+        modules
+    }
+
     pub fn create_spectrum_style(&self, id: &str) -> Result<Box<dyn SpectrumStyle>, RegistryError> {
         Ok(self
             .spectrum_styles
+            .get(id)
+            .ok_or_else(|| RegistryError::UnknownStyle(id.to_owned()))?
+            .create())
+    }
+
+    pub fn create_oscilloscope_style(
+        &self,
+        id: &str,
+    ) -> Result<Box<dyn OscilloscopeStyle>, RegistryError> {
+        Ok(self
+            .oscilloscope_styles
             .get(id)
             .ok_or_else(|| RegistryError::UnknownStyle(id.to_owned()))?
             .create())
@@ -134,44 +197,19 @@ pub enum RegistryError {
     DuplicateStyle(String),
     UnknownModule(String),
     UnknownStyle(String),
+    StylesUnsupported,
 }
 
 impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateModule(id) => write!(f, "module type is already registered: {id}"),
-            Self::DuplicateStyle(id) => write!(f, "spectrum style is already registered: {id}"),
+            Self::DuplicateStyle(id) => write!(f, "visual style is already registered: {id}"),
             Self::UnknownModule(id) => write!(f, "module type is not registered: {id}"),
-            Self::UnknownStyle(id) => write!(f, "spectrum style is not registered: {id}"),
+            Self::UnknownStyle(id) => write!(f, "visual style is not registered: {id}"),
+            Self::StylesUnsupported => f.write_str("module does not support replaceable styles"),
         }
     }
 }
 
 impl Error for RegistryError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn logarithmic_mapping_round_trips_frequency() {
-        let coordinates = SpectrumCoordinates {
-            min_frequency_hz: 20.0,
-            max_frequency_hz: 20_000.0,
-            min_dbfs: -100.0,
-            max_dbfs: 0.0,
-        };
-        let rect = Rect {
-            min: Point { x: 10.0, y: 20.0 },
-            max: Point {
-                x: 1010.0,
-                y: 520.0,
-            },
-        };
-        for frequency in [20.0, 100.0, 1_000.0, 10_000.0, 20_000.0] {
-            let x = coordinates.point(frequency, -40.0, rect).x;
-            let round_trip = coordinates.frequency_at_x(x, rect);
-            assert!((round_trip / frequency - 1.0).abs() < 0.000_01);
-        }
-    }
-}
