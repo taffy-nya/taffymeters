@@ -1,20 +1,24 @@
 use std::{fmt::Write, sync::Arc, time::Duration};
 
 use crate::{
-    audio::SourceState,
+    audio::{SourceReader, SourceState},
+    dataflow::{ChannelSelection, FftConfig, PeakConfig, SpectrumRequest, SpectrumSubscription},
+    extensions::{Registry, RegistryError},
     module::{
-        Module, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices, Registry,
-        RegistryError, SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory, StyleOption,
+        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
+        StyleOption,
     },
     plotting::{FREQUENCY_TICKS_HZ, SpectrumCoordinates, db_ticks},
-    render::{Color, ColoredRect, Point, Rect, RenderTarget, Stroke, TextStyle},
+    render::{Color, ColoredRect, Point, Rect, TextStyle},
     snapshot::{SpectrumReader, SpectrumSnapshotSet},
 };
 
+use super::spectrum_style::{
+    self, BAR_SPECTRUM_STYLE_ID, DEFAULT_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID, SpectrumStyle,
+    SpectrumStyleContext,
+};
+
 pub const SPECTRUM_MODULE_ID: &str = "taffymeters.spectrum";
-pub const DEFAULT_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.line";
-pub const BAR_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.bars";
-pub const PIXEL_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.pixel";
 
 const STYLE_OPTIONS: &[StyleOption] = &[
     StyleOption {
@@ -32,30 +36,32 @@ const STYLE_OPTIONS: &[StyleOption] = &[
 ];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
-    registry.register_spectrum_style(LineSpectrumStyleFactory)?;
-    registry.register_spectrum_style(BarSpectrumStyleFactory)?;
-    registry.register_spectrum_style(PixelSpectrumStyleFactory)?;
+    spectrum_style::register(registry)?;
     registry.register_module(SpectrumModuleFactory)
 }
 
 struct SpectrumModuleFactory;
 
-impl ModuleFactory for SpectrumModuleFactory {
-    fn type_id(&self) -> &'static str {
-        SPECTRUM_MODULE_ID
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Spectrum"
-    }
-
-    fn create(
+impl SpectrumModuleFactory {
+    fn create_instance(
         &self,
         services: &ModuleServices,
         registry: &Registry,
-    ) -> Result<Box<dyn Module>, RegistryError> {
-        Ok(Box::new(SpectrumModule {
-            reader: services.spectrum.clone(),
+    ) -> Result<SpectrumModule, RegistryError> {
+        let mut request = SpectrumRequest::new(ChannelSelection::MonoAverage, FftConfig::default());
+        request.peak = Some(PeakConfig {
+            hold_ms: 1_000.0,
+            decay_db_per_second: 18.0,
+        });
+        let subscription = services
+            .dataflow
+            .subscribe_spectrum(request)
+            .map_err(ModuleError::from)?;
+        let reader = subscription.reader();
+        Ok(SpectrumModule {
+            source: services.source.clone(),
+            subscription,
+            reader,
             style: registry.create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)?,
             style_id: DEFAULT_SPECTRUM_STYLE_ID,
             coordinates: SpectrumCoordinates {
@@ -71,220 +77,31 @@ impl ModuleFactory for SpectrumModuleFactory {
             status_line: String::with_capacity(256),
             hover_line: String::with_capacity(128),
             grid: Vec::with_capacity(24),
-        }))
-    }
-}
-
-struct LineSpectrumStyleFactory;
-
-impl SpectrumStyleFactory for LineSpectrumStyleFactory {
-    fn style_id(&self) -> &'static str {
-        DEFAULT_SPECTRUM_STYLE_ID
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Curve"
-    }
-
-    fn create(&self) -> Box<dyn SpectrumStyle> {
-        Box::new(LineSpectrumStyle {
-            points: Vec::with_capacity(2048),
-            peak_points: Vec::with_capacity(2048),
         })
     }
 }
 
-struct LineSpectrumStyle {
-    points: Vec<Point>,
-    peak_points: Vec<Point>,
-}
-
-impl SpectrumStyle for LineSpectrumStyle {
-    fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget) {
-        spectrum_points(
-            context.snapshot,
-            *context.coordinates,
-            context.rect,
-            &mut self.points,
-            &context.snapshot.spectrum_dbfs,
-        );
-        renderer.polyline(
-            context.rect,
-            &self.points,
-            Stroke {
-                width: 1.6,
-                color: Color::rgb(92, 230, 199),
-            },
-        );
-        if let Some(peak) = &context.snapshot.peak_dbfs {
-            spectrum_points(
-                context.snapshot,
-                *context.coordinates,
-                context.rect,
-                &mut self.peak_points,
-                peak,
-            );
-            renderer.polyline(
-                context.rect,
-                &self.peak_points,
-                Stroke {
-                    width: 1.0,
-                    color: Color::rgba(255, 210, 100, 180),
-                },
-            );
-        }
-    }
-}
-
-struct BarSpectrumStyleFactory;
-
-impl SpectrumStyleFactory for BarSpectrumStyleFactory {
-    fn style_id(&self) -> &'static str {
-        BAR_SPECTRUM_STYLE_ID
+impl ModuleFactory for SpectrumModuleFactory {
+    fn type_id(&self) -> &'static str {
+        SPECTRUM_MODULE_ID
     }
 
     fn display_name(&self) -> &'static str {
-        "Bars"
+        "Spectrum"
     }
 
-    fn create(&self) -> Box<dyn SpectrumStyle> {
-        Box::new(BarSpectrumStyle {
-            bars: Vec::with_capacity(512),
-        })
-    }
-}
-
-struct BarSpectrumStyle {
-    bars: Vec<ColoredRect>,
-}
-
-impl SpectrumStyle for BarSpectrumStyle {
-    fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget) {
-        self.bars.clear();
-        let width = context.rect.width().max(1.0);
-        let bar_count = (width / 6.0).floor().max(1.0) as usize;
-        let range = context.coordinates.visible_bin_range(
-            context.snapshot.fft.bin_hz,
-            context.snapshot.spectrum_dbfs.len(),
-        );
-        for bar in 0..bar_count {
-            let x0 = context.rect.min.x + bar as f32 * width / bar_count as f32;
-            let x1 = context.rect.min.x + (bar + 1) as f32 * width / bar_count as f32;
-            let f0 = context.coordinates.frequency_at_x(x0, context.rect);
-            let f1 = context.coordinates.frequency_at_x(x1, context.rect);
-            let first = ((f0 / context.snapshot.fft.bin_hz).floor() as usize).max(range.start);
-            let end = ((f1 / context.snapshot.fft.bin_hz).ceil() as usize)
-                .saturating_add(1)
-                .min(range.end);
-            let Some(dbfs) = context.snapshot.spectrum_dbfs[first.min(end)..end]
-                .iter()
-                .copied()
-                .max_by(f32::total_cmp)
-            else {
-                continue;
-            };
-            self.bars.push(ColoredRect {
-                rect: Rect {
-                    min: Point {
-                        x: x0 + 0.75,
-                        y: context.coordinates.y_for_dbfs(dbfs, context.rect),
-                    },
-                    max: Point {
-                        x: (x1 - 0.75).max(x0 + 1.0),
-                        y: context.rect.max.y,
-                    },
-                },
-                color: Color::rgb(100, 190, 255),
-            });
-        }
-        renderer.fill_rects(context.rect, &self.bars);
-    }
-}
-
-struct PixelSpectrumStyleFactory;
-
-impl SpectrumStyleFactory for PixelSpectrumStyleFactory {
-    fn style_id(&self) -> &'static str {
-        PIXEL_SPECTRUM_STYLE_ID
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Pixel"
-    }
-
-    fn create(&self) -> Box<dyn SpectrumStyle> {
-        Box::new(PixelSpectrumStyle {
-            pixels: Vec::with_capacity(2048),
-        })
-    }
-}
-
-struct PixelSpectrumStyle {
-    pixels: Vec<ColoredRect>,
-}
-
-impl SpectrumStyle for PixelSpectrumStyle {
-    fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget) {
-        self.pixels.clear();
-        let cell = 7.0;
-        let columns = (context.rect.width() / cell).floor().max(1.0) as usize;
-        for column in 0..columns {
-            let x = context.rect.min.x + column as f32 * cell;
-            let frequency = context
-                .coordinates
-                .frequency_at_x(x + cell * 0.5, context.rect);
-            let bin = (frequency / context.snapshot.fft.bin_hz).round() as usize;
-            let Some(&dbfs) = context.snapshot.spectrum_dbfs.get(bin) else {
-                continue;
-            };
-            let top = context.coordinates.y_for_dbfs(dbfs, context.rect);
-            let mut y = context.rect.max.y - cell;
-            while y + cell > top {
-                let strength = ((context.rect.max.y - y) / context.rect.height()).clamp(0.0, 1.0);
-                self.pixels.push(ColoredRect {
-                    rect: Rect {
-                        min: Point { x, y },
-                        max: Point {
-                            x: (x + cell - 1.0).min(context.rect.max.x),
-                            y: (y + cell - 1.0).min(context.rect.max.y),
-                        },
-                    },
-                    color: pixel_color(strength),
-                });
-                if y < context.rect.min.y + cell {
-                    break;
-                }
-                y -= cell;
-            }
-        }
-        renderer.fill_rects(context.rect, &self.pixels);
-    }
-}
-
-fn pixel_color(strength: f32) -> Color {
-    if strength < 0.55 {
-        Color::rgb(45, 145, 215)
-    } else if strength < 0.82 {
-        Color::rgb(160, 90, 245)
-    } else {
-        Color::rgb(255, 70, 145)
-    }
-}
-
-fn spectrum_points(
-    snapshot: &SpectrumSnapshotSet,
-    coordinates: SpectrumCoordinates,
-    rect: Rect,
-    output: &mut Vec<Point>,
-    bins: &[f32],
-) {
-    output.clear();
-    for index in coordinates.visible_bin_range(snapshot.fft.bin_hz, bins.len()) {
-        output.push(coordinates.point(index as f32 * snapshot.fft.bin_hz, bins[index], rect));
+    fn create(
+        &self,
+        services: &ModuleServices,
+        registry: &Registry,
+    ) -> Result<Box<dyn Module>, RegistryError> {
+        Ok(Box::new(self.create_instance(services, registry)?))
     }
 }
 
 struct SpectrumModule {
+    source: SourceReader,
+    subscription: SpectrumSubscription,
     reader: SpectrumReader,
     style: Box<dyn SpectrumStyle>,
     style_id: &'static str,
@@ -467,6 +284,16 @@ impl SpectrumModule {
 }
 
 impl Module for SpectrumModule {
+    fn channel(&self) -> Option<ChannelSelection> {
+        Some(self.reader.requested_channel())
+    }
+
+    fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
+        channel.resolve(self.source.descriptor())?;
+        self.subscription.controller().set_channel(channel)?;
+        Ok(())
+    }
+
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
         let requested_channel = self.reader.requested_channel();
         let requested_revision = self.reader.requested_revision();
@@ -509,7 +336,7 @@ impl Module for SpectrumModule {
                 frame.renderer,
             );
             self.draw_hover(&mut frame, plot, &snapshot);
-            let status = self.reader.source_status();
+            let status = self.source.source_status();
             let color = match status.state {
                 SourceState::Running | SourceState::Starting => Color::rgb(190, 205, 215),
                 SourceState::Paused => Color::rgb(255, 210, 100),
@@ -591,15 +418,12 @@ mod tests {
     use super::*;
     use crate::{
         audio::{
-            AudioDescriptor, ChannelLayout, Generation, SourceId, SourceTelemetry,
-            create_block_transport,
+            AudioDescriptor, CaptureEndpoint, ChannelLayout, Generation, SourceId, SourceReader,
+            SourceTelemetry, create_block_transport,
         },
-        dataflow::{
-            ChannelSelection, FftConfig, FftMetadata, SpectrumDataflow, SpectrumRequest,
-            WindowFunction,
-        },
-        module::ModuleServices,
-        render::Circle,
+        dataflow::{Dataflow, DataflowHandle, FftMetadata, WindowFunction},
+        extensions::{Registry, RegistryError},
+        render::{Circle, RenderTarget, Stroke},
     };
 
     #[derive(Default)]
@@ -622,7 +446,47 @@ mod tests {
         fn text(&mut self, _clip: Rect, _position: Point, _text: &str, _style: TextStyle) {}
     }
 
-    fn snapshot() -> SpectrumSnapshotSet {
+    struct RuntimeFixture {
+        capture: CaptureEndpoint,
+        _dataflow: Dataflow,
+        services: ModuleServices,
+    }
+
+    fn runtime_fixture() -> RuntimeFixture {
+        let descriptor = Arc::new(
+            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
+                .unwrap(),
+        );
+        let telemetry = Arc::new(SourceTelemetry::new());
+        let (mut capture, endpoint) =
+            create_block_transport(2, 8, 4096, Arc::clone(&telemetry)).unwrap();
+        let (dataflow, handle) =
+            Dataflow::spawn(Arc::clone(&descriptor), endpoint, Arc::clone(&telemetry));
+        capture.set_worker(dataflow.worker_thread());
+        RuntimeFixture {
+            capture,
+            _dataflow: dataflow,
+            services: ModuleServices {
+                source: SourceReader::new(descriptor, telemetry),
+                dataflow: handle,
+            },
+        }
+    }
+
+    fn wait_for_subscriptions(handle: &DataflowHandle, expected: u64) {
+        for _ in 0..100_000 {
+            if handle.metrics().subscriptions == expected {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!(
+            "dataflow did not reach {expected} active Spectrum subscriptions: {:?}",
+            handle.metrics()
+        );
+    }
+
+    fn spectrum_snapshot() -> SpectrumSnapshotSet {
         SpectrumSnapshotSet {
             descriptor: Arc::new(
                 AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
@@ -652,7 +516,7 @@ mod tests {
 
     #[test]
     fn pixel_style_generates_cells_instead_of_recoloring_the_curve() {
-        let snapshot = snapshot();
+        let snapshot = spectrum_snapshot();
         let coordinates = SpectrumCoordinates {
             min_frequency_hz: 20.0,
             max_frequency_hz: 20_000.0,
@@ -670,7 +534,11 @@ mod tests {
             monotonic_time: Duration::ZERO,
         };
         let mut target = RecordingTarget::default();
-        let mut pixel = PixelSpectrumStyleFactory.create();
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let mut pixel = registry
+            .create_spectrum_style(PIXEL_SPECTRUM_STYLE_ID)
+            .unwrap();
         pixel.draw(context, &mut target);
         assert_eq!(target.polylines, 0);
         assert!(target.rectangles > 100);
@@ -678,39 +546,13 @@ mod tests {
 
     #[test]
     fn peak_label_recomputes_when_frequency_range_changes_without_new_audio() {
-        let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                .unwrap(),
-        );
-        let telemetry = Arc::new(SourceTelemetry::new());
-        let (_capture, processing) =
-            create_block_transport(2, 4, 64, Arc::clone(&telemetry)).unwrap();
-        let dataflow = SpectrumDataflow::spawn(Arc::clone(&descriptor), processing, telemetry);
-        let subscription = dataflow
-            .subscribe(SpectrumRequest::new(
-                ChannelSelection::MonoAverage,
-                FftConfig::new(32, 16, -160.0).unwrap(),
-            ))
+        let fixture = runtime_fixture();
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let mut module = SpectrumModuleFactory
+            .create_instance(&fixture.services, &registry)
             .unwrap();
-        let mut module = SpectrumModule {
-            reader: subscription.reader(),
-            style: LineSpectrumStyleFactory.create(),
-            style_id: DEFAULT_SPECTRUM_STYLE_ID,
-            coordinates: SpectrumCoordinates {
-                min_frequency_hz: 20.0,
-                max_frequency_hz: 20_000.0,
-                min_dbfs: -100.0,
-                max_dbfs: 0.0,
-            },
-            latest: None,
-            label_version: 0,
-            label_frequency_range: None,
-            label: String::new(),
-            status_line: String::new(),
-            hover_line: String::new(),
-            grid: Vec::new(),
-        };
-        let snapshot = snapshot();
+        let snapshot = spectrum_snapshot();
 
         module.update_label(&snapshot);
         let full_range_label = module.label.clone();
@@ -721,36 +563,234 @@ mod tests {
     }
 
     #[test]
-    fn switching_spectrum_style_does_not_rebuild_audio_analysis() {
-        let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                .unwrap(),
-        );
-        let telemetry = Arc::new(SourceTelemetry::new());
-        let (_capture, processing) =
-            create_block_transport(2, 4, 64, Arc::clone(&telemetry)).unwrap();
-        let dataflow = SpectrumDataflow::spawn(Arc::clone(&descriptor), processing, telemetry);
-        let subscription = dataflow
-            .subscribe(SpectrumRequest::new(
-                ChannelSelection::MonoAverage,
-                FftConfig::new(32, 16, -160.0).unwrap(),
-            ))
-            .unwrap();
-        let services = ModuleServices {
-            spectrum: subscription.reader(),
-            time_domain: dataflow.time_domain_reader(),
-        };
+    fn factory_instances_keep_private_state_and_release_only_their_own_analysis() {
+        let mut fixture = runtime_fixture();
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
-        let mut module = registry
-            .create_module(SPECTRUM_MODULE_ID, &services)
+        let factory = SpectrumModuleFactory;
+        let first = factory
+            .create_instance(&fixture.services, &registry)
             .unwrap();
-        let before = dataflow.metrics();
+        let mut second = factory
+            .create_instance(&fixture.services, &registry)
+            .unwrap();
+        wait_for_subscriptions(&fixture.services.dataflow, 2);
 
-        module
+        let shared_prefix = fixture.services.dataflow.metrics();
+        assert_eq!(shared_prefix.fft_branches, 1);
+        assert_eq!(shared_prefix.pipelines, 2);
+        let request = second.subscription.controller().request().unwrap();
+        assert_eq!(
+            request.peak,
+            Some(PeakConfig {
+                hold_ms: 1_000.0,
+                decay_db_per_second: 18.0,
+            })
+        );
+        assert_eq!(request.history, None);
+
+        second
+            .set_channel(ChannelSelection::Right)
+            .expect("stereo source supports Right");
+        assert_eq!(first.channel(), Some(ChannelSelection::MonoAverage));
+        assert_eq!(second.channel(), Some(ChannelSelection::Right));
+        assert!(matches!(
+            second.set_channel(ChannelSelection::Discrete(2)),
+            Err(ModuleError::InvalidChannel(_))
+        ));
+        assert_eq!(second.channel(), Some(ChannelSelection::Right));
+
+        let before_style_change = fixture.services.dataflow.metrics();
+        second.set_style(BAR_SPECTRUM_STYLE_ID, &registry).unwrap();
+        second.clear_visual_state();
+        assert_eq!(fixture.services.dataflow.metrics(), before_style_change);
+
+        let old_reader = first.reader.clone();
+        let second_reader = second.reader.clone();
+        let samples: Vec<f32> = (0..4096).flat_map(|_| [0.05_f32, -0.05]).collect();
+        fixture.capture.write(&samples);
+        let first_revision = old_reader.requested_revision();
+        let second_revision = second_reader.requested_revision();
+        let mut first_snapshot = None;
+        let mut second_snapshot = None;
+        for _ in 0..100_000 {
+            first_snapshot = old_reader.latest().filter(|snapshot| {
+                snapshot.channel == ChannelSelection::MonoAverage
+                    && snapshot.config_revision == first_revision
+                    && snapshot.processed_through_frame >= 4_096
+            });
+            second_snapshot = second_reader.latest().filter(|snapshot| {
+                snapshot.channel == ChannelSelection::Right
+                    && snapshot.config_revision == second_revision
+                    && snapshot.processed_through_frame >= 4_096
+            });
+            if first_snapshot.is_some() && second_snapshot.is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let first_version = first_snapshot
+            .expect("first factory instance should receive its own analysis")
+            .result_version;
+        let second_version = second_snapshot
+            .expect("second factory instance should receive its selected analysis")
+            .result_version;
+
+        drop(first);
+        wait_for_subscriptions(&fixture.services.dataflow, 1);
+        fixture.capture.write(&samples);
+        let mut continued_snapshot = None;
+        for _ in 0..100_000 {
+            continued_snapshot = second_reader.latest().filter(|snapshot| {
+                snapshot.channel == ChannelSelection::Right
+                    && snapshot.config_revision == second_revision
+                    && snapshot.result_version > second_version
+            });
+            if continued_snapshot.is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            continued_snapshot.is_some(),
+            "remaining factory instance must continue receiving its selected analysis"
+        );
+        assert_eq!(fixture.services.dataflow.metrics().subscriptions, 1);
+
+        drop(second);
+        wait_for_subscriptions(&fixture.services.dataflow, 0);
+        let retained_snapshot = old_reader.latest().unwrap();
+        assert_eq!(retained_snapshot.result_version, first_version);
+        let stopped = fixture.services.dataflow.metrics();
+        assert_eq!(stopped.subscriptions, 0);
+        assert_eq!(stopped.fft_branches, 0);
+        assert_eq!(stopped.pipelines, 0);
+        let _ = old_reader.latest();
+        assert_eq!(fixture.services.dataflow.metrics().subscriptions, 0);
+    }
+
+    #[test]
+    fn real_factory_instances_keep_fft_and_visual_state_when_moved() {
+        use std::time::Instant;
+
+        fn at_frontier(
+            reader: &SpectrumReader,
+            revision: u64,
+            frontier: u64,
+        ) -> Arc<SpectrumSnapshotSet> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some(snapshot) = reader.latest()
+                    && snapshot.config_revision == revision
+                    && snapshot.processed_through_frame >= frontier
+                {
+                    return snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "factory instance did not reach {frontier}"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        let mut fixture = runtime_fixture();
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let factory = SpectrumModuleFactory;
+        let first = Box::new(
+            factory
+                .create_instance(&fixture.services, &registry)
+                .unwrap(),
+        );
+        let second = Box::new(
+            factory
+                .create_instance(&fixture.services, &registry)
+                .unwrap(),
+        );
+        let first_reader = first.reader.clone();
+        let second_reader = second.reader.clone();
+        let mut source = vec![first, second];
+        let samples: Vec<f32> = (0..4_096)
+            .flat_map(|frame| {
+                let time = frame as f32 / 48_000.0;
+                [
+                    0.2 * (2.0 * std::f32::consts::PI * 3_000.0 * time).sin(),
+                    0.2 * (2.0 * std::f32::consts::PI * 6_000.0 * time).sin(),
+                ]
+            })
+            .collect();
+        fixture.capture.write(&samples);
+        let first_before = at_frontier(&first_reader, 1, 4_096);
+        at_frontier(&second_reader, 1, 4_096);
+        let shared = fixture.services.dataflow.metrics();
+        assert_eq!(shared.fft_evaluations, 5);
+        assert_eq!(shared.pipeline_evaluations, 10);
+
+        source[1].set_channel(ChannelSelection::Right).unwrap();
+        source[1]
+            .subscription
+            .controller()
+            .set_fft(FftConfig::new(1_024, 256, -160.0).unwrap())
+            .unwrap();
+        source[1]
             .set_style(PIXEL_SPECTRUM_STYLE_ID, &registry)
             .unwrap();
+        let mut destination = vec![source.remove(1)];
+        assert_eq!(fixture.services.dataflow.metrics().subscriptions, 2);
+        assert_eq!(destination[0].active_style(), Some(PIXEL_SPECTRUM_STYLE_ID));
+        assert_eq!(destination[0].channel(), Some(ChannelSelection::Right));
 
-        assert_eq!(dataflow.metrics(), before);
+        fixture.capture.write(&samples);
+        let first_after = at_frontier(&first_reader, 1, 8_192);
+        let second_after = at_frontier(&second_reader, 3, 8_192);
+        assert_eq!(first_after.fft.window_size, 2_048);
+        assert_eq!(second_after.fft.window_size, 1_024);
+        assert!(first_after.result_version > first_before.result_version);
+        assert!(first_after.spectrum_dbfs[128] > first_after.spectrum_dbfs[100]);
+        assert!(second_after.spectrum_dbfs[128] > second_after.spectrum_dbfs[100]);
+        let evaluated = fixture.services.dataflow.metrics().fft_evaluations;
+        let rect = Rect {
+            min: Point { x: 0.0, y: 0.0 },
+            max: Point { x: 800.0, y: 400.0 },
+        };
+        let mut target = RecordingTarget::default();
+        for _ in 0..10 {
+            let _ = first_reader.latest();
+            let _ = second_reader.latest();
+            for module in [&mut *source[0], &mut *destination[0]] {
+                module.draw(ModuleFrame {
+                    rect,
+                    monotonic_time: Duration::from_secs(1),
+                    pointer: None,
+                    scroll_delta_y: 0.0,
+                    zoom_delta: 1.0,
+                    renderer: &mut target,
+                });
+            }
+        }
+        assert!(target.polylines > 0 && target.rectangles > 0);
+        assert_eq!(
+            fixture.services.dataflow.metrics().fft_evaluations,
+            evaluated
+        );
+        drop(destination);
+        wait_for_subscriptions(&fixture.services.dataflow, 1);
+        drop(source);
+        wait_for_subscriptions(&fixture.services.dataflow, 0);
+    }
+
+    #[test]
+    fn factory_failure_after_subscription_releases_the_subscription() {
+        let fixture = runtime_fixture();
+        let registry = Registry::default();
+
+        let error =
+            match ModuleFactory::create(&SpectrumModuleFactory, &fixture.services, &registry) {
+                Ok(_) => panic!("a Spectrum module requires its registered visual style"),
+                Err(error) => error,
+            };
+        assert!(matches!(error, RegistryError::UnknownStyle(_)));
+        wait_for_subscriptions(&fixture.services.dataflow, 0);
     }
 }

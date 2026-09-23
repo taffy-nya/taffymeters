@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use crate::{
-    module::{
-        Module, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices, Registry, RegistryError,
-    },
+    audio::SourceReader,
+    dataflow::{ChannelSelection, FftConfig, HistoryConfig, SpectrumRequest, SpectrumSubscription},
+    extensions::{Registry, RegistryError},
+    module::{Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices},
     plotting::SpectrumCoordinates,
     render::{Color, ColoredRect, Point, Rect},
     snapshot::{SpectrumHistoryFrame, SpectrumReader},
@@ -31,8 +32,19 @@ impl ModuleFactory for SpectrogramFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        let mut request = SpectrumRequest::new(ChannelSelection::MonoAverage, FftConfig::default());
+        request.history = Some(HistoryConfig {
+            duration_seconds: 8.0,
+        });
+        let subscription = services
+            .dataflow
+            .subscribe_spectrum(request)
+            .map_err(ModuleError::from)?;
+        let reader = subscription.reader();
         Ok(Box::new(SpectrogramModule {
-            reader: services.spectrum.clone(),
+            source: services.source.clone(),
+            subscription,
+            reader,
             visible_seconds: 6.0,
             cells: Vec::with_capacity(16_384),
         }))
@@ -40,12 +52,27 @@ impl ModuleFactory for SpectrogramFactory {
 }
 
 struct SpectrogramModule {
+    source: SourceReader,
+    subscription: SpectrumSubscription,
     reader: SpectrumReader,
     visible_seconds: f32,
     cells: Vec<ColoredRect>,
 }
 
 impl Module for SpectrogramModule {
+    fn channel(&self) -> Option<ChannelSelection> {
+        Some(self.reader.requested_channel())
+    }
+
+    fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
+        channel.resolve(self.source.descriptor())?;
+        self.subscription.controller().set_channel(channel)?;
+        Ok(())
+    }
+    fn clear_visual_state(&mut self) {
+        self.cells.clear();
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer

@@ -1,13 +1,20 @@
-use std::{collections::VecDeque, time::Duration};
+use std::time::Duration;
 
 use crate::{
-    dataflow::ChannelSelection,
+    audio::SourceReader,
+    dataflow::{ChannelSelection, TimeDomainRequest, TimeDomainSubscription},
+    extensions::{Registry, RegistryError},
     module::{
-        Module, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices, OscilloscopeStyle,
-        OscilloscopeStyleContext, OscilloscopeStyleFactory, Registry, RegistryError, StyleOption,
+        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
+        StyleOption,
     },
-    render::{Circle, Color, ColoredRect, Point, Rect, RenderTarget, Stroke, TextStyle},
+    render::{Circle, Color, ColoredRect, Point, Rect, Stroke, TextStyle},
     snapshot::TimeDomainReader,
+};
+
+use super::oscilloscope_style::{
+    self, LINE_OSCILLOSCOPE_STYLE_ID, OscilloscopeStyle, OscilloscopeStyleContext,
+    PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
 };
 
 pub const OSCILLOSCOPE_MODULE_ID: &str = "taffymeters.oscilloscope";
@@ -15,8 +22,6 @@ pub const WAVEFORM_MODULE_ID: &str = "taffymeters.waveform";
 pub const STEREOMETER_MODULE_ID: &str = "taffymeters.stereometer";
 pub const LEVEL_METER_MODULE_ID: &str = "taffymeters.level_meter";
 pub const EMPTY_MODULE_ID: &str = "taffymeters.empty";
-pub const LINE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.line";
-pub const PERSISTENCE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.persistence";
 
 const OSCILLOSCOPE_STYLES: &[StyleOption] = &[
     StyleOption {
@@ -30,8 +35,7 @@ const OSCILLOSCOPE_STYLES: &[StyleOption] = &[
 ];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
-    registry.register_oscilloscope_style(LineOscilloscopeStyleFactory)?;
-    registry.register_oscilloscope_style(PersistenceOscilloscopeStyleFactory)?;
+    oscilloscope_style::register(registry)?;
     registry.register_module(OscilloscopeFactory)?;
     registry.register_module(WaveformFactory)?;
     registry.register_module(StereometerFactory)?;
@@ -55,8 +59,15 @@ impl ModuleFactory for OscilloscopeFactory {
         services: &ModuleServices,
         registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        let subscription = services
+            .dataflow
+            .subscribe_time(TimeDomainRequest::Latest)
+            .map_err(ModuleError::from)?;
+        let reader = subscription.reader();
         Ok(Box::new(OscilloscopeModule {
-            reader: services.time_domain.clone(),
+            source: services.source.clone(),
+            _subscription: subscription,
+            reader,
             channel: ChannelSelection::MonoAverage,
             y_scale: 1.0,
             style: registry.create_oscilloscope_style(LINE_OSCILLOSCOPE_STYLE_ID)?,
@@ -66,6 +77,8 @@ impl ModuleFactory for OscilloscopeFactory {
 }
 
 struct OscilloscopeModule {
+    source: SourceReader,
+    _subscription: TimeDomainSubscription,
     reader: TimeDomainReader,
     channel: ChannelSelection,
     y_scale: f32,
@@ -74,9 +87,15 @@ struct OscilloscopeModule {
 }
 
 impl Module for OscilloscopeModule {
-    fn set_channel(&mut self, channel: ChannelSelection) {
+    fn channel(&self) -> Option<ChannelSelection> {
+        Some(self.channel)
+    }
+
+    fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
+        channel.resolve(self.source.descriptor())?;
         self.channel = channel;
         self.style.clear();
+        Ok(())
     }
 
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
@@ -144,161 +163,6 @@ impl Module for OscilloscopeModule {
     }
 }
 
-struct LineOscilloscopeStyleFactory;
-
-impl OscilloscopeStyleFactory for LineOscilloscopeStyleFactory {
-    fn style_id(&self) -> &'static str {
-        LINE_OSCILLOSCOPE_STYLE_ID
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Line"
-    }
-
-    fn create(&self) -> Box<dyn OscilloscopeStyle> {
-        Box::new(LineOscilloscopeStyle {
-            points: Vec::with_capacity(2048),
-        })
-    }
-}
-
-struct LineOscilloscopeStyle {
-    points: Vec<Point>,
-}
-
-impl OscilloscopeStyle for LineOscilloscopeStyle {
-    fn draw(
-        &mut self,
-        context: OscilloscopeStyleContext<'_>,
-        renderer: &mut dyn RenderTarget,
-    ) -> ModuleResponse {
-        build_latest_trace(&context, &mut self.points);
-        renderer.polyline(
-            context.rect,
-            &self.points,
-            Stroke {
-                width: 1.4,
-                color: Color::rgb(100, 220, 255),
-            },
-        );
-        repaint(33)
-    }
-}
-
-struct PersistenceOscilloscopeStyleFactory;
-
-impl OscilloscopeStyleFactory for PersistenceOscilloscopeStyleFactory {
-    fn style_id(&self) -> &'static str {
-        PERSISTENCE_OSCILLOSCOPE_STYLE_ID
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Persistence"
-    }
-
-    fn create(&self) -> Box<dyn OscilloscopeStyle> {
-        Box::new(PersistenceOscilloscopeStyle {
-            traces: VecDeque::with_capacity(24),
-            latest_version: 0,
-            scratch: Vec::with_capacity(2048),
-        })
-    }
-}
-
-struct Trace {
-    captured_at: Duration,
-    points: Vec<Point>,
-}
-
-struct PersistenceOscilloscopeStyle {
-    traces: VecDeque<Trace>,
-    latest_version: u64,
-    scratch: Vec<Point>,
-}
-
-impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
-    fn draw(
-        &mut self,
-        context: OscilloscopeStyleContext<'_>,
-        renderer: &mut dyn RenderTarget,
-    ) -> ModuleResponse {
-        const LIFETIME: Duration = Duration::from_millis(900);
-        while self.traces.front().is_some_and(|trace| {
-            context.monotonic_time.saturating_sub(trace.captured_at) >= LIFETIME
-        }) {
-            self.traces.pop_front();
-        }
-        if context.snapshot.result_version != self.latest_version {
-            self.latest_version = context.snapshot.result_version;
-            build_latest_trace(&context, &mut self.scratch);
-            let points = std::mem::take(&mut self.scratch);
-            self.traces.push_back(Trace {
-                captured_at: context.monotonic_time,
-                points,
-            });
-            if self.traces.len() > 24
-                && let Some(mut oldest) = self.traces.pop_front()
-            {
-                oldest.points.clear();
-                self.scratch = oldest.points;
-            }
-        }
-        for trace in &self.traces {
-            let age = context
-                .monotonic_time
-                .saturating_sub(trace.captured_at)
-                .as_secs_f32();
-            let alpha = ((1.0 - age / LIFETIME.as_secs_f32()).clamp(0.0, 1.0) * 190.0) as u8;
-            renderer.polyline(
-                context.rect,
-                &trace.points,
-                Stroke {
-                    width: 1.3,
-                    color: Color::rgba(100, 230, 255, alpha),
-                },
-            );
-        }
-        if self.traces.is_empty() {
-            ModuleResponse::default()
-        } else {
-            repaint(16)
-        }
-    }
-
-    fn clear(&mut self) {
-        self.traces.clear();
-        self.scratch.clear();
-    }
-}
-
-fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<Point>) {
-    output.clear();
-    let Some(chunk) = context.snapshot.chunks.last() else {
-        return;
-    };
-    let channels = context.snapshot.descriptor.channel_count as usize;
-    let Ok(channel) = context.channel.resolve(&context.snapshot.descriptor) else {
-        return;
-    };
-    let width = context.rect.width().max(1.0) as usize;
-    let step = chunk.frame_count.div_ceil(width).max(1);
-    let count = chunk.frame_count.div_ceil(step);
-    let denominator = count.saturating_sub(1).max(1) as f32;
-    for (index, frame) in chunk
-        .interleaved
-        .chunks_exact(channels)
-        .step_by(step)
-        .enumerate()
-    {
-        let fraction = index as f32 / denominator;
-        let sample = channel.sample(frame).clamp(-1.0, 1.0) * context.y_scale;
-        output.push(Point {
-            x: context.rect.min.x + fraction * context.rect.width(),
-            y: context.rect.center().y - sample * context.rect.height() * 0.5,
-        });
-    }
-}
-
 struct WaveformFactory;
 
 impl ModuleFactory for WaveformFactory {
@@ -315,8 +179,15 @@ impl ModuleFactory for WaveformFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        let subscription = services
+            .dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 10.0 })
+            .map_err(ModuleError::from)?;
+        let reader = subscription.reader();
         Ok(Box::new(WaveformModule {
-            reader: services.time_domain.clone(),
+            source: services.source.clone(),
+            _subscription: subscription,
+            reader,
             channel: ChannelSelection::MonoAverage,
             seconds: 4.0,
             y_scale: 1.0,
@@ -328,6 +199,8 @@ impl ModuleFactory for WaveformFactory {
 }
 
 struct WaveformModule {
+    source: SourceReader,
+    _subscription: TimeDomainSubscription,
     reader: TimeDomainReader,
     channel: ChannelSelection,
     seconds: f32,
@@ -338,8 +211,19 @@ struct WaveformModule {
 }
 
 impl Module for WaveformModule {
-    fn set_channel(&mut self, channel: ChannelSelection) {
+    fn channel(&self) -> Option<ChannelSelection> {
+        Some(self.channel)
+    }
+
+    fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
+        channel.resolve(self.source.descriptor())?;
         self.channel = channel;
+        Ok(())
+    }
+    fn clear_visual_state(&mut self) {
+        self.bars.clear();
+        self.minima.clear();
+        self.maxima.clear();
     }
 
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
@@ -435,8 +319,14 @@ impl ModuleFactory for StereometerFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        let subscription = services
+            .dataflow
+            .subscribe_time(TimeDomainRequest::Latest)
+            .map_err(ModuleError::from)?;
+        let reader = subscription.reader();
         Ok(Box::new(StereometerModule {
-            reader: services.time_domain.clone(),
+            _subscription: subscription,
+            reader,
             scale: 1.0,
             circles: Vec::with_capacity(512),
         }))
@@ -444,6 +334,7 @@ impl ModuleFactory for StereometerFactory {
 }
 
 struct StereometerModule {
+    _subscription: TimeDomainSubscription,
     reader: TimeDomainReader,
     scale: f32,
     circles: Vec<Circle>,
@@ -528,6 +419,9 @@ impl Module for StereometerModule {
         frame.renderer.circles(frame.rect, &self.circles);
         repaint(33)
     }
+    fn clear_visual_state(&mut self) {
+        self.circles.clear();
+    }
 }
 
 const METER_FLOOR_DBFS: f32 = -60.0;
@@ -593,8 +487,14 @@ impl ModuleFactory for LevelMeterFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        let subscription = services
+            .dataflow
+            .subscribe_time(TimeDomainRequest::Levels)
+            .map_err(ModuleError::from)?;
+        let reader = subscription.reader();
         Ok(Box::new(LevelMeterModule {
-            reader: services.time_domain.clone(),
+            _subscription: subscription,
+            reader,
             peak_holds: Vec::new(),
             last_result_version: 0,
             bars: Vec::with_capacity(12),
@@ -604,6 +504,7 @@ impl ModuleFactory for LevelMeterFactory {
 }
 
 struct LevelMeterModule {
+    _subscription: TimeDomainSubscription,
     reader: TimeDomainReader,
     peak_holds: Vec<MeterPeakHold>,
     last_result_version: u64,
@@ -617,10 +518,22 @@ impl Module for LevelMeterModule {
             waiting(&mut frame);
             return repaint(100);
         };
-        let shown_channels = snapshot
+        let Some(levels) = snapshot.levels.as_ref() else {
+            frame.renderer.text(
+                frame.rect,
+                frame.rect.center(),
+                "WAITING FOR LEVELS",
+                TextStyle {
+                    size: 12.0,
+                    color: Color::rgb(190, 205, 215),
+                },
+            );
+            return repaint(100);
+        };
+        let shown_channels = levels
             .momentary_lufs
             .len()
-            .min(snapshot.sample_peaks.len())
+            .min(levels.sample_peaks.len())
             .min(8);
         self.peak_holds
             .resize(shown_channels, MeterPeakHold::default());
@@ -632,8 +545,8 @@ impl Module for LevelMeterModule {
         self.bars.clear();
         let mut animating = false;
         for channel in 0..shown_channels {
-            let current_lufs = snapshot.momentary_lufs[channel].clamp(-60.0, 3.0);
-            let current_peak_dbfs = amplitude_to_dbfs(snapshot.sample_peaks[channel]);
+            let current_lufs = levels.momentary_lufs[channel].clamp(-60.0, 3.0);
+            let current_peak_dbfs = amplitude_to_dbfs(levels.sample_peaks[channel]);
             animating |= self.peak_holds[channel].update(
                 is_new_snapshot.then_some(current_peak_dbfs),
                 frame.monotonic_time,
@@ -703,6 +616,12 @@ impl Module for LevelMeterModule {
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
         if animating { repaint(33) } else { repaint(100) }
+    }
+    fn clear_visual_state(&mut self) {
+        self.peak_holds.clear();
+        self.last_result_version = 0;
+        self.bars.clear();
+        self.text.clear();
     }
 }
 
@@ -778,101 +697,7 @@ fn meter_color(normalized: f32) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::{
-        audio::{AudioDescriptor, ChannelLayout, Generation, SourceId},
-        render::Circle,
-        snapshot::{AudioChunk, TimeDomainSnapshot},
-    };
-
-    #[derive(Default)]
-    struct RecordingTarget {
-        polylines: usize,
-    }
-
-    impl RenderTarget for RecordingTarget {
-        fn polyline(&mut self, _clip: Rect, points: &[Point], _stroke: Stroke) {
-            if !points.is_empty() {
-                self.polylines += 1;
-            }
-        }
-
-        fn fill_rects(&mut self, _clip: Rect, _rects: &[ColoredRect]) {}
-
-        fn circles(&mut self, _clip: Rect, _circles: &[Circle]) {}
-
-        fn text(&mut self, _clip: Rect, _position: Point, _text: &str, _style: TextStyle) {}
-    }
-
-    fn snapshot(version: u64) -> TimeDomainSnapshot {
-        let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                .unwrap(),
-        );
-        let samples: Vec<f32> = (0..128)
-            .flat_map(|index| {
-                let sample = (index as f32 * 0.1).sin() * 0.5;
-                [sample, -sample]
-            })
-            .collect();
-        TimeDomainSnapshot {
-            descriptor,
-            result_version: version,
-            processed_through_frame: 128,
-            discontinuity_count: 0,
-            chunks: vec![Arc::new(AudioChunk {
-                start_frame: 0,
-                frame_count: 128,
-                source_sequence: 0,
-                discontinuity_before: false,
-                interleaved: samples.into(),
-            })]
-            .into(),
-            momentary_lufs: vec![-20.0, -20.0].into(),
-            sample_peaks: vec![0.5, 0.5].into(),
-        }
-    }
-
-    fn context(snapshot: &TimeDomainSnapshot, time: Duration) -> OscilloscopeStyleContext<'_> {
-        OscilloscopeStyleContext {
-            snapshot,
-            channel: ChannelSelection::MonoAverage,
-            rect: Rect {
-                min: Point { x: 0.0, y: 0.0 },
-                max: Point { x: 400.0, y: 200.0 },
-            },
-            y_scale: 1.0,
-            monotonic_time: time,
-        }
-    }
-
-    #[test]
-    fn persistence_instances_keep_and_clear_visual_state_independently() {
-        let snapshot = snapshot(1);
-        let mut first = PersistenceOscilloscopeStyleFactory.create();
-        let mut second = PersistenceOscilloscopeStyleFactory.create();
-        let mut first_target = RecordingTarget::default();
-        let mut second_target = RecordingTarget::default();
-        first.draw(context(&snapshot, Duration::ZERO), &mut first_target);
-        second.draw(context(&snapshot, Duration::ZERO), &mut second_target);
-
-        first.clear();
-        first_target.polylines = 0;
-        second_target.polylines = 0;
-        first.draw(
-            context(&snapshot, Duration::from_millis(100)),
-            &mut first_target,
-        );
-        second.draw(
-            context(&snapshot, Duration::from_millis(100)),
-            &mut second_target,
-        );
-
-        assert_eq!(first_target.polylines, 0);
-        assert_eq!(second_target.polylines, 1);
-    }
 
     #[test]
     fn meter_peak_uses_dbfs_and_decays_by_elapsed_time() {

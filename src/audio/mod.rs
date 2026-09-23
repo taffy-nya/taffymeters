@@ -1,9 +1,11 @@
 mod descriptor;
+mod source;
 mod status;
 mod system;
 mod transport;
 
 pub use descriptor::{AudioDescriptor, ChannelLayout, DescriptorError, Generation, SourceId};
+pub use source::SourceReader;
 pub(crate) use status::SourceTelemetry;
 pub use status::{SourceState, SourceStatus};
 pub(crate) use system::{OpenSystemInput, SystemCapture};

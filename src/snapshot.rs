@@ -18,14 +18,19 @@ pub struct AudioChunk {
 }
 
 #[derive(Clone, Debug)]
+pub struct LevelsSnapshot {
+    pub momentary_lufs: Arc<[f32]>,
+    pub sample_peaks: Arc<[f32]>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TimeDomainSnapshot {
     pub descriptor: Arc<AudioDescriptor>,
     pub result_version: u64,
     pub processed_through_frame: u64,
     pub discontinuity_count: u64,
     pub chunks: Arc<[Arc<AudioChunk>]>,
-    pub momentary_lufs: Arc<[f32]>,
-    pub sample_peaks: Arc<[f32]>,
+    pub levels: Option<LevelsSnapshot>,
 }
 
 #[derive(Clone)]

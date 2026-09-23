@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     sync::{
@@ -15,23 +15,21 @@ use arc_swap::ArcSwapOption;
 
 use crate::{
     audio::{AudioBlock, AudioDescriptor, ProcessingEndpoint, SourceTelemetry},
-    snapshot::{
-        AudioChunk, SpectrumHistoryFrame, SpectrumReader, SpectrumSnapshotSet, TimeDomainReader,
-        TimeDomainSnapshot,
-    },
+    snapshot::{SpectrumHistoryFrame, SpectrumReader, SpectrumSnapshotSet, TimeDomainSnapshot},
 };
 
 use super::{
     ChannelError, ChannelSelection, FftConfig, RequestError, SharedAnalysisId, SpectrumRequest,
+    TimeDomainRequest, TimeDomainRequestError, TimeDomainSubscription,
     fft::StreamingFft,
     processing::{HistoryState, PeakState, SmoothState, apply_center_and_gain, apply_tilt},
-    time::LevelAnalyzer,
+    time_runtime::{
+        TimeDomainProcessor, ValidatedTimeDomainRequest, make_reader, new_slot, next_id,
+    },
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 16;
 const COMMAND_BUDGET_PER_TICK: usize = 16;
-const TIME_HISTORY_SECONDS: usize = 10;
-const TIME_SNAPSHOT_HZ: usize = 30;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeMetrics {
@@ -41,6 +39,9 @@ pub struct RuntimeMetrics {
     pub channel_branches: u64,
     pub fft_branches: u64,
     pub pipelines: u64,
+    pub time_pcm_frames: u64,
+    pub time_level_frames: u64,
+    pub time_publications: u64,
 }
 
 #[derive(Default)]
@@ -53,8 +54,15 @@ struct Metrics {
     pipelines: AtomicU64,
 }
 
+#[derive(Default)]
+pub(super) struct TimeMetrics {
+    pub(super) pcm_frames: AtomicU64,
+    pub(super) level_frames: AtomicU64,
+    pub(super) publications: AtomicU64,
+}
+
 impl Metrics {
-    fn snapshot(&self) -> RuntimeMetrics {
+    fn snapshot(&self, time: &TimeMetrics) -> RuntimeMetrics {
         RuntimeMetrics {
             fft_evaluations: self.fft_evaluations.load(Ordering::Relaxed),
             pipeline_evaluations: self.pipeline_evaluations.load(Ordering::Relaxed),
@@ -62,6 +70,9 @@ impl Metrics {
             subscriptions: self.subscriptions.load(Ordering::Acquire),
             fft_branches: self.fft_branches.load(Ordering::Acquire),
             pipelines: self.pipelines.load(Ordering::Acquire),
+            time_pcm_frames: time.pcm_frames.load(Ordering::Relaxed),
+            time_level_frames: time.level_frames.load(Ordering::Relaxed),
+            time_publications: time.publications.load(Ordering::Relaxed),
         }
     }
 }
@@ -75,6 +86,7 @@ struct SubscriptionControl {
     id: u64,
     commands: SyncSender<Command>,
     worker: Thread,
+    stopped: Arc<AtomicBool>,
     request: Mutex<SpectrumRequest>,
     requested_channel: Arc<AtomicU32>,
     requested_revision: Arc<AtomicU64>,
@@ -99,35 +111,43 @@ impl SpectrumSubscription {
 impl Drop for SpectrumSubscription {
     fn drop(&mut self) {
         self.controller.inner.active.store(false, Ordering::Release);
-        let _ = self
-            .controller
-            .inner
-            .commands
-            .send(Command::Remove(self.controller.inner.id));
-        self.controller.inner.worker.unpark();
+        if !self.controller.inner.stopped.load(Ordering::Acquire) {
+            let _ = self
+                .controller
+                .inner
+                .commands
+                .send(Command::Remove(self.controller.inner.id));
+            self.controller.inner.worker.unpark();
+        }
     }
 }
 
-pub(crate) struct SpectrumDataflow {
-    runtime: RuntimeController,
+pub(crate) struct Dataflow {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
-struct RuntimeController {
+pub struct DataflowHandle {
     commands: SyncSender<Command>,
     worker: Thread,
+    stopped: Arc<AtomicBool>,
     next_subscription_id: Arc<AtomicU64>,
     descriptor: Arc<AudioDescriptor>,
     telemetry: Arc<SourceTelemetry>,
     metrics: Arc<Metrics>,
-    time_domain: TimeDomainReader,
+    time_metrics: Arc<TimeMetrics>,
 }
 
 enum Command {
     Add {
         subscription: SubscriptionState,
+        response: std::sync::mpsc::SyncSender<Result<(), ControlError>>,
+    },
+    AddTimeDomain {
+        id: u64,
+        request: ValidatedTimeDomainRequest,
+        slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
         response: std::sync::mpsc::SyncSender<Result<(), ControlError>>,
     },
     Update {
@@ -139,7 +159,13 @@ enum Command {
     SetAnalysisPaused(u64, bool),
     ResetState(u64),
     Remove(u64),
+    RemoveTimeDomain(u64),
     ResumeBoundary(u64),
+    #[cfg(test)]
+    BlockWorkerForTest {
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +175,7 @@ pub enum ControlError {
     SubscriptionClosed,
     SharedBindingMismatch(SharedAnalysisId),
     InvalidRequest(RequestError),
+    InvalidTimeDomainRequest(TimeDomainRequestError),
 }
 
 impl fmt::Display for ControlError {
@@ -161,6 +188,9 @@ impl fmt::Display for ControlError {
                 write!(f, "shared analysis {} has a different request", id.0)
             }
             Self::InvalidRequest(error) => write!(f, "invalid spectrum request: {error}"),
+            Self::InvalidTimeDomainRequest(error) => {
+                write!(f, "invalid time-domain request: {error}")
+            }
         }
     }
 }
@@ -260,14 +290,19 @@ impl SpectrumController {
     }
 
     fn ensure_active(&self) -> Result<(), ControlError> {
-        if self.inner.active.load(Ordering::Acquire) {
-            Ok(())
-        } else {
+        if !self.inner.active.load(Ordering::Acquire) {
             Err(ControlError::SubscriptionClosed)
+        } else if self.inner.stopped.load(Ordering::Acquire) {
+            Err(ControlError::Stopped)
+        } else {
+            Ok(())
         }
     }
 
     fn send(&self, command: Command) -> Result<(), ControlError> {
+        if self.inner.stopped.load(Ordering::Acquire) {
+            return Err(ControlError::Stopped);
+        }
         match self.inner.commands.try_send(command) {
             Ok(()) => {
                 self.inner.worker.unpark();
@@ -279,86 +314,132 @@ impl SpectrumController {
     }
 }
 
-impl SpectrumDataflow {
+impl Dataflow {
     pub(crate) fn spawn(
         descriptor: Arc<AudioDescriptor>,
         mut endpoint: ProcessingEndpoint,
         telemetry: Arc<SourceTelemetry>,
-    ) -> Self {
+    ) -> (Self, DataflowHandle) {
         let (command_sender, command_receiver) = sync_channel(CONTROL_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let metrics = Arc::new(Metrics::default());
         let worker_metrics = Arc::clone(&metrics);
+        let time_metrics = Arc::new(TimeMetrics::default());
+        let worker_time_metrics = Arc::clone(&time_metrics);
         let worker_descriptor = Arc::clone(&descriptor);
-        let time_slot = Arc::new(ArcSwapOption::<TimeDomainSnapshot>::empty());
-        let worker_time_slot = Arc::clone(&time_slot);
-        let time_domain =
-            TimeDomainReader::new(time_slot, Arc::clone(&descriptor), Arc::clone(&telemetry));
         let worker = thread::Builder::new()
             .name("taffymeters-dataflow".to_owned())
             .spawn(move || {
                 let mut processor =
-                    Processor::new(worker_descriptor, worker_metrics, worker_time_slot);
+                    Processor::new(worker_descriptor, worker_metrics, worker_time_metrics);
                 run_worker(&mut processor, &mut endpoint, command_receiver, worker_stop);
             })
             .expect("failed to create dataflow worker");
-        let runtime = RuntimeController {
+        let handle = DataflowHandle {
             commands: command_sender,
             worker: worker.thread().clone(),
+            stopped: Arc::clone(&stop),
             next_subscription_id: Arc::new(AtomicU64::new(1)),
             descriptor,
             telemetry,
             metrics,
-            time_domain,
+            time_metrics,
         };
-        Self {
-            runtime,
-            stop,
-            worker: Some(worker),
-        }
+        (
+            Self {
+                stop,
+                worker: Some(worker),
+            },
+            handle,
+        )
     }
 
-    pub(crate) fn subscribe(
+    pub(crate) fn worker_thread(&self) -> Thread {
+        self.worker
+            .as_ref()
+            .expect("worker exists while dataflow is live")
+            .thread()
+            .clone()
+    }
+}
+
+impl DataflowHandle {
+    pub fn subscribe_spectrum(
         &self,
         request: SpectrumRequest,
     ) -> Result<SpectrumSubscription, ControlError> {
-        self.runtime.subscribe(request, Binding::Private)
+        self.subscribe(request, Binding::Private)
     }
 
-    pub(crate) fn subscribe_shared(
+    pub fn subscribe_shared(
         &self,
         request: SpectrumRequest,
         binding: SharedAnalysisId,
     ) -> Result<SpectrumSubscription, ControlError> {
-        self.runtime.subscribe(request, Binding::Shared(binding))
+        self.subscribe(request, Binding::Shared(binding))
+    }
+
+    pub fn subscribe_time(
+        &self,
+        request: TimeDomainRequest,
+    ) -> Result<TimeDomainSubscription, ControlError> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(ControlError::Stopped);
+        }
+        let request = request
+            .validate(
+                self.descriptor.sample_rate_hz,
+                self.descriptor.channel_count as usize,
+            )
+            .map_err(ControlError::InvalidTimeDomainRequest)?;
+        let id = next_id(&self.next_subscription_id);
+        let slot = new_slot();
+        let reader = make_reader(
+            Arc::clone(&slot),
+            Arc::clone(&self.descriptor),
+            Arc::clone(&self.telemetry),
+        );
+        let (response_sender, response_receiver) = sync_channel(1);
+        self.send(Command::AddTimeDomain {
+            id,
+            request,
+            slot,
+            response: response_sender,
+        })?;
+        response_receiver
+            .recv()
+            .map_err(|_| ControlError::Stopped)??;
+
+        let commands = self.commands.clone();
+        let worker = self.worker.clone();
+        let stopped = Arc::clone(&self.stopped);
+        Ok(TimeDomainSubscription::new(reader, move || {
+            if !stopped.load(Ordering::Acquire) {
+                let _ = commands.send(Command::RemoveTimeDomain(id));
+                worker.unpark();
+            }
+        }))
+    }
+
+    pub fn metrics(&self) -> RuntimeMetrics {
+        self.metrics.snapshot(&self.time_metrics)
     }
 
     pub(crate) fn resume_at(&self, continuity: u64) -> Result<(), ControlError> {
-        self.runtime.send(Command::ResumeBoundary(continuity))
+        self.send(Command::ResumeBoundary(continuity))
     }
 
-    pub(crate) fn metrics(&self) -> RuntimeMetrics {
-        self.runtime.metrics.snapshot()
-    }
-
-    pub(crate) fn worker_thread(&self) -> Thread {
-        self.runtime.worker.clone()
-    }
-
-    pub(crate) fn time_domain_reader(&self) -> TimeDomainReader {
-        self.runtime.time_domain.clone()
-    }
-}
-
-impl RuntimeController {
     fn subscribe(
         &self,
         request: SpectrumRequest,
         binding: Binding,
     ) -> Result<SpectrumSubscription, ControlError> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(ControlError::Stopped);
+        }
         let request = request.validated().map_err(ControlError::InvalidRequest)?;
-        let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        let id = next_id(&self.next_subscription_id);
         let slot = Arc::new(ArcSwapOption::<SpectrumSnapshotSet>::empty());
         let analysis_error = Arc::new(ArcSwapOption::<ChannelError>::empty());
         let requested_channel = Arc::new(AtomicU32::new(request.channel.encode()));
@@ -396,6 +477,7 @@ impl RuntimeController {
                     id,
                     commands: self.commands.clone(),
                     worker: self.worker.clone(),
+                    stopped: Arc::clone(&self.stopped),
                     request: Mutex::new(request),
                     requested_channel,
                     requested_revision,
@@ -407,6 +489,9 @@ impl RuntimeController {
     }
 
     fn send(&self, command: Command) -> Result<(), ControlError> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(ControlError::Stopped);
+        }
         match self.commands.try_send(command) {
             Ok(()) => {
                 self.worker.unpark();
@@ -418,11 +503,11 @@ impl RuntimeController {
     }
 }
 
-impl Drop for SpectrumDataflow {
+impl Drop for Dataflow {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        self.runtime.worker.unpark();
         if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
             let _ = worker.join();
         }
     }
@@ -687,6 +772,8 @@ struct Processor {
     channel_samples: Vec<f32>,
     pipelines: HashMap<PipelineKey, Pipeline>,
     metrics: Arc<Metrics>,
+    time_metrics: Arc<TimeMetrics>,
+    time_domain: Option<TimeDomainProcessor>,
     pending: Vec<Evaluation>,
     result_version: u64,
     discontinuity_count: u64,
@@ -695,32 +782,14 @@ struct Processor {
     minimum_continuity: u64,
     active_continuity: u64,
     current_frontier: u64,
-    time_slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
-    time_history: VecDeque<Arc<AudioChunk>>,
-    time_history_frames: usize,
-    time_result_version: u64,
-    time_gap_pending: bool,
-    time_pending_samples: Vec<f32>,
-    time_pending_start_frame: Option<u64>,
-    time_pending_source_sequence: u64,
-    time_pending_frames: usize,
-    time_publish_interval_frames: usize,
-    time_lufs: Vec<f32>,
-    time_block_peaks: Vec<f32>,
-    time_publish_peaks: Vec<f32>,
-    level_analyzer: LevelAnalyzer,
 }
 
 impl Processor {
     fn new(
         descriptor: Arc<AudioDescriptor>,
         metrics: Arc<Metrics>,
-        time_slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
+        time_metrics: Arc<TimeMetrics>,
     ) -> Self {
-        let channel_count = descriptor.channel_count as usize;
-        let level_analyzer = LevelAnalyzer::new(descriptor.sample_rate_hz, channel_count);
-        let time_publish_interval_frames =
-            (descriptor.sample_rate_hz as usize).div_ceil(TIME_SNAPSHOT_HZ);
         Self {
             descriptor,
             subscriptions: HashMap::new(),
@@ -729,6 +798,8 @@ impl Processor {
             channel_samples: Vec::new(),
             pipelines: HashMap::new(),
             metrics,
+            time_metrics,
+            time_domain: None,
             pending: Vec::new(),
             result_version: 0,
             discontinuity_count: 0,
@@ -737,20 +808,6 @@ impl Processor {
             minimum_continuity: 0,
             active_continuity: 0,
             current_frontier: 0,
-            time_slot,
-            time_history: VecDeque::new(),
-            time_history_frames: 0,
-            time_result_version: 0,
-            time_gap_pending: false,
-            time_pending_samples: Vec::with_capacity(time_publish_interval_frames * channel_count),
-            time_pending_start_frame: None,
-            time_pending_source_sequence: 0,
-            time_pending_frames: 0,
-            time_publish_interval_frames,
-            time_lufs: vec![-60.0; channel_count],
-            time_block_peaks: vec![0.0; channel_count],
-            time_publish_peaks: vec![0.0; channel_count],
-            level_analyzer,
         }
     }
 
@@ -770,6 +827,36 @@ impl Processor {
         self.subscriptions.insert(subscription.id, subscription);
         self.reconcile();
         Ok(())
+    }
+
+    fn add_time_subscription(
+        &mut self,
+        id: u64,
+        request: ValidatedTimeDomainRequest,
+        slot: Arc<ArcSwapOption<TimeDomainSnapshot>>,
+    ) {
+        if self.time_domain.is_none() {
+            self.time_domain = Some(TimeDomainProcessor::new(
+                Arc::clone(&self.descriptor),
+                Arc::clone(&self.time_metrics),
+            ));
+        }
+        self.time_domain
+            .as_mut()
+            .expect("time-domain processor was just created")
+            .add_subscription(id, request, slot, self.current_frontier);
+    }
+
+    fn remove_time_subscription(&mut self, id: u64) {
+        let remove_processor = if let Some(time_domain) = &mut self.time_domain {
+            time_domain.remove_subscription(id);
+            time_domain.is_empty()
+        } else {
+            false
+        };
+        if remove_processor {
+            self.time_domain = None;
+        }
     }
 
     fn update_subscription(&mut self, id: u64, request: SpectrumRequest, revision: u64) {
@@ -1010,12 +1097,9 @@ impl Processor {
         }
         self.expected_sequence = None;
         self.expected_start_frame = None;
-        self.time_pending_samples.clear();
-        self.time_pending_start_frame = None;
-        self.time_pending_frames = 0;
-        self.time_publish_peaks.fill(0.0);
-        self.time_gap_pending = true;
-        self.level_analyzer.reset();
+        if let Some(time_domain) = &mut self.time_domain {
+            time_domain.mark_gap();
+        }
         self.discontinuity_count = self.discontinuity_count.wrapping_add(1);
     }
 
@@ -1043,7 +1127,15 @@ impl Processor {
         self.expected_sequence = Some(block.sequence.wrapping_add(1));
         self.expected_start_frame =
             Some(block.start_frame.saturating_add(block.frame_count as u64));
-        self.publish_time_domain(block);
+        if let Some(time_domain) = &mut self.time_domain {
+            time_domain.process_block(
+                block.start_frame,
+                block.sequence,
+                block.frame_count,
+                block.samples(self.descriptor.channel_count as usize),
+                self.discontinuity_count,
+            );
+        }
 
         let channels = self.descriptor.channel_count as usize;
         self.pending.clear();
@@ -1074,77 +1166,6 @@ impl Processor {
             self.publish(evaluation);
         }
         self.pending = pending;
-    }
-
-    fn publish_time_domain(&mut self, block: &AudioBlock) {
-        let channels = self.descriptor.channel_count as usize;
-        let samples = block.samples(channels);
-        self.level_analyzer
-            .process(samples, &mut self.time_lufs, &mut self.time_block_peaks);
-
-        if self.time_pending_frames == 0 {
-            self.time_pending_start_frame = Some(block.start_frame);
-            self.time_pending_source_sequence = block.sequence;
-            self.time_publish_peaks.fill(0.0);
-        }
-        for (published, block_peak) in self
-            .time_publish_peaks
-            .iter_mut()
-            .zip(&self.time_block_peaks)
-        {
-            *published = published.max(*block_peak);
-        }
-        self.time_pending_samples.extend_from_slice(samples);
-        self.time_pending_frames = self.time_pending_frames.saturating_add(block.frame_count);
-
-        if self.time_pending_frames >= self.time_publish_interval_frames {
-            self.publish_pending_time_domain();
-        }
-    }
-
-    fn publish_pending_time_domain(&mut self) {
-        if self.time_pending_frames == 0 {
-            return;
-        }
-        let channels = self.descriptor.channel_count as usize;
-        let frame_count = self.time_pending_frames;
-        let start_frame = self
-            .time_pending_start_frame
-            .take()
-            .expect("pending time-domain samples have a start frame");
-        let samples = Arc::<[f32]>::from(std::mem::replace(
-            &mut self.time_pending_samples,
-            Vec::with_capacity(self.time_publish_interval_frames * channels),
-        ));
-        let chunk = Arc::new(AudioChunk {
-            start_frame,
-            frame_count,
-            source_sequence: self.time_pending_source_sequence,
-            discontinuity_before: std::mem::take(&mut self.time_gap_pending),
-            interleaved: samples,
-        });
-        self.time_pending_frames = 0;
-        self.time_history_frames = self.time_history_frames.saturating_add(frame_count);
-        self.time_history.push_back(chunk);
-        let max_frames = self.descriptor.sample_rate_hz as usize * TIME_HISTORY_SECONDS;
-        while self.time_history_frames > max_frames && self.time_history.len() > 1 {
-            if let Some(oldest) = self.time_history.pop_front() {
-                self.time_history_frames =
-                    self.time_history_frames.saturating_sub(oldest.frame_count);
-            }
-        }
-
-        self.time_result_version = self.time_result_version.wrapping_add(1);
-        let processed_through_frame = start_frame.saturating_add(frame_count as u64);
-        self.time_slot.store(Some(Arc::new(TimeDomainSnapshot {
-            descriptor: Arc::clone(&self.descriptor),
-            result_version: self.time_result_version,
-            processed_through_frame,
-            discontinuity_count: self.discontinuity_count,
-            chunks: self.time_history.iter().cloned().collect(),
-            momentary_lufs: Arc::from(self.time_lufs.clone()),
-            sample_peaks: Arc::from(self.time_publish_peaks.clone()),
-        })));
     }
 
     fn publish(&mut self, evaluation: Evaluation) {
@@ -1207,6 +1228,20 @@ fn run_worker(
                 }) => {
                     let _ = response.send(processor.add_subscription(subscription));
                 }
+                Ok(Command::AddTimeDomain {
+                    id,
+                    request,
+                    slot,
+                    response,
+                }) => {
+                    processor.add_time_subscription(id, request, slot);
+                    let _ = response.send(Ok(()));
+                }
+                #[cfg(test)]
+                Ok(Command::BlockWorkerForTest { entered, release }) => {
+                    entered.wait();
+                    release.wait();
+                }
                 Ok(Command::Update {
                     id,
                     request,
@@ -1216,6 +1251,7 @@ fn run_worker(
                 Ok(Command::SetAnalysisPaused(id, paused)) => processor.set_paused(id, paused),
                 Ok(Command::ResetState(id)) => processor.reset_state(id),
                 Ok(Command::Remove(id)) => processor.remove_subscription(id),
+                Ok(Command::RemoveTimeDomain(id)) => processor.remove_time_subscription(id),
                 Ok(Command::ResumeBoundary(continuity)) => processor.resume_at(continuity),
                 Err(TryRecvError::Empty) => {
                     command_budget_exhausted = false;
@@ -1245,7 +1281,41 @@ mod tests {
     use crate::audio::{
         ChannelLayout, Generation, SourceId, SourceTelemetry, create_block_transport,
     };
-    use crate::dataflow::{HistoryConfig, PeakConfig, SmoothConfig};
+    use crate::dataflow::{HistoryConfig, PeakConfig, SmoothConfig, TimeDomainRequest};
+    use crate::snapshot::TimeDomainReader;
+
+    struct TestDataflow {
+        _owner: Dataflow,
+        handle: DataflowHandle,
+    }
+
+    impl TestDataflow {
+        fn subscribe(
+            &self,
+            request: SpectrumRequest,
+        ) -> Result<SpectrumSubscription, ControlError> {
+            self.handle.subscribe_spectrum(request)
+        }
+
+        fn subscribe_shared(
+            &self,
+            request: SpectrumRequest,
+            binding: SharedAnalysisId,
+        ) -> Result<SpectrumSubscription, ControlError> {
+            self.handle.subscribe_shared(request, binding)
+        }
+
+        fn subscribe_time(
+            &self,
+            request: TimeDomainRequest,
+        ) -> Result<TimeDomainSubscription, ControlError> {
+            self.handle.subscribe_time(request)
+        }
+
+        fn metrics(&self) -> RuntimeMetrics {
+            self.handle.metrics()
+        }
+    }
 
     fn fixture(
         channels: u16,
@@ -1253,7 +1323,7 @@ mod tests {
         max_block_frames: usize,
     ) -> (
         crate::audio::CaptureEndpoint,
-        SpectrumDataflow,
+        TestDataflow,
         Arc<SourceTelemetry>,
     ) {
         let layout = if channels == 1 {
@@ -1274,9 +1344,16 @@ mod tests {
             Arc::clone(&telemetry),
         )
         .unwrap();
-        let dataflow = SpectrumDataflow::spawn(descriptor, processing, Arc::clone(&telemetry));
-        capture.set_worker(dataflow.worker_thread());
-        (capture, dataflow, telemetry)
+        let (owner, handle) = Dataflow::spawn(descriptor, processing, Arc::clone(&telemetry));
+        capture.set_worker(owner.worker_thread());
+        (
+            capture,
+            TestDataflow {
+                _owner: owner,
+                handle,
+            },
+            telemetry,
+        )
     }
 
     fn wait_for(
@@ -1297,7 +1374,72 @@ mod tests {
         }
     }
 
-    fn wait_metrics(dataflow: &SpectrumDataflow, expected: RuntimeMetrics) -> RuntimeMetrics {
+    fn wait_spectrum_frontier(
+        reader: &SpectrumReader,
+        minimum_frame: u64,
+    ) -> Arc<SpectrumSnapshotSet> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(snapshot) = reader.latest()
+                && snapshot.processed_through_frame >= minimum_frame
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for spectrum frontier"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_time_frontier(
+        reader: &TimeDomainReader,
+        minimum_frame: u64,
+    ) -> Arc<TimeDomainSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(snapshot) = reader.latest()
+                && snapshot.processed_through_frame >= minimum_frame
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for time-domain frontier {minimum_frame}, latest {:?}",
+                reader
+                    .latest()
+                    .as_ref()
+                    .map(|snapshot| snapshot.processed_through_frame)
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_time_metrics(
+        dataflow: &TestDataflow,
+        expected_pcm: u64,
+        expected_levels: u64,
+        expected_publications: u64,
+    ) -> RuntimeMetrics {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let metrics = dataflow.metrics();
+            if metrics.time_pcm_frames == expected_pcm
+                && metrics.time_level_frames == expected_levels
+                && metrics.time_publications == expected_publications
+            {
+                return metrics;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "time-domain counters did not settle: {metrics:?}"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_metrics(dataflow: &TestDataflow, expected: RuntimeMetrics) -> RuntimeMetrics {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             let actual = dataflow.metrics();
@@ -1334,6 +1476,48 @@ mod tests {
         (0..frames)
             .map(|frame| amplitude * (2.0 * PI * frequency * frame as f32 / 48_000.0).sin())
             .collect()
+    }
+
+    fn stereo_tone(start_frame: u64, frames: usize) -> Vec<f32> {
+        let mut samples = Vec::with_capacity(frames * 2);
+        for frame in 0..frames {
+            let phase = 2.0 * PI * 1_000.0 * (start_frame + frame as u64) as f32 / 48_000.0;
+            samples.extend_from_slice(&[phase.sin() * 0.5, phase.cos() * 0.25]);
+        }
+        samples
+    }
+
+    fn spectrum_probe(dataflow: &TestDataflow) -> SpectrumSubscription {
+        let request = SpectrumRequest::new(
+            ChannelSelection::MonoAverage,
+            FftConfig::new(32, 16, -160.0).unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match dataflow.handle.subscribe_spectrum(request) {
+                Ok(subscription) => return subscription,
+                Err(ControlError::Busy) => {
+                    assert!(Instant::now() < deadline, "control queue stayed busy");
+                    thread::yield_now();
+                }
+                Err(error) => panic!("unexpected spectrum probe error: {error}"),
+            }
+        }
+    }
+
+    fn block_worker(handle: &DataflowHandle) -> Arc<Barrier> {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        assert!(matches!(
+            handle.commands.try_send(Command::BlockWorkerForTest {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            Ok(())
+        ));
+        handle.worker.unpark();
+        entered.wait();
+        release
     }
 
     #[test]
@@ -1864,37 +2048,389 @@ mod tests {
         );
     }
     #[test]
-    fn time_domain_publication_is_bounded_and_advances_without_ui_reads() {
+    fn time_demand_matrix_is_lazy_and_closes_independently() {
         let (mut capture, dataflow, telemetry) = fixture(2, 128, 16);
-        let reader = dataflow.time_domain_reader();
-        let mut stereo = Vec::with_capacity(1_600 * 2);
-        for frame in 0..1_600 {
-            let phase = 2.0 * PI * 1_000.0 * frame as f32 / 48_000.0;
-            stereo.extend_from_slice(&[phase.sin() * 0.5, phase.cos() * 0.25]);
-        }
-        capture.write(&stereo);
+        let probe = spectrum_probe(&dataflow);
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let snapshot = loop {
-            if let Some(snapshot) = reader.latest()
-                && snapshot.processed_through_frame >= 1_600
-            {
-                break snapshot;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for time-domain history"
-            );
-            thread::sleep(Duration::from_millis(1));
-        };
+        capture.write(&stereo_tone(0, 1_600));
+        wait_spectrum_frontier(&probe.reader(), 1_600);
+        assert_eq!(dataflow.metrics().time_pcm_frames, 0);
+        assert_eq!(dataflow.metrics().time_level_frames, 0);
+        assert_eq!(dataflow.metrics().time_publications, 0);
 
-        assert_eq!(snapshot.result_version, 1);
-        assert_eq!(snapshot.chunks.len(), 1);
-        assert_eq!(snapshot.chunks[0].start_frame, 0);
-        assert_eq!(snapshot.chunks[0].frame_count, 1_600);
-        assert_eq!(snapshot.momentary_lufs.len(), 2);
-        assert!(snapshot.momentary_lufs.iter().all(|level| *level > -60.0));
-        assert!(snapshot.sample_peaks[0] > snapshot.sample_peaks[1]);
+        let latest = dataflow.subscribe_time(TimeDomainRequest::Latest).unwrap();
+        capture.write(&stereo_tone(1_600, 1_600));
+        let latest_snapshot = wait_time_frontier(&latest.reader(), 3_200);
+        assert_eq!(latest_snapshot.result_version, 1);
+        assert_eq!(latest_snapshot.chunks.len(), 1);
+        assert_eq!(latest_snapshot.chunks[0].start_frame, 1_600);
+        assert_eq!(latest_snapshot.chunks[0].frame_count, 1_600);
+        assert!(latest_snapshot.levels.is_none());
+        wait_time_metrics(&dataflow, 1_600, 0, 1);
+
+        drop(latest);
+        let history = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 0.01 })
+            .unwrap();
+        capture.write(&stereo_tone(3_200, 1_600));
+        let history_snapshot = wait_time_frontier(&history.reader(), 4_800);
+        assert_eq!(history_snapshot.chunks.len(), 1);
+        assert_eq!(history_snapshot.chunks[0].start_frame, 4_320);
+        assert_eq!(history_snapshot.chunks[0].frame_count, 480);
+        assert_eq!(history_snapshot.chunks[0].interleaved.len(), 960);
+        assert!(history_snapshot.levels.is_none());
+        wait_time_metrics(&dataflow, 3_200, 0, 2);
+
+        drop(history);
+        let levels = dataflow.subscribe_time(TimeDomainRequest::Levels).unwrap();
+        capture.write(&stereo_tone(4_800, 1_600));
+        let levels_snapshot = wait_time_frontier(&levels.reader(), 6_400);
+        assert!(levels_snapshot.chunks.is_empty());
+        let levels_data = levels_snapshot.levels.as_ref().unwrap();
+        assert_eq!(levels_data.momentary_lufs.len(), 2);
+        assert!(
+            levels_data
+                .momentary_lufs
+                .iter()
+                .all(|level| *level > -60.0)
+        );
+        assert!(levels_data.sample_peaks[0] > levels_data.sample_peaks[1]);
+        wait_time_metrics(&dataflow, 3_200, 1_600, 3);
+
+        drop(levels);
+        let drain_probe = spectrum_probe(&dataflow);
+        capture.write(&stereo_tone(6_400, 1_600));
+        wait_spectrum_frontier(&drain_probe.reader(), 8_000);
+        assert_eq!(
+            (
+                dataflow.metrics().time_pcm_frames,
+                dataflow.metrics().time_level_frames,
+                dataflow.metrics().time_publications,
+            ),
+            (3_200, 1_600, 3)
+        );
         assert_eq!(telemetry.snapshot().dropped_blocks, 0);
+    }
+
+    #[test]
+    fn mixed_time_demands_share_one_pcm_interval_and_interval_peak() {
+        let (mut capture, dataflow, _) = fixture(2, 128, 16);
+        let latest = dataflow.subscribe_time(TimeDomainRequest::Latest).unwrap();
+        let history = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 1.0 })
+            .unwrap();
+        let levels = dataflow.subscribe_time(TimeDomainRequest::Levels).unwrap();
+        let mut samples = vec![0.01; 1_600 * 2];
+        samples[10 * 2] = 0.95;
+        samples[10 * 2 + 1] = 0.4;
+        capture.write(&samples);
+
+        let latest_snapshot = wait_time_frontier(&latest.reader(), 1_600);
+        let history_snapshot = wait_time_frontier(&history.reader(), 1_600);
+        let levels_snapshot = wait_time_frontier(&levels.reader(), 1_600);
+        assert_eq!(latest_snapshot.chunks.len(), 1);
+        assert_eq!(history_snapshot.chunks.len(), 1);
+        assert_eq!(latest_snapshot.chunks[0].frame_count, 1_600);
+        assert_eq!(latest_snapshot.chunks[0].interleaved[20..22], [0.95, 0.4]);
+        assert_eq!(latest_snapshot.chunks[0].interleaved[22..24], [0.01, 0.01]);
+        assert!(Arc::ptr_eq(
+            &latest_snapshot.chunks[0],
+            &history_snapshot.chunks[0]
+        ));
+        assert!(latest_snapshot.levels.is_none());
+        assert!(history_snapshot.levels.is_none());
+        assert!(levels_snapshot.chunks.is_empty());
+        let level = levels_snapshot.levels.as_ref().unwrap();
+        assert!((level.sample_peaks[0] - 0.95).abs() < f32::EPSILON);
+        assert!((level.sample_peaks[1] - 0.4).abs() < f32::EPSILON);
+        wait_time_metrics(&dataflow, 1_600, 1_600, 3);
+    }
+
+    #[test]
+    fn history_subscribers_clip_their_first_shared_interval_at_join() {
+        let (mut capture, dataflow, _) = fixture(2, 128, 16);
+        let probe = spectrum_probe(&dataflow);
+        let first = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 2.0 })
+            .unwrap();
+
+        capture.write(&stereo_tone(0, 800));
+        wait_spectrum_frontier(&probe.reader(), 800);
+        let joined = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 2.0 })
+            .unwrap();
+        capture.write(&stereo_tone(800, 800));
+
+        let first_snapshot = wait_time_frontier(&first.reader(), 1_600);
+        let joined_snapshot = wait_time_frontier(&joined.reader(), 1_600);
+        assert_eq!(first_snapshot.chunks.len(), 1);
+        assert_eq!(first_snapshot.chunks[0].start_frame, 0);
+        assert_eq!(first_snapshot.chunks[0].frame_count, 1_600);
+        assert_eq!(joined_snapshot.chunks.len(), 1);
+        assert_eq!(joined_snapshot.chunks[0].start_frame, 800);
+        assert_eq!(joined_snapshot.chunks[0].frame_count, 800);
+        assert_eq!(joined_snapshot.chunks[0].interleaved.len(), 1_600);
+        assert!(!Arc::ptr_eq(
+            &first_snapshot.chunks[0],
+            &joined_snapshot.chunks[0]
+        ));
+    }
+
+    #[test]
+    fn levels_subscribers_start_private_windows_at_their_join_frontier() {
+        let (mut capture, dataflow, _) = fixture(2, 128, 16);
+        let probe = spectrum_probe(&dataflow);
+        let first = dataflow.subscribe_time(TimeDomainRequest::Levels).unwrap();
+
+        for start_frame in (0_u64..19_200).step_by(800) {
+            capture.write(&stereo_tone(start_frame, 800));
+            wait_spectrum_frontier(&probe.reader(), start_frame + 800);
+        }
+        let before_join = wait_time_frontier(&first.reader(), 19_200);
+        assert!(before_join.levels.as_ref().unwrap().momentary_lufs[0] > -60.0);
+        let joined = dataflow.subscribe_time(TimeDomainRequest::Levels).unwrap();
+        let silence = vec![0.0; 800 * 2];
+        capture.write(&silence);
+        wait_spectrum_frontier(&probe.reader(), 20_000);
+        capture.write(&silence);
+        wait_spectrum_frontier(&probe.reader(), 20_800);
+
+        let first_after = wait_time_frontier(&first.reader(), 20_800);
+        let joined_after = wait_time_frontier(&joined.reader(), 20_800);
+        let first_levels = first_after.levels.as_ref().unwrap();
+        let joined_levels = joined_after.levels.as_ref().unwrap();
+        assert!(first_levels.momentary_lufs[0] > joined_levels.momentary_lufs[0]);
+        assert_eq!(joined_levels.momentary_lufs[0], -60.0);
+        assert_eq!(joined_levels.sample_peaks.as_ref(), &[0.0, 0.0]);
+        wait_time_metrics(&dataflow, 0, 22_400, 14);
+    }
+
+    #[test]
+    fn partial_time_demands_and_last_close_preserve_only_live_analysis() {
+        let (mut capture, dataflow, _) = fixture(2, 128, 16);
+        let probe = spectrum_probe(&dataflow);
+        let levels = dataflow.subscribe_time(TimeDomainRequest::Levels).unwrap();
+        capture.write(&stereo_tone(0, 800));
+        wait_spectrum_frontier(&probe.reader(), 800);
+        assert!(levels.reader().latest().is_none());
+
+        let latest = dataflow.subscribe_time(TimeDomainRequest::Latest).unwrap();
+        capture.write(&stereo_tone(800, 800));
+        let first_interval = wait_time_frontier(&latest.reader(), 1_600);
+        assert_eq!(first_interval.chunks[0].start_frame, 800);
+        assert_eq!(first_interval.chunks[0].frame_count, 800);
+        assert!(first_interval.levels.is_none());
+        let levels_interval = levels.reader().latest().unwrap();
+        assert!(levels_interval.levels.is_some());
+        wait_time_metrics(&dataflow, 800, 1_600, 2);
+
+        drop(latest);
+        let _removal_barrier = spectrum_probe(&dataflow);
+        capture.write(&stereo_tone(1_600, 1_600));
+        let continuing_levels = wait_time_frontier(&levels.reader(), 3_200);
+        assert!(continuing_levels.levels.as_ref().unwrap().momentary_lufs[0] > -60.0);
+        wait_time_metrics(&dataflow, 800, 3_200, 3);
+
+        let latest = dataflow.subscribe_time(TimeDomainRequest::Latest).unwrap();
+        capture.write(&stereo_tone(3_200, 1_600));
+        let rejoined_pcm = wait_time_frontier(&latest.reader(), 4_800);
+        assert_eq!(rejoined_pcm.chunks[0].start_frame, 3_200);
+        assert_eq!(rejoined_pcm.chunks[0].frame_count, 1_600);
+        wait_time_metrics(&dataflow, 2_400, 4_800, 5);
+
+        drop(levels);
+        let _level_removal_barrier = spectrum_probe(&dataflow);
+        capture.write(&stereo_tone(4_800, 1_600));
+        let pcm_only = wait_time_frontier(&latest.reader(), 6_400);
+        assert_eq!(pcm_only.chunks[0].start_frame, 4_800);
+        assert_eq!(pcm_only.chunks[0].frame_count, 1_600);
+        wait_time_metrics(&dataflow, 4_000, 4_800, 6);
+
+        drop(latest);
+        let no_demand_probe = spectrum_probe(&dataflow);
+        capture.write(&stereo_tone(6_400, 1_600));
+        wait_spectrum_frontier(&no_demand_probe.reader(), 8_000);
+        wait_time_metrics(&dataflow, 4_000, 4_800, 6);
+
+        let reopened = dataflow.subscribe_time(TimeDomainRequest::Levels).unwrap();
+        capture.write(&vec![0.0; 1_600 * 2]);
+        let fresh_levels = wait_time_frontier(&reopened.reader(), 9_600);
+        assert_eq!(
+            fresh_levels
+                .levels
+                .as_ref()
+                .unwrap()
+                .momentary_lufs
+                .as_ref(),
+            &[-60.0, -60.0]
+        );
+        wait_time_metrics(&dataflow, 4_000, 6_400, 7);
+    }
+
+    #[test]
+    fn time_history_keeps_the_latest_ten_seconds_without_drawing() {
+        let (mut capture, dataflow, telemetry) = fixture(2, 8, 1_600);
+        let history = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 10.0 })
+            .unwrap();
+        let samples = vec![0.1_f32; 1_600 * 2];
+        for cycle in 1..=330 {
+            capture.write(&samples);
+            wait_time_frontier(&history.reader(), cycle * 1_600);
+        }
+        let retained = history.reader().latest().unwrap();
+        assert_eq!(retained.processed_through_frame, 528_000);
+        assert_eq!(retained.chunks[0].start_frame, 48_000);
+        assert_eq!(
+            retained
+                .chunks
+                .iter()
+                .map(|chunk| chunk.frame_count)
+                .sum::<usize>(),
+            480_000
+        );
+        assert_eq!(telemetry.snapshot().dropped_blocks, 0);
+    }
+
+    #[test]
+    fn sequence_gaps_and_source_boundaries_reset_time_state() {
+        let (mut capture, dataflow, telemetry) = fixture(2, 1, 1_600);
+        let probe = spectrum_probe(&dataflow);
+        let history = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 10.0 })
+            .unwrap();
+        capture.write(&stereo_tone(0, 1_600));
+        let before_gap = wait_time_frontier(&history.reader(), 1_600);
+        wait_spectrum_frontier(&probe.reader(), 1_600);
+        assert_eq!(before_gap.chunks.len(), 1);
+
+        let release = block_worker(&dataflow.handle);
+        capture.write(&stereo_tone(1_600, 1_600));
+        capture.write(&stereo_tone(3_200, 1_600));
+        capture.write(&stereo_tone(4_800, 1_600));
+        assert_eq!(telemetry.snapshot().dropped_blocks, 2);
+        release.wait();
+        wait_spectrum_frontier(&probe.reader(), 3_200);
+        capture.write(&stereo_tone(6_400, 1_600));
+        let after_sequence_gap = wait_time_frontier(&history.reader(), 8_000);
+        assert_eq!(after_sequence_gap.chunks.len(), 3);
+        assert_eq!(after_sequence_gap.chunks[1].start_frame, 1_600);
+        assert_eq!(after_sequence_gap.chunks[1].frame_count, 1_600);
+        assert_eq!(after_sequence_gap.chunks[2].start_frame, 6_400);
+        assert!(after_sequence_gap.chunks[2].discontinuity_before);
+        assert!(after_sequence_gap.discontinuity_count > before_gap.discontinuity_count);
+
+        let _processed_barrier = spectrum_probe(&dataflow);
+        let continuity = telemetry.advance_continuity();
+        retry_busy(|| dataflow.handle.resume_at(continuity));
+        capture.write(&stereo_tone(8_000, 1_600));
+        let after_source_boundary = wait_time_frontier(&history.reader(), 9_600);
+        assert!(
+            after_source_boundary
+                .chunks
+                .last()
+                .unwrap()
+                .discontinuity_before
+        );
+        let settled = wait_time_metrics(&dataflow, 6_400, 0, 4);
+        assert_eq!(dataflow.metrics(), settled);
+    }
+
+    #[test]
+    fn invalid_and_stopped_time_requests_fail_without_creating_demand() {
+        let (capture, dataflow, _) = fixture(2, 8, 128);
+        for seconds in [f32::NAN, 0.0, -1.0, 10.01, f32::INFINITY] {
+            assert!(matches!(
+                dataflow.subscribe_time(TimeDomainRequest::History { seconds }),
+                Err(ControlError::InvalidTimeDomainRequest(
+                    TimeDomainRequestError::InvalidHistoryDuration
+                ))
+            ));
+        }
+        let spectrum = SpectrumRequest {
+            history: Some(HistoryConfig::new(11.0).unwrap()),
+            ..SpectrumRequest::default()
+        };
+        drop(dataflow.subscribe(spectrum).unwrap());
+        assert_eq!(dataflow.metrics().time_publications, 0);
+
+        let TestDataflow {
+            _owner: owner,
+            handle,
+        } = dataflow;
+        drop(capture);
+        drop(owner);
+        assert!(matches!(
+            handle.subscribe_time(TimeDomainRequest::Latest),
+            Err(ControlError::Stopped)
+        ));
+        assert!(matches!(
+            handle.subscribe_spectrum(SpectrumRequest::default()),
+            Err(ControlError::Stopped)
+        ));
+    }
+
+    #[test]
+    fn repeated_time_subscription_cycles_release_old_snapshots_and_stop_work() {
+        let (mut capture, dataflow, _) = fixture(2, 8, 1_600);
+        let probe = spectrum_probe(&dataflow);
+        for cycle in 0..16 {
+            let subscription = dataflow.subscribe_time(TimeDomainRequest::Latest).unwrap();
+            let reader = subscription.reader();
+            capture.write(&vec![0.1_f32; 1_600 * 2]);
+            let snapshot = wait_time_frontier(&reader, (cycle * 2 + 1) * 1_600);
+            let weak = Arc::downgrade(&snapshot);
+            drop(subscription);
+            let _removal_barrier = spectrum_probe(&dataflow);
+            drop(reader);
+            drop(snapshot);
+            assert!(
+                weak.upgrade().is_none(),
+                "a closed cycle retained a PCM snapshot"
+            );
+            let pcm_before = dataflow.metrics().time_pcm_frames;
+            capture.write(&vec![0.0_f32; 1_600 * 2]);
+            wait_spectrum_frontier(&probe.reader(), (cycle * 2 + 2) * 1_600);
+            assert_eq!(dataflow.metrics().time_pcm_frames, pcm_before);
+        }
+    }
+
+    #[test]
+    fn time_subscription_drop_reliably_removes_from_a_full_control_queue() {
+        let (mut capture, dataflow, _) = fixture(2, 128, 16);
+        let subscription = dataflow.subscribe_time(TimeDomainRequest::Latest).unwrap();
+        let release = block_worker(&dataflow.handle);
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            assert!(matches!(
+                dataflow
+                    .handle
+                    .commands
+                    .try_send(Command::SetVisible(u64::MAX, false)),
+                Ok(())
+            ));
+        }
+
+        let (dropped_sender, dropped_receiver) = std::sync::mpsc::channel();
+        let drop_thread = thread::spawn(move || {
+            drop(subscription);
+            let _ = dropped_sender.send(());
+        });
+        release.wait();
+        dropped_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("full-queue subscription drop must finish");
+        drop_thread.join().unwrap();
+
+        let probe = spectrum_probe(&dataflow);
+        capture.write(&stereo_tone(0, 1_600));
+        wait_spectrum_frontier(&probe.reader(), 1_600);
+        assert_eq!(
+            (
+                dataflow.metrics().time_pcm_frames,
+                dataflow.metrics().time_level_frames,
+                dataflow.metrics().time_publications,
+            ),
+            (0, 0, 0)
+        );
     }
 }

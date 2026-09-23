@@ -5,6 +5,7 @@ use eframe::{egui, egui_wgpu, wgpu};
 pub mod audio;
 pub mod builtins;
 pub mod dataflow;
+pub mod extensions;
 pub mod module;
 pub mod plotting;
 pub mod render;
@@ -13,7 +14,7 @@ pub mod snapshot;
 mod app;
 mod live;
 
-pub use live::{LiveSpectrum, LiveSpectrumConfig};
+pub use live::{LiveAudio, LiveAudioConfig};
 
 fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
     let mut options = egui_wgpu::WgpuConfiguration::default();
@@ -26,7 +27,7 @@ fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result<()> {
-    let live = match LiveSpectrum::open_default(LiveSpectrumConfig::default()) {
+    let live = match LiveAudio::open_default(LiveAudioConfig::default()) {
         Ok(live) => live,
         Err(error) => {
             eprintln!("{error}");
@@ -41,7 +42,7 @@ fn main() -> eframe::Result<()> {
     let app = match app::App::new(live) {
         Ok(app) => app,
         Err(error) => {
-            eprintln!("module registration failed: {error}");
+            eprintln!("module initialization failed: {error}");
             std::process::exit(1);
         }
     };
@@ -49,7 +50,7 @@ fn main() -> eframe::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: low_power_wgpu_options(),
         viewport: egui::ViewportBuilder::default()
-            .with_title("Taffymeters Phase 3")
+            .with_title("Taffymeters Phase 3-1")
             .with_inner_size([900.0, 420.0])
             .with_min_inner_size([480.0, 240.0])
             .with_always_on_top(),
