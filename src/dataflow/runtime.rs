@@ -2293,6 +2293,34 @@ mod tests {
     }
 
     #[test]
+    fn history_discards_old_pcm_outside_source_time_after_dropped_blocks() {
+        let (mut capture, dataflow, telemetry) = fixture(2, 1, 1_600);
+        let probe = spectrum_probe(&dataflow);
+        let history = dataflow
+            .subscribe_time(TimeDomainRequest::History { seconds: 0.05 })
+            .unwrap();
+        capture.write(&stereo_tone(0, 1_600));
+        wait_time_frontier(&history.reader(), 1_600);
+        wait_spectrum_frontier(&probe.reader(), 1_600);
+
+        let release = block_worker(&dataflow.handle);
+        capture.write(&stereo_tone(1_600, 1_600));
+        for start_frame in (3_200..80_000).step_by(1_600) {
+            capture.write(&stereo_tone(start_frame, 1_600));
+        }
+        assert_eq!(telemetry.snapshot().dropped_blocks, 48);
+        release.wait();
+        wait_spectrum_frontier(&probe.reader(), 3_200);
+
+        capture.write(&stereo_tone(80_000, 1_600));
+        let snapshot = wait_time_frontier(&history.reader(), 81_600);
+        assert_eq!(snapshot.chunks.len(), 1);
+        assert_eq!(snapshot.chunks[0].start_frame, 80_000);
+        assert_eq!(snapshot.chunks[0].frame_count, 1_600);
+        assert!(snapshot.chunks[0].discontinuity_before);
+    }
+
+    #[test]
     fn sequence_gaps_and_source_boundaries_reset_time_state() {
         let (mut capture, dataflow, telemetry) = fixture(2, 1, 1_600);
         let probe = spectrum_probe(&dataflow);

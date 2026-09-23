@@ -93,6 +93,9 @@ impl Module for OscilloscopeModule {
 
     fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
         channel.resolve(self.source.descriptor())?;
+        if self.channel == channel {
+            return Ok(());
+        }
         self.channel = channel;
         self.style.clear();
         Ok(())
@@ -698,6 +701,97 @@ fn meter_color(normalized: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{sync::Arc, time::Instant};
+
+    use crate::{
+        audio::{
+            AudioDescriptor, ChannelLayout, Generation, SourceId, SourceReader, SourceTelemetry,
+            create_block_transport,
+        },
+        dataflow::Dataflow,
+        render::{RenderTarget, Stroke},
+    };
+
+    #[derive(Default)]
+    struct RecordingTarget {
+        polylines: usize,
+    }
+
+    impl RenderTarget for RecordingTarget {
+        fn polyline(&mut self, _clip: Rect, points: &[Point], _stroke: Stroke) {
+            self.polylines += usize::from(!points.is_empty());
+        }
+
+        fn fill_rects(&mut self, _clip: Rect, _rects: &[ColoredRect]) {}
+
+        fn circles(&mut self, _clip: Rect, _circles: &[Circle]) {}
+
+        fn text(&mut self, _clip: Rect, _position: Point, _text: &str, _style: TextStyle) {}
+    }
+
+    #[test]
+    fn reselecting_oscilloscope_channel_keeps_persistence_traces() {
+        let descriptor = Arc::new(
+            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
+                .unwrap(),
+        );
+        let telemetry = Arc::new(SourceTelemetry::new());
+        let (mut capture, endpoint) =
+            create_block_transport(2, 8, 1_600, Arc::clone(&telemetry)).unwrap();
+        let (dataflow, handle) =
+            Dataflow::spawn(Arc::clone(&descriptor), endpoint, Arc::clone(&telemetry));
+        capture.set_worker(dataflow.worker_thread());
+        let services = ModuleServices {
+            source: SourceReader::new(descriptor, telemetry),
+            dataflow: handle,
+        };
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let mut module = OscilloscopeFactory.create(&services, &registry).unwrap();
+        module
+            .set_style(PERSISTENCE_OSCILLOSCOPE_STYLE_ID, &registry)
+            .unwrap();
+        let samples: Vec<f32> = (0..1_600).flat_map(|_| [0.2, -0.1]).collect();
+        capture.write(&samples);
+
+        let rect = Rect {
+            min: Point { x: 0.0, y: 0.0 },
+            max: Point { x: 400.0, y: 200.0 },
+        };
+        let mut target = RecordingTarget::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            target.polylines = 0;
+            module.draw(ModuleFrame {
+                rect,
+                monotonic_time: Duration::ZERO,
+                pointer: None,
+                scroll_delta_y: 0.0,
+                zoom_delta: 1.0,
+                renderer: &mut target,
+            });
+            if target.polylines == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Persistence never received audio"
+            );
+            std::thread::yield_now();
+        }
+
+        module.set_channel(ChannelSelection::MonoAverage).unwrap();
+        target.polylines = 0;
+        module.draw(ModuleFrame {
+            rect,
+            monotonic_time: Duration::from_millis(50),
+            pointer: None,
+            scroll_delta_y: 0.0,
+            zoom_delta: 1.0,
+            renderer: &mut target,
+        });
+        assert_eq!(target.polylines, 2, "reselecting cleared a live trace");
+    }
 
     #[test]
     fn meter_peak_uses_dbfs_and_decays_by_elapsed_time() {

@@ -116,7 +116,6 @@ struct TimeSubscriptionState {
     join_frontier: u64,
     result_version: u64,
     history: VecDeque<Arc<AudioChunk>>,
-    history_frames: usize,
     level_analyzer: Option<LevelAnalyzer>,
     momentary_lufs: Option<Vec<f32>>,
     interval_peaks: Option<Vec<f32>>,
@@ -138,7 +137,6 @@ impl TimeSubscriptionState {
             join_frontier,
             result_version: 0,
             history: VecDeque::new(),
-            history_frames: 0,
             level_analyzer: is_levels.then(|| LevelAnalyzer::new(sample_rate_hz, channel_count)),
             momentary_lufs: is_levels.then(|| vec![-60.0; channel_count]),
             interval_peaks: is_levels.then(|| vec![0.0; channel_count]),
@@ -365,30 +363,19 @@ impl TimeDomainProcessor {
                         subscription.join_frontier,
                         channels,
                     ) {
-                        subscription.history_frames = subscription
-                            .history_frames
-                            .saturating_add(chunk.frame_count);
                         subscription.history.push_back(chunk);
                     }
-                    while subscription.history_frames > max_frames {
-                        let excess = subscription.history_frames - max_frames;
-                        let Some(oldest) = subscription.history.pop_front() else {
-                            subscription.history_frames = 0;
-                            break;
-                        };
-                        if oldest.frame_count <= excess {
-                            subscription.history_frames = subscription
-                                .history_frames
-                                .saturating_sub(oldest.frame_count);
-                        } else {
-                            let start_frame = oldest.start_frame.saturating_add(excess as u64);
-                            let trimmed = subscription_chunk(Some(&oldest), start_frame, channels)
-                                .expect("history trim lies within the oldest chunk");
-                            subscription.history_frames =
-                                subscription.history_frames.saturating_sub(excess);
-                            subscription.history.push_front(trimmed);
-                            break;
-                        }
+                    let window_start = processed_through_frame.saturating_sub(max_frames as u64);
+                    while subscription.history.front().is_some_and(|oldest| {
+                        oldest.start_frame.saturating_add(oldest.frame_count as u64) <= window_start
+                    }) {
+                        subscription.history.pop_front();
+                    }
+                    if let Some(oldest) = subscription.history.front_mut()
+                        && oldest.start_frame < window_start
+                    {
+                        *oldest = subscription_chunk(Some(oldest), window_start, channels)
+                            .expect("history trim lies within the oldest chunk");
                     }
                     subscription.history.iter().cloned().collect()
                 }
