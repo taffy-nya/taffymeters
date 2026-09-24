@@ -1,7 +1,10 @@
 mod descriptor;
 mod source;
 mod status;
+#[cfg(any(test, feature = "automation"))]
+pub(crate) mod synthetic;
 mod system;
+
 mod transport;
 
 pub use descriptor::{AudioDescriptor, ChannelLayout, DescriptorError, Generation, SourceId};

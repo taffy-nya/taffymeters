@@ -1,4 +1,7 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "automation")),
+    windows_subsystem = "windows"
+)]
 
 use eframe::{egui, egui_wgpu, wgpu};
 
@@ -12,6 +15,8 @@ pub mod render;
 pub mod snapshot;
 
 mod app;
+#[cfg(feature = "automation")]
+mod automation;
 mod live;
 
 pub use live::{LiveAudio, LiveAudioConfig};
@@ -27,6 +32,23 @@ fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--automation")
+    {
+        #[cfg(feature = "automation")]
+        std::process::exit(automation::run(&args[1..]));
+        #[cfg(not(feature = "automation"))]
+        {
+            eprintln!("--automation requires a build with the automation feature");
+            std::process::exit(2);
+        }
+    }
+    if !args.is_empty() {
+        eprintln!("unknown arguments: {}", args.join(" "));
+        std::process::exit(2);
+    }
     let live = match LiveAudio::open_default(LiveAudioConfig::default()) {
         Ok(live) => live,
         Err(error) => {
@@ -46,14 +68,21 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
+    run_window(app, false)
+}
+
+fn run_window(app: app::App, preview: bool) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Taffymeters Phase 3-1")
+        .with_inner_size([900.0, 420.0])
+        .with_min_inner_size([480.0, 240.0]);
+    if !preview {
+        viewport = viewport.with_always_on_top();
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: low_power_wgpu_options(),
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Taffymeters Phase 3-1")
-            .with_inner_size([900.0, 420.0])
-            .with_min_inner_size([480.0, 240.0])
-            .with_always_on_top(),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

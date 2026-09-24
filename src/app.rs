@@ -11,8 +11,134 @@ use crate::{
 };
 use eframe::egui;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ModuleInstanceId(pub(crate) u64);
+
+#[derive(Clone, Debug)]
+pub(crate) enum AppAction {
+    AddModule {
+        type_id: &'static str,
+    },
+    SelectModule {
+        instance_id: ModuleInstanceId,
+    },
+    CloseModule {
+        instance_id: ModuleInstanceId,
+    },
+    SetChannel {
+        instance_id: ModuleInstanceId,
+        channel: ChannelSelection,
+    },
+    SetStyle {
+        instance_id: ModuleInstanceId,
+        style_id: &'static str,
+    },
+    ClearVisualState {
+        instance_id: ModuleInstanceId,
+    },
+    TogglePause,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ModuleInstanceId(u64);
+pub(crate) enum ActionOutcome {
+    Created(ModuleInstanceId),
+    Applied,
+}
+
+#[derive(Debug)]
+pub(crate) enum AppActionError {
+    StaleInstance(ModuleInstanceId),
+    Unsupported(&'static str),
+    InstanceIdExhausted,
+    Registry(RegistryError),
+    Module(crate::module::ModuleError),
+    LiveAudio(crate::live::LiveAudioError),
+}
+
+impl std::fmt::Display for AppActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleInstance(instance_id) => {
+                write!(
+                    f,
+                    "module instance {} is no longer available",
+                    instance_id.0
+                )
+            }
+            Self::Unsupported(action) => write!(f, "operation is not supported: {action}"),
+            Self::InstanceIdExhausted => f.write_str("module instance IDs are exhausted"),
+            Self::Registry(error) => std::fmt::Display::fmt(error, f),
+            Self::Module(error) => std::fmt::Display::fmt(error, f),
+            Self::LiveAudio(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for AppActionError {}
+
+impl From<RegistryError> for AppActionError {
+    fn from(error: RegistryError) -> Self {
+        Self::Registry(error)
+    }
+}
+
+impl From<crate::module::ModuleError> for AppActionError {
+    fn from(error: crate::module::ModuleError) -> Self {
+        Self::Module(error)
+    }
+}
+
+impl From<crate::live::LiveAudioError> for AppActionError {
+    fn from(error: crate::live::LiveAudioError) -> Self {
+        Self::LiveAudio(error)
+    }
+}
+
+#[cfg(any(test, feature = "automation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ObservedModule {
+    pub(crate) instance_id: ModuleInstanceId,
+    pub(crate) type_id: &'static str,
+    pub(crate) channel: Option<ChannelSelection>,
+    pub(crate) active_style: Option<&'static str>,
+}
+
+#[cfg(any(test, feature = "automation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AppObservation {
+    pub(crate) modules: Vec<ObservedModule>,
+    pub(crate) active_module: Option<ModuleInstanceId>,
+    pub(crate) source_status: SourceStatus,
+    pub(crate) control_error: Option<String>,
+}
+
+#[cfg(any(test, feature = "automation"))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ControlKey {
+    ModuleSelectOpen,
+    ModuleSelectInstance(ModuleInstanceId),
+    ModuleAddOpen,
+    ModuleAddItem(&'static str),
+    ModuleClose,
+    Channel(ChannelSelection),
+    StyleOpen(ModuleInstanceId),
+    StyleOption {
+        instance_id: ModuleInstanceId,
+        style_id: &'static str,
+    },
+    VisualClear(ModuleInstanceId),
+    SourcePause,
+}
+
+#[cfg(any(test, feature = "automation"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ControlTarget {
+    pub(crate) rect: egui::Rect,
+    pub(crate) enabled: bool,
+    pub(crate) hovered: bool,
+    pub(crate) frame_token: u64,
+    pub(crate) pass_token: u64,
+}
 
 struct ModuleEntry {
     instance_id: ModuleInstanceId,
@@ -30,6 +156,12 @@ pub struct App {
     next_instance_id: u64,
     started_at: Instant,
     control_error: Option<String>,
+    #[cfg(any(test, feature = "automation"))]
+    control_targets: std::collections::HashMap<ControlKey, ControlTarget>,
+    #[cfg(any(test, feature = "automation"))]
+    probe_frame_token: u64,
+    #[cfg(any(test, feature = "automation"))]
+    probe_pass_token: u64,
 }
 
 impl App {
@@ -49,34 +181,52 @@ impl App {
             next_instance_id: 1,
             started_at: Instant::now(),
             control_error: None,
+            #[cfg(any(test, feature = "automation"))]
+            control_targets: std::collections::HashMap::new(),
+            #[cfg(any(test, feature = "automation"))]
+            probe_frame_token: 0,
+            #[cfg(any(test, feature = "automation"))]
+            probe_pass_token: 0,
         };
-        app.add_module(SPECTRUM_MODULE_ID)?;
+        let initial_module = app.create_module_entry(SPECTRUM_MODULE_ID, ModuleInstanceId(1))?;
+        app.modules.push(initial_module);
+        app.active_module = Some(ModuleInstanceId(1));
+        app.next_instance_id = 2;
         Ok(app)
     }
 
-    fn add_module(&mut self, type_id: &'static str) -> Result<ModuleInstanceId, RegistryError> {
+    fn create_module_entry(
+        &self,
+        type_id: &'static str,
+        instance_id: ModuleInstanceId,
+    ) -> Result<ModuleEntry, RegistryError> {
         let module = self.registry.create_module(type_id, &self.services)?;
         let label = self
             .registry
             .module_types()
             .into_iter()
             .find(|(id, _)| *id == type_id)
-            .expect("registered module type")
-            .1;
-        let id = ModuleInstanceId(self.next_instance_id);
-        self.next_instance_id = self
-            .next_instance_id
-            .checked_add(1)
-            .expect("module IDs exhausted");
-        self.modules.push(ModuleEntry {
-            instance_id: id,
+            .map(|(_, label)| label)
+            .ok_or_else(|| RegistryError::UnknownModule(type_id.to_owned()))?;
+        Ok(ModuleEntry {
+            instance_id,
             type_id,
             label,
             module,
-        });
-        self.active_module = Some(id);
-        self.control_error = None;
-        Ok(id)
+        })
+    }
+
+    fn insert_module(&mut self, type_id: &'static str) -> Result<ModuleInstanceId, AppActionError> {
+        let instance_id = ModuleInstanceId(self.next_instance_id);
+        let next_instance_id = self
+            .next_instance_id
+            .checked_add(1)
+            .ok_or(AppActionError::InstanceIdExhausted)?;
+        let entry = self.create_module_entry(type_id, instance_id)?;
+        self.modules.push(entry);
+        self.active_module = Some(instance_id);
+        self.next_instance_id = next_instance_id;
+        Ok(instance_id)
     }
 
     fn active_index(&self) -> Option<usize> {
@@ -85,36 +235,150 @@ impl App {
             .position(|entry| Some(entry.instance_id) == self.active_module)
     }
 
-    fn close_active(&mut self) {
-        if let Some(index) = self.active_index() {
-            self.modules.remove(index);
-            self.active_module = self
-                .modules
-                .get(index.min(self.modules.len().saturating_sub(1)))
-                .map(|entry| entry.instance_id);
-        }
+    fn module_index(&self, instance_id: ModuleInstanceId) -> Result<usize, AppActionError> {
+        self.modules
+            .iter()
+            .position(|entry| entry.instance_id == instance_id)
+            .ok_or(AppActionError::StaleInstance(instance_id))
     }
 
-    fn select_channel(&mut self, channel: ChannelSelection) {
-        if let Some(index) = self.active_index() {
-            match self.modules[index].module.set_channel(channel) {
-                Ok(()) => self.control_error = None,
-                Err(error) => self.control_error = Some(error.to_string()),
+    pub(crate) fn apply_action(
+        &mut self,
+        action: AppAction,
+    ) -> Result<ActionOutcome, AppActionError> {
+        let result = match action {
+            AppAction::AddModule { type_id } => {
+                self.insert_module(type_id).map(ActionOutcome::Created)
             }
+            AppAction::SelectModule { instance_id } => self.module_index(instance_id).map(|_| {
+                self.active_module = Some(instance_id);
+                ActionOutcome::Applied
+            }),
+            AppAction::CloseModule { instance_id } => self.module_index(instance_id).map(|index| {
+                self.modules.remove(index);
+                if self.active_module == Some(instance_id) {
+                    self.active_module = self
+                        .modules
+                        .get(index.min(self.modules.len().saturating_sub(1)))
+                        .map(|entry| entry.instance_id);
+                }
+                ActionOutcome::Applied
+            }),
+            AppAction::SetChannel {
+                instance_id,
+                channel,
+            } => self.module_index(instance_id).and_then(|index| {
+                let module = &mut self.modules[index].module;
+                let Some(current_channel) = module.channel() else {
+                    return Err(AppActionError::Unsupported("channel selection"));
+                };
+                if current_channel != channel {
+                    module.set_channel(channel)?;
+                }
+                Ok(ActionOutcome::Applied)
+            }),
+            AppAction::SetStyle {
+                instance_id,
+                style_id,
+            } => self.module_index(instance_id).and_then(|index| {
+                let options = self.modules[index].module.style_options();
+                if options.is_empty() {
+                    return Err(AppActionError::Unsupported("style selection"));
+                }
+                if !options.iter().any(|option| option.id == style_id) {
+                    return Err(AppActionError::Registry(RegistryError::UnknownStyle(
+                        style_id.to_owned(),
+                    )));
+                }
+                self.modules[index]
+                    .module
+                    .set_style(style_id, &self.registry)?;
+                Ok(ActionOutcome::Applied)
+            }),
+            AppAction::ClearVisualState { instance_id } => {
+                self.module_index(instance_id).and_then(|index| {
+                    if self.modules[index].module.style_options().is_empty() {
+                        return Err(AppActionError::Unsupported("visual state clearing"));
+                    }
+                    self.modules[index].module.clear_visual_state();
+                    Ok(ActionOutcome::Applied)
+                })
+            }
+            AppAction::TogglePause => {
+                if !matches!(
+                    self.services.source.source_status().state,
+                    SourceState::Running | SourceState::Paused
+                ) {
+                    Err(AppActionError::Unsupported(
+                        "source pause or resume in its current state",
+                    ))
+                } else {
+                    self.live
+                        .toggle_pause()
+                        .map(|_| ActionOutcome::Applied)
+                        .map_err(AppActionError::LiveAudio)
+                }
+            }
+        };
+        match &result {
+            Ok(_) => self.control_error = None,
+            Err(error) => self.control_error = Some(error.to_string()),
+        }
+        result
+    }
+
+    #[cfg(any(test, feature = "automation"))]
+    pub(crate) fn observation(&self) -> AppObservation {
+        AppObservation {
+            modules: self
+                .modules
+                .iter()
+                .map(|entry| ObservedModule {
+                    instance_id: entry.instance_id,
+                    type_id: entry.type_id,
+                    channel: entry.module.channel(),
+                    active_style: entry.module.active_style(),
+                })
+                .collect(),
+            active_module: self.active_module,
+            source_status: self.services.source.source_status(),
+            control_error: self.control_error.clone(),
         }
     }
 
-    fn toggle_pause(&mut self) {
-        if let Err(error) = self.live.toggle_pause() {
-            self.control_error = Some(error.to_string());
-        } else {
-            self.control_error = None;
+    #[cfg(any(test, feature = "automation"))]
+    pub(crate) fn control_targets(&self) -> &std::collections::HashMap<ControlKey, ControlTarget> {
+        &self.control_targets
+    }
+
+    #[cfg(any(test, feature = "automation"))]
+    pub(crate) fn dataflow_handle_for_automation(&self) -> crate::dataflow::DataflowHandle {
+        self.services.dataflow.clone()
+    }
+
+    #[cfg(any(test, feature = "automation"))]
+    pub(crate) fn source_descriptor_for_automation(&self) -> &AudioDescriptor {
+        self.services.source.descriptor().as_ref()
+    }
+
+    #[cfg(any(test, feature = "automation"))]
+    fn begin_probe_pass(&mut self, ui: &egui::Ui) {
+        if ui.ctx().current_pass_index() == 0 {
+            self.probe_frame_token = self
+                .probe_frame_token
+                .checked_add(1)
+                .expect("UI frame token exhausted");
         }
+        self.probe_pass_token = self
+            .probe_pass_token
+            .checked_add(1)
+            .expect("UI pass token exhausted");
+        self.control_targets.clear();
     }
 
     fn handle_shortcuts(&mut self, ui: &egui::Ui) {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-            ui.send_viewport_cmd(egui::ViewportCommand::Close);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if ui.input(|input| input.key_pressed(egui::Key::Space))
             && matches!(
@@ -122,22 +386,32 @@ impl App {
                 SourceState::Running | SourceState::Paused
             )
         {
-            self.toggle_pause();
+            let _ = self.apply_action(AppAction::TogglePause);
         }
-        if self
+        let active_channel_target = self
             .active_index()
-            .is_some_and(|index| self.modules[index].module.channel().is_some())
-        {
+            .filter(|&index| self.modules[index].module.channel().is_some())
+            .map(|index| self.modules[index].instance_id);
+        if let Some(instance_id) = active_channel_target {
             if ui.input(|input| input.key_pressed(egui::Key::M)) {
-                self.select_channel(ChannelSelection::MonoAverage);
+                let _ = self.apply_action(AppAction::SetChannel {
+                    instance_id,
+                    channel: ChannelSelection::MonoAverage,
+                });
             }
             if ui.input(|input| input.key_pressed(egui::Key::Num1)) {
-                self.select_channel(self.numbered_channel(0));
+                let _ = self.apply_action(AppAction::SetChannel {
+                    instance_id,
+                    channel: self.numbered_channel(0),
+                });
             }
             if ui.input(|input| input.key_pressed(egui::Key::Num2))
                 && self.services.source.descriptor().channel_count > 1
             {
-                self.select_channel(self.numbered_channel(1));
+                let _ = self.apply_action(AppAction::SetChannel {
+                    instance_id,
+                    channel: self.numbered_channel(1),
+                });
             }
         }
     }
@@ -147,6 +421,9 @@ impl App {
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
+        #[cfg(any(test, feature = "automation"))]
+        let mut pending_controls = Vec::new();
+
         ui.horizontal_wrapped(|ui| {
             ui.label("Module:");
             let selected_text = self
@@ -156,80 +433,132 @@ impl App {
                     format!("{} #{}", entry.label, entry.instance_id.0)
                 })
                 .unwrap_or_else(|| "None".to_owned());
-            egui::ComboBox::from_id_salt("module-selector")
+            let mut selected_instance = None;
+            #[cfg_attr(not(any(test, feature = "automation")), allow(unused_variables))]
+            let selector = egui::ComboBox::from_id_salt("module-selector")
                 .selected_text(selected_text)
                 .show_ui(ui, |ui| {
                     for entry in &self.modules {
-                        let label = format!("{} #{}", entry.label, entry.instance_id.0);
-                        ui.selectable_value(
-                            &mut self.active_module,
-                            Some(entry.instance_id),
-                            label,
-                        )
-                        .on_hover_text(entry.type_id);
-                    }
-                });
-            egui::ComboBox::from_id_salt("module-add")
-                .selected_text("Add module")
-                .show_ui(ui, |ui| {
-                    for (type_id, label) in self.registry.module_types() {
-                        if ui.button(label).clicked()
-                            && let Err(error) = self.add_module(type_id)
-                        {
-                            self.control_error = Some(error.to_string());
+                        let instance_id = entry.instance_id;
+                        let response = ui
+                            .selectable_label(
+                                self.active_module == Some(instance_id),
+                                format!("{} #{}", entry.label, instance_id.0),
+                            )
+                            .on_hover_text(entry.type_id);
+                        #[cfg(any(test, feature = "automation"))]
+                        pending_controls.push((
+                            ControlKey::ModuleSelectInstance(instance_id),
+                            response.clone(),
+                        ));
+                        if response.clicked() {
+                            selected_instance = Some(instance_id);
                         }
                     }
                 });
-            if ui
-                .add_enabled(
-                    self.active_module.is_some(),
-                    egui::Button::new("Close module"),
-                )
-                .clicked()
-            {
-                self.close_active();
+            #[cfg(any(test, feature = "automation"))]
+            pending_controls.push((ControlKey::ModuleSelectOpen, selector.response.clone()));
+            if let Some(instance_id) = selected_instance {
+                let _ = self.apply_action(AppAction::SelectModule { instance_id });
             }
 
-            if let Some(index) = self.active_index() {
-                let style_options = self.modules[index].module.style_options();
-                if !style_options.is_empty() {
-                    ui.separator();
-                    ui.label("Style:");
-                    let active_style = self.modules[index].module.active_style();
-                    let active_label = style_options
-                        .iter()
-                        .find(|option| Some(option.id) == active_style)
-                        .map_or("Select", |option| option.label);
-                    let mut selected_style = None;
-                    egui::ComboBox::from_id_salt("style-selector")
-                        .selected_text(active_label)
-                        .show_ui(ui, |ui| {
-                            for option in style_options {
-                                if ui
-                                    .selectable_label(active_style == Some(option.id), option.label)
-                                    .clicked()
-                                {
-                                    selected_style = Some(option.id);
-                                }
+            let mut added_type = None;
+            #[cfg_attr(not(any(test, feature = "automation")), allow(unused_variables))]
+            let add = egui::ComboBox::from_id_salt("module-add")
+                .selected_text("Add module")
+                .show_ui(ui, |ui| {
+                    for (type_id, label) in self.registry.module_types() {
+                        let response = ui.button(label);
+                        #[cfg(any(test, feature = "automation"))]
+                        pending_controls
+                            .push((ControlKey::ModuleAddItem(type_id), response.clone()));
+                        if response.clicked() {
+                            added_type = Some(type_id);
+                        }
+                    }
+                });
+            #[cfg(any(test, feature = "automation"))]
+            pending_controls.push((ControlKey::ModuleAddOpen, add.response.clone()));
+            if let Some(type_id) = added_type {
+                let _ = self.apply_action(AppAction::AddModule { type_id });
+            }
+
+            let close_target = self
+                .active_index()
+                .map(|index| self.modules[index].instance_id);
+            let close_response =
+                ui.add_enabled(close_target.is_some(), egui::Button::new("Close module"));
+            #[cfg(any(test, feature = "automation"))]
+            pending_controls.push((ControlKey::ModuleClose, close_response.clone()));
+            if close_response.clicked()
+                && let Some(instance_id) = close_target
+            {
+                let _ = self.apply_action(AppAction::CloseModule { instance_id });
+            }
+
+            let style_controls = self.active_index().map(|index| {
+                (
+                    self.modules[index].instance_id,
+                    self.modules[index].module.style_options(),
+                    self.modules[index].module.active_style(),
+                )
+            });
+            if let Some((instance_id, style_options, active_style)) = style_controls
+                && !style_options.is_empty()
+            {
+                ui.separator();
+                ui.label("Style:");
+                let active_label = style_options
+                    .iter()
+                    .find(|option| Some(option.id) == active_style)
+                    .map_or("Select", |option| option.label);
+                let mut selected_style = None;
+                #[cfg_attr(not(any(test, feature = "automation")), allow(unused_variables))]
+                let style = egui::ComboBox::from_id_salt("style-selector")
+                    .selected_text(active_label)
+                    .show_ui(ui, |ui| {
+                        for option in style_options {
+                            let response =
+                                ui.selectable_label(active_style == Some(option.id), option.label);
+                            #[cfg(any(test, feature = "automation"))]
+                            pending_controls.push((
+                                ControlKey::StyleOption {
+                                    instance_id,
+                                    style_id: option.id,
+                                },
+                                response.clone(),
+                            ));
+                            if response.clicked() {
+                                selected_style = Some(option.id);
                             }
-                        });
-                    if let Some(style_id) = selected_style
-                        && let Err(error) = self.modules[index]
-                            .module
-                            .set_style(style_id, &self.registry)
-                    {
-                        self.control_error = Some(error.to_string());
-                    }
-                    if ui.button("Clear visual state").clicked() {
-                        self.modules[index].module.clear_visual_state();
-                    }
+                        }
+                    });
+                #[cfg(any(test, feature = "automation"))]
+                pending_controls.push((ControlKey::StyleOpen(instance_id), style.response.clone()));
+                if let Some(style_id) = selected_style {
+                    let _ = self.apply_action(AppAction::SetStyle {
+                        instance_id,
+                        style_id,
+                    });
+                }
+                let clear_response = ui.button("Clear visual state");
+                #[cfg(any(test, feature = "automation"))]
+                pending_controls
+                    .push((ControlKey::VisualClear(instance_id), clear_response.clone()));
+                if clear_response.clicked() {
+                    let _ = self.apply_action(AppAction::ClearVisualState { instance_id });
                 }
             }
         });
+
         ui.horizontal_wrapped(|ui| {
-            if let Some(index) = self.active_index()
-                && let Some(selected_channel) = self.modules[index].module.channel()
-            {
+            let channel_target = self.active_index().and_then(|index| {
+                self.modules[index]
+                    .module
+                    .channel()
+                    .map(|channel| (self.modules[index].instance_id, channel))
+            });
+            if let Some((instance_id, selected_channel)) = channel_target {
                 ui.label("Channel:");
                 let descriptor = self.services.source.descriptor().clone();
                 for (channel_index, channel) in channel_options(&descriptor) {
@@ -241,21 +570,30 @@ impl App {
                         }
                         ChannelSelection::MonoAverage => unreachable!(),
                     };
-                    if ui
-                        .selectable_label(selected_channel == channel, label)
-                        .clicked()
-                    {
-                        self.select_channel(channel);
+                    let response = ui.selectable_label(selected_channel == channel, label);
+                    #[cfg(any(test, feature = "automation"))]
+                    pending_controls.push((ControlKey::Channel(channel), response.clone()));
+                    if response.clicked() {
+                        let _ = self.apply_action(AppAction::SetChannel {
+                            instance_id,
+                            channel,
+                        });
                     }
                 }
-                if ui
-                    .selectable_label(
-                        selected_channel == ChannelSelection::MonoAverage,
-                        "M: Mono mix",
-                    )
-                    .clicked()
-                {
-                    self.select_channel(ChannelSelection::MonoAverage);
+                let response = ui.selectable_label(
+                    selected_channel == ChannelSelection::MonoAverage,
+                    "M: Mono mix",
+                );
+                #[cfg(any(test, feature = "automation"))]
+                pending_controls.push((
+                    ControlKey::Channel(ChannelSelection::MonoAverage),
+                    response.clone(),
+                ));
+                if response.clicked() {
+                    let _ = self.apply_action(AppAction::SetChannel {
+                        instance_id,
+                        channel: ChannelSelection::MonoAverage,
+                    });
                 }
             }
             let status = self.services.source.source_status();
@@ -273,16 +611,82 @@ impl App {
                 SourceState::Stopped => "Stopped",
             };
             let can_toggle = matches!(status.state, SourceState::Running | SourceState::Paused);
-            if ui
-                .add_enabled(can_toggle, egui::Button::new(button_label))
-                .clicked()
-            {
-                self.toggle_pause();
+            let pause_response = ui.add_enabled(can_toggle, egui::Button::new(button_label));
+            #[cfg(any(test, feature = "automation"))]
+            pending_controls.push((ControlKey::SourcePause, pause_response.clone()));
+            if pause_response.clicked() {
+                let _ = self.apply_action(AppAction::TogglePause);
             }
             if let Some(error) = &self.control_error {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
         });
+
+        #[cfg(any(test, feature = "automation"))]
+        for (key, response) in pending_controls {
+            self.control_targets.insert(
+                key,
+                ControlTarget {
+                    rect: response.rect,
+                    enabled: response.enabled(),
+                    hovered: response.hovered(),
+                    frame_token: self.probe_frame_token,
+                    pass_token: self.probe_pass_token,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn ui_body(&mut self, ui: &mut egui::Ui, display_time: std::time::Duration) {
+        #[cfg(any(test, feature = "automation"))]
+        self.begin_probe_pass(ui);
+
+        self.handle_shortcuts(ui);
+        let background = egui::Color32::from_rgb(13, 18, 24);
+        egui::Panel::top("controls")
+            .frame(egui::Frame::default().fill(background))
+            .show_inside(ui, |ui| self.controls(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(background))
+            .show_inside(ui, |ui| {
+                let area = ui.max_rect();
+                let rect = Rect {
+                    min: Point {
+                        x: area.min.x,
+                        y: area.min.y,
+                    },
+                    max: Point {
+                        x: area.max.x,
+                        y: area.max.y,
+                    },
+                };
+                let pointer = ui
+                    .input(|input| input.pointer.hover_pos())
+                    .map(|position| Point {
+                        x: position.x,
+                        y: position.y,
+                    });
+                let scroll_delta_y = ui.input(|input| input.smooth_scroll_delta.y);
+                let zoom_delta = ui.input(egui::InputState::zoom_delta);
+                let mut renderer = EguiRenderTarget::new(ui.painter_at(area));
+                if let Some(index) = self.active_index() {
+                    let response = self.modules[index].module.draw(ModuleFrame {
+                        rect,
+                        monotonic_time: display_time,
+                        pointer,
+                        scroll_delta_y,
+                        zoom_delta,
+                        renderer: &mut renderer,
+                    });
+                    if let Some(delay) = response.repaint_after {
+                        ui.request_repaint_after(delay);
+                    }
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("No module. Use Add module to create one.");
+                    });
+                }
+            });
     }
 }
 
@@ -332,52 +736,8 @@ fn source_status_text(status: &SourceStatus) -> String {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.handle_shortcuts(ui);
-        let background = egui::Color32::from_rgb(13, 18, 24);
-        egui::Panel::top("controls")
-            .frame(egui::Frame::default().fill(background))
-            .show_inside(ui, |ui| self.controls(ui));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(background))
-            .show_inside(ui, |ui| {
-                let area = ui.max_rect();
-                let rect = Rect {
-                    min: Point {
-                        x: area.min.x,
-                        y: area.min.y,
-                    },
-                    max: Point {
-                        x: area.max.x,
-                        y: area.max.y,
-                    },
-                };
-                let pointer = ui
-                    .input(|input| input.pointer.hover_pos())
-                    .map(|position| Point {
-                        x: position.x,
-                        y: position.y,
-                    });
-                let scroll_delta_y = ui.input(|input| input.smooth_scroll_delta.y);
-                let zoom_delta = ui.input(egui::InputState::zoom_delta);
-                let mut renderer = EguiRenderTarget::new(ui.painter_at(area));
-                if let Some(index) = self.active_index() {
-                    let response = self.modules[index].module.draw(ModuleFrame {
-                        rect,
-                        monotonic_time: self.started_at.elapsed(),
-                        pointer,
-                        scroll_delta_y,
-                        zoom_delta,
-                        renderer: &mut renderer,
-                    });
-                    if let Some(delay) = response.repaint_after {
-                        ui.request_repaint_after(delay);
-                    }
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("No module. Use Add module to create one.");
-                    });
-                }
-            });
+        let display_time = self.started_at.elapsed();
+        self.ui_body(ui, display_time);
     }
 }
 
