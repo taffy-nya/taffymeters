@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Condvar, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -627,6 +627,11 @@ impl ManualInputDriver {
     }
 
     fn wait_processed(&self, target_frame: u64, deadline: Instant) -> Result<(), SyntheticError> {
+        // The worker publishes the frontier through an atomic and never unparks this
+        // thread, so a bare park would cost one OS timer tick (up to ~15.6 ms on
+        // Windows) per block. Yield first; one block normally drains in microseconds.
+        const YIELD_ROUNDS: u32 = 1024;
+        let mut rounds = 0u32;
         loop {
             self.ensure_running()?;
             let frontier = self
@@ -640,7 +645,12 @@ impl ManualInputDriver {
             if Instant::now() >= deadline {
                 return Err(SyntheticError::Timeout { target_frame });
             }
-            thread::park_timeout(Duration::from_millis(1));
+            if rounds < YIELD_ROUNDS {
+                rounds += 1;
+                thread::yield_now();
+            } else {
+                thread::park_timeout(Duration::from_millis(1));
+            }
         }
     }
 
@@ -668,8 +678,16 @@ struct RunControl {
     reanchor_pending: bool,
 }
 
+struct RealtimeControl {
+    run: Mutex<RunControl>,
+    wake: Condvar,
+    /// Controllers waiting for `run`. The producer yields the lock whenever this is
+    /// non-zero, so pause/resume/stop never wait behind a catch-up burst.
+    waiting: AtomicUsize,
+}
+
 pub(crate) struct RealtimeSource {
-    control: Arc<(Mutex<RunControl>, Condvar)>,
+    control: Arc<RealtimeControl>,
     worker: Option<JoinHandle<()>>,
     telemetry: Arc<SourceTelemetry>,
     #[cfg(test)]
@@ -677,21 +695,26 @@ pub(crate) struct RealtimeSource {
 }
 
 impl RealtimeSource {
+    /// `max_lag_blocks` bounds how far the producer may fall behind wall time before it
+    /// re-anchors instead of back-filling; use the transport capacity so a catch-up
+    /// burst cannot overflow the bounded queue.
     pub(crate) fn start(
         endpoint: CaptureEndpoint,
         synthetic: SyntheticConfig,
         sample_capacity: usize,
+        max_lag_blocks: usize,
         telemetry: Arc<SourceTelemetry>,
     ) -> Result<Self, SyntheticError> {
-        let control = Arc::new((
-            Mutex::new(RunControl {
+        let control = Arc::new(RealtimeControl {
+            run: Mutex::new(RunControl {
                 state: RealtimeState::Running,
                 anchor: Instant::now(),
                 anchor_frame: 0,
                 reanchor_pending: false,
             }),
-            Condvar::new(),
-        ));
+            wake: Condvar::new(),
+            waiting: AtomicUsize::new(0),
+        });
         let thread_control = Arc::clone(&control);
         let thread_telemetry = Arc::clone(&telemetry);
         let scratch = vec![0.0; sample_capacity];
@@ -709,6 +732,7 @@ impl RealtimeSource {
                     endpoint,
                     synthetic,
                     scratch,
+                    max_lag_blocks,
                     thread_control,
                     thread_telemetry,
                     worker_frame,
@@ -722,6 +746,7 @@ impl RealtimeSource {
                     endpoint,
                     synthetic,
                     scratch,
+                    max_lag_blocks,
                     thread_control,
                     thread_telemetry,
                 );
@@ -739,40 +764,50 @@ impl RealtimeSource {
         })
     }
 
+    /// Runs `change` under the control lock, announcing the request first so the
+    /// producer releases the lock between blocks, then wakes the producer.
+    fn with_control<R>(&self, change: impl FnOnce(&mut RunControl) -> R) -> R {
+        let control = &*self.control;
+        control.waiting.fetch_add(1, Ordering::AcqRel);
+        let result = match control.run.lock() {
+            Ok(mut run) => change(&mut run),
+            Err(poisoned) => change(&mut poisoned.into_inner()),
+        };
+        control.waiting.fetch_sub(1, Ordering::AcqRel);
+        control.wake.notify_all();
+        result
+    }
+
     pub(crate) fn pause(&self) -> Result<(), SyntheticError> {
-        let (lock, wake) = &*self.control;
-        let mut control = lock.lock().map_err(|_| SyntheticError::LockPoisoned)?;
-        match control.state {
+        self.with_control(|control| match control.state {
             RealtimeState::Running => {
                 control.state = RealtimeState::Paused;
                 self.telemetry.set_state(SourceState::Paused);
-                wake.notify_all();
                 Ok(())
             }
             RealtimeState::Paused => Ok(()),
             RealtimeState::Stopped => Err(SyntheticError::Stopped),
-        }
+        })
     }
 
     pub(crate) fn resume(&self, handle: &DataflowHandle) -> Result<(), SyntheticError> {
-        let (lock, wake) = &*self.control;
-        let mut control = lock.lock().map_err(|_| SyntheticError::LockPoisoned)?;
-        match control.state {
-            RealtimeState::Running => return Ok(()),
-            RealtimeState::Stopped => return Err(SyntheticError::Stopped),
-            RealtimeState::Paused => {}
-        }
-        let continuity = self.telemetry.continuity().wrapping_add(1);
-        handle
-            .resume_at(continuity)
-            .map_err(SyntheticError::Control)?;
-        self.telemetry.advance_continuity();
-        control.anchor = Instant::now();
-        control.reanchor_pending = true;
-        control.state = RealtimeState::Running;
-        self.telemetry.set_state(SourceState::Running);
-        wake.notify_all();
-        Ok(())
+        self.with_control(|control| {
+            match control.state {
+                RealtimeState::Running => return Ok(()),
+                RealtimeState::Stopped => return Err(SyntheticError::Stopped),
+                RealtimeState::Paused => {}
+            }
+            let continuity = self.telemetry.continuity().wrapping_add(1);
+            handle
+                .resume_at(continuity)
+                .map_err(SyntheticError::Control)?;
+            self.telemetry.advance_continuity();
+            control.anchor = Instant::now();
+            control.reanchor_pending = true;
+            control.state = RealtimeState::Running;
+            self.telemetry.set_state(SourceState::Running);
+            Ok(())
+        })
     }
 
     #[cfg(test)]
@@ -781,13 +816,8 @@ impl RealtimeSource {
     }
 
     pub(crate) fn stop(&mut self) {
-        let (lock, wake) = &*self.control;
-        match lock.lock() {
-            Ok(mut control) => control.state = RealtimeState::Stopped,
-            Err(poisoned) => poisoned.into_inner().state = RealtimeState::Stopped,
-        }
+        self.with_control(|control| control.state = RealtimeState::Stopped);
         self.telemetry.set_state(SourceState::Stopped);
-        wake.notify_all();
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
         {
@@ -807,10 +837,14 @@ fn realtime_worker(
     mut endpoint: CaptureEndpoint,
     synthetic: SyntheticConfig,
     mut scratch: Vec<f32>,
-    control: Arc<(Mutex<RunControl>, Condvar)>,
+    max_lag_blocks: usize,
+    control: Arc<RealtimeControl>,
     telemetry: Arc<SourceTelemetry>,
     #[cfg(test)] producer_frame: Arc<AtomicU64>,
 ) {
+    // Yield interval while a controller is queued for the lock; the controller's
+    // notify normally wakes the producer first.
+    const CONTROL_YIELD: Duration = Duration::from_millis(1);
     let sample_rate_hz = synthetic.descriptor.sample_rate_hz;
     let block_frames = synthetic.block_frames;
     let block_frames_u64 =
@@ -819,8 +853,12 @@ fn realtime_worker(
     let sample_count = block_frames
         .checked_mul(channels)
         .expect("synthetic block capacity is validated before start");
+    let max_lag = frame_duration(
+        block_frames_u64.saturating_mul(u64::try_from(max_lag_blocks.max(1)).unwrap_or(u64::MAX)),
+        sample_rate_hz,
+    );
     let mut next_frame = 0_u64;
-    let mut state = match control.0.lock() {
+    let mut state = match control.run.lock() {
         Ok(state) => state,
         Err(_) => {
             telemetry.device_lost(SyntheticError::LockPoisoned.to_string());
@@ -828,59 +866,65 @@ fn realtime_worker(
         }
     };
     loop {
-        match state.state {
+        let wait = match state.state {
             RealtimeState::Stopped => return,
-            RealtimeState::Paused => {
-                state = match control.1.wait(state) {
-                    Ok(state) => state,
-                    Err(_) => {
-                        telemetry.device_lost(SyntheticError::LockPoisoned.to_string());
-                        return;
-                    }
-                };
-                continue;
+            RealtimeState::Paused => None,
+            // A queued pause/resume/stop gets the lock before the next block.
+            RealtimeState::Running if control.waiting.load(Ordering::Acquire) != 0 => {
+                Some(CONTROL_YIELD)
             }
-            RealtimeState::Running => {}
-        }
-        if state.reanchor_pending {
-            state.anchor_frame = next_frame;
-            state.reanchor_pending = false;
-        }
-
-        let end_frame = match next_frame.checked_add(block_frames_u64) {
-            Some(end_frame) => end_frame,
-            None => {
-                state.state = RealtimeState::Stopped;
-                telemetry.device_lost(SyntheticError::FramePositionOverflow.to_string());
+            RealtimeState::Running => {
+                if state.reanchor_pending {
+                    state.anchor_frame = next_frame;
+                    state.reanchor_pending = false;
+                }
+                let Some(end_frame) = next_frame.checked_add(block_frames_u64) else {
+                    state.state = RealtimeState::Stopped;
+                    telemetry.device_lost(SyntheticError::FramePositionOverflow.to_string());
+                    return;
+                };
+                let frames_from_anchor = end_frame.saturating_sub(state.anchor_frame);
+                let now = Instant::now();
+                let deadline = state
+                    .anchor
+                    .checked_add(frame_duration(frames_from_anchor, sample_rate_hz))
+                    .unwrap_or(now);
+                if now < deadline {
+                    Some(deadline - now)
+                } else {
+                    if now - deadline > max_lag {
+                        // Suspended far beyond the transport capacity (debugger, sleep):
+                        // continue from now instead of back-filling a burst that the
+                        // bounded queue would mostly drop. Frame numbering stays contiguous.
+                        state.anchor = now;
+                        state.anchor_frame = next_frame;
+                    }
+                    synthetic.fill_frames(next_frame, block_frames, &mut scratch[..sample_count]);
+                    endpoint.write(&scratch[..sample_count]);
+                    next_frame = end_frame;
+                    #[cfg(test)]
+                    producer_frame.store(next_frame, Ordering::Release);
+                    // The lock covers each bounded block write, so a returned pause
+                    // means no further block is produced.
+                    continue;
+                }
+            }
+        };
+        let woke = match wait {
+            Some(timeout) => control
+                .wake
+                .wait_timeout(state, timeout)
+                .map(|(state, _)| state)
+                .map_err(drop),
+            None => control.wake.wait(state).map_err(drop),
+        };
+        state = match woke {
+            Ok(state) => state,
+            Err(_) => {
+                telemetry.device_lost(SyntheticError::LockPoisoned.to_string());
                 return;
             }
         };
-        let frames_from_anchor = end_frame.saturating_sub(state.anchor_frame);
-        let deadline = state
-            .anchor
-            .checked_add(frame_duration(frames_from_anchor, sample_rate_hz))
-            .unwrap_or_else(Instant::now);
-        let now = Instant::now();
-        if now < deadline {
-            state = match control
-                .1
-                .wait_timeout(state, deadline.saturating_duration_since(now))
-            {
-                Ok((state, _)) => state,
-                Err(_) => {
-                    telemetry.device_lost(SyntheticError::LockPoisoned.to_string());
-                    return;
-                }
-            };
-            continue;
-        }
-
-        synthetic.fill_frames(next_frame, block_frames, &mut scratch[..sample_count]);
-        endpoint.write(&scratch[..sample_count]);
-        next_frame = end_frame;
-        #[cfg(test)]
-        producer_frame.store(next_frame, Ordering::Release);
-        // The control lock covers the bounded block write; pause cannot return before it ends.
     }
 }
 
@@ -911,6 +955,66 @@ mod tests {
     }
 
     #[test]
+    fn realtime_source_reanchors_after_suspension_instead_of_back_filling() {
+        let synthetic = SyntheticConfig {
+            block_frames: 48,
+            ..SyntheticConfig::default()
+        };
+        let sample_capacity = synthetic.validate(48).unwrap();
+        let descriptor = Arc::new(synthetic.descriptor.clone());
+        let telemetry = Arc::new(SourceTelemetry::new());
+        let (mut endpoint, processing) =
+            create_block_transport(2, 8, 48, Arc::clone(&telemetry)).unwrap();
+        let (dataflow, handle) =
+            Dataflow::spawn(Arc::clone(&descriptor), processing, Arc::clone(&telemetry));
+        endpoint.set_worker(dataflow.worker_thread());
+        let mut source = RealtimeSource::start(
+            endpoint,
+            synthetic,
+            sample_capacity,
+            8,
+            Arc::clone(&telemetry),
+        )
+        .unwrap();
+        wait_frontier(&handle, 48, Instant::now() + Duration::from_secs(5));
+
+        // Model a producer that was suspended for 10 minutes: the wall-clock deadline
+        // is 28.8 M frames ahead of the producer position.
+        let suspended = Duration::from_secs(600);
+        source.with_control(|control| {
+            control.anchor = Instant::now()
+                .checked_sub(suspended)
+                .expect("monotonic clock has 10 minutes of history");
+            control.anchor_frame = 0;
+        });
+        let resumed_at = source.next_frame();
+        let observe_until = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < observe_until {
+            thread::yield_now();
+        }
+        let started = Instant::now();
+        source.pause().unwrap();
+        let pause_latency = started.elapsed();
+        let produced = source.next_frame() - resumed_at;
+
+        assert!(
+            produced < 48_000,
+            "producer back-filled {produced} frames after suspension"
+        );
+        assert_eq!(
+            telemetry.snapshot().dropped_blocks,
+            0,
+            "catch-up burst overflowed the transport"
+        );
+        assert!(
+            pause_latency < Duration::from_millis(100),
+            "pause waited {pause_latency:?} behind the producer"
+        );
+        source.stop();
+        drop(dataflow);
+    }
+
+    #[test]
     fn realtime_source_pauses_resumes_and_stops_its_real_producer() {
         let synthetic = SyntheticConfig {
             block_frames: 48,
@@ -925,9 +1029,14 @@ mod tests {
             Dataflow::spawn(Arc::clone(&descriptor), processing, Arc::clone(&telemetry));
         endpoint.set_worker(dataflow.worker_thread());
 
-        let mut source =
-            RealtimeSource::start(endpoint, synthetic, sample_capacity, Arc::clone(&telemetry))
-                .unwrap();
+        let mut source = RealtimeSource::start(
+            endpoint,
+            synthetic,
+            sample_capacity,
+            64,
+            Arc::clone(&telemetry),
+        )
+        .unwrap();
         assert_eq!(telemetry.snapshot().state, SourceState::Running);
         let first_frontier = wait_frontier(&handle, 48, Instant::now() + Duration::from_secs(5));
 

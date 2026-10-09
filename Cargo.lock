@@ -3219,7 +3219,6 @@ dependencies = [
  "cpal",
  "eframe",
  "image",
- "pollster",
  "ringbuf",
  "rustfft",
  "serde",

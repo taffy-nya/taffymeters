@@ -132,9 +132,14 @@ impl LiveAudio {
         let telemetry = Arc::new(SourceTelemetry::new());
         let (endpoint, dataflow, handle) =
             Self::create_transport(config, Arc::clone(&descriptor), Arc::clone(&telemetry))?;
-        let source =
-            RealtimeSource::start(endpoint, synthetic, sample_capacity, Arc::clone(&telemetry))
-                .map_err(|error| LiveAudioError::Synthetic(error.to_string()))?;
+        let source = RealtimeSource::start(
+            endpoint,
+            synthetic,
+            sample_capacity,
+            config.transport_blocks,
+            Arc::clone(&telemetry),
+        )
+        .map_err(|error| LiveAudioError::Synthetic(error.to_string()))?;
         Ok(Self::from_parts(
             InputDriver::Realtime(source),
             dataflow,

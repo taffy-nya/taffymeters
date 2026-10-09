@@ -108,9 +108,12 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
             }
             let output = PathBuf::from(&values[1]);
             new_output(&output).map_err(runtime)?;
-            let mut report = report::new(&suite, json!({"kind": "manual", "sample_rate_hz": 48000,
+            let mut report = report::new(
+                &suite,
+                json!({"kind": "manual", "sample_rate_hz": 48000,
                 "channels": 2, "layout": "stereo", "block_frames": 160,
-                "signal": "left 3000Hz/right 6000Hz at 0.08 amplitude; absolute frame", "seed": null})).map_err(runtime)?;
+                "signal": "left 3000Hz/right 6000Hz at 0.08 amplitude; absolute frame", "seed": null}),
+            );
             let baseline = values.get(2).map(Path::new);
             if suite == "core" {
                 scenarios::core(&mut report);
@@ -130,7 +133,7 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 parse_run(&args[1..], &["--expected", "--actual", "--output"]).map_err(usage)?;
             let output = PathBuf::from(&values[2]);
             new_output(&output).map_err(runtime)?;
-            let mut report = report::new("compare", serde_json::Value::Null).map_err(runtime)?;
+            let mut report = report::new("compare", serde_json::Value::Null);
             report.cases.push(scenarios::compare_case(
                 Path::new(&values[0]),
                 Path::new(&values[1]),

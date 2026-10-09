@@ -81,11 +81,12 @@ pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn file_digest(path: &Path) -> Result<String, String> {
-    fs::read(path)
-        .map(|bytes| digest(&bytes))
-        .map_err(|e| format!("{}: {e}", path.display()))
+fn file_digest(path: &Path) -> Value {
+    fs::read(path).map_or_else(|_| json!("unknown"), |bytes| json!(digest(&bytes)))
 }
+
+/// The lock file this binary was compiled against, not the workspace's current one.
+const BUILD_CARGO_LOCK: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock"));
 
 fn compiled_target() -> String {
     let env = if cfg!(target_env = "gnu") {
@@ -107,24 +108,27 @@ fn compiled_target() -> String {
     )
 }
 
-pub(super) fn new(suite: &str, input: Value) -> Result<Report, String> {
-    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
+pub(super) fn new(suite: &str, input: Value) -> Report {
+    let executable = std::env::current_exe().ok();
+    let executable_sha256 = executable
+        .as_deref()
+        .map_or_else(|| json!("unknown"), file_digest);
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
-    Ok(Report {
+    Report {
         schema_version: 1, suite: suite.into(), status: Status::NotRun,
         build: json!({"package_version": env!("CARGO_PKG_VERSION"), "profile": profile,
             "automation_enabled": true, "target": compiled_target(),
-            "executable": executable, "executable_sha256": file_digest(&executable)?,
-            "cargo_lock_sha256": file_digest(&lock)?}),
+            "executable": executable.map_or_else(|| json!("unknown"), |path| json!(path)),
+            "executable_sha256": executable_sha256,
+            "cargo_lock_sha256": digest(BUILD_CARGO_LOCK)}),
         environment: json!({"os": std::env::consts::OS, "renderer": null}),
         input, cases: vec![],
         uncovered: vec!["native window, system audio/device, cross-monitor DPI and performance require separate verification".into()],
-    })
+    }
 }
 
 impl Report {

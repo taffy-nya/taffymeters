@@ -2038,6 +2038,42 @@ mod tests {
     }
 
     #[test]
+    fn full_control_queue_reports_busy_through_public_controller() {
+        let (_capture, dataflow, _) = fixture(1, 8, 32);
+        let subscription = dataflow
+            .subscribe(SpectrumRequest::new(
+                ChannelSelection::MonoAverage,
+                FftConfig::new(32, 16, -160.0).unwrap(),
+            ))
+            .unwrap();
+        let controller = subscription.controller();
+        let release = block_worker(&dataflow.handle);
+        for index in 0..CONTROL_QUEUE_CAPACITY {
+            assert_eq!(
+                controller.set_visible(index % 2 == 0),
+                Ok(()),
+                "command {index} fits in the bounded queue"
+            );
+        }
+        assert_eq!(controller.set_visible(true), Err(ControlError::Busy));
+        release.wait();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match controller.set_visible(true) {
+                Ok(()) => break,
+                Err(ControlError::Busy) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "queue never drained after release"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("unexpected control error: {error}"),
+            }
+        }
+    }
+
+    #[test]
     fn shared_analysis_reactivation_marks_history_discontinuity() {
         let (mut capture, dataflow, _) = fixture(1, 8, 128);
         let mut request = SpectrumRequest::new(
