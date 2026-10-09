@@ -1,7 +1,8 @@
 # taffymeters
 
-面向 Windows 的轻量音频可视化工具。当前重构已完成阶段 3-1：默认播放端点的
-WASAPI loopback 驱动按需频域／时域订阅，由独立 Module 实例选择风格绘制。
+面向 Windows 的轻量音频可视化工具。当前重构已完成阶段 4：默认播放端点的
+WASAPI loopback 驱动按需频域／时域订阅，独立 Module 实例在多窗口 Workspace 的
+BSP 布局中选择风格绘制。
 
 ## 当前能力
 
@@ -12,9 +13,11 @@ WASAPI loopback 驱动按需频域／时域订阅，由独立 Module 实例选�
 - 提供 Spectrum、Spectrogram、Oscilloscope、Waveform、Stereometer、Level Meter 和 Empty Module
 - Spectrum 支持 Curve、Bars、Pixel 风格、峰值保持、悬停读数和范围缩放
 - Oscilloscope 支持 Line 与独立实例的 Persistence 风格
-- 单窗口内添加、选择、关闭同类型多实例（同一时间绘制一个活动实例），并支持 resize、置顶和暂停／恢复
+- 多窗口 Workspace：窗口内 BSP 分割、拖动分割线（16 点网格，Alt 临时自由）、关闭叶子；
+  Module 拆出为新窗口、移动／合并到任意窗口的叶子；窗口移动、resize、最大化、置顶、
+  相互与屏幕边缘吸附、成组移动与解除
 
-BSP、多窗口 Workspace、Theme／持久化和产品外部插件加载仍属于后续阶段。
+Theme／持久化和产品外部插件加载仍属于后续阶段。
 旧实现保留在 `tmp/prev_src`，只作为只读迁移参考。
 
 ## 构建
@@ -29,11 +32,19 @@ cargo build --release
 
 ## 使用
 
-运行程序后会采集默认音频播放端点。顶部可添加 Module，选择活动实例、
-关闭实例，或切换其支持的风格。快捷键 `1`、`2`、`M` 分别把**当前支持声道的
-实例**设置为 Left、Right、Mono average；不会更改其他实例。
-`Space` 暂停／恢复整个音源，`Escape` 关闭窗口。即使没有实例，仍可看到
-源状态并重新添加。Spectrum 和 Oscilloscope 可在绘图区内使用滚轮调整显示范围。
+运行程序后会采集默认音频播放端点，打开一个无边框窗口。
+
+- 悬停叶子右侧／底部边缘出现 `+`，单击向右／向下分割出同类型新实例；拖动分割线调整
+  比例（按住 Alt 不吸附网格，双击复位均分）。
+- 右键叶子打开菜单：Module（更换类型）、Channel、Style（含清空视觉状态）、
+  Layout（分割、拆出到新窗口、移动到…）、Close module、Window（置顶、最大化、
+  成组／解组、关闭窗口）、Source（状态与暂停）。“移动到…”后在任意窗口点击目标叶子的
+  左／右／上／下目标带完成合并，Esc 或右键取消。
+- 拖动正文移动窗口，拖动外缘 resize；松开时与其他窗口及屏幕工作区边缘吸附。
+- 单击叶子选中；`1`、`2`、`M` 把选中且支持声道的实例设为 Left、Right、Mono average。
+  `Space` 暂停／恢复整个音源；`Escape` 依次关闭菜单、取消拖动／移动／拆出，否则关闭
+  当前窗口（`Ctrl+W` 同）。关闭最后一个窗口才退出程序。
+- Spectrum 和 Oscilloscope 可在绘图区内使用滚轮调整显示范围。
 
 ## 项目结构
 
@@ -47,5 +58,6 @@ taffymeters/
   src/live.rs      采集和 worker 生命周期
   src/plotting.rs  Spectrum 坐标、反向映射和刻度
   src/render.rs    宿主绘制接口和 egui 适配器
-  src/app.rs       原生应用外壳
+  src/workspace/   Workspace、BSP 布局、窗口 UI 与桌面吸附
+  src/app.rs       原生多窗口适配（egui viewport）
 ```

@@ -17,6 +17,9 @@ serde_json = { version = "1.0.149", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 sha2 = { version = "0.10", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse"] }
+
 [profile.release]
 strip = true
 lto = true

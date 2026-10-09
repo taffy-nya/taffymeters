@@ -8,13 +8,16 @@ use serde_json::{Value, json};
 
 use crate::{
     LiveAudio, LiveAudioConfig,
-    app::{ActionOutcome, App, AppAction, ControlKey, ModuleInstanceId},
     audio::{
         ChannelLayout, SourceState,
-        synthetic::{SignalSpec, SyntheticConfig},
+        synthetic::{ManualInputDriver, SignalSpec, SyntheticConfig},
     },
     builtins::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
     dataflow::{ChannelSelection, FftConfig, SpectrumRequest, TimeDomainRequest},
+    workspace::{
+        ActionOutcome, ControlKey, MenuItem, ModuleInstanceId, ROOT_WINDOW, Side, Workspace,
+        WorkspaceAction,
+    },
 };
 
 use super::{
@@ -24,29 +27,89 @@ use super::{
     visual, wait_until,
 };
 
-fn check(condition: bool, message: &str) -> Result<(), String> {
+pub(super) fn check(condition: bool, message: &str) -> Result<(), String> {
     if condition {
         Ok(())
     } else {
         Err(message.into())
     }
 }
-fn synthetic() -> Result<(LiveAudio, crate::audio::synthetic::ManualInputDriver), String> {
+fn synthetic() -> Result<(LiveAudio, ManualInputDriver), String> {
     LiveAudio::open_manual(LiveAudioConfig::default(), SyntheticConfig::default())
         .map_err(|e| e.to_string())
 }
-fn app() -> Result<(App, crate::audio::synthetic::ManualInputDriver), String> {
+/// A Workspace over the manual synthetic source: one window, one Spectrum.
+pub(super) fn workspace() -> Result<(Workspace, ManualInputDriver), String> {
     let (live, driver) = synthetic()?;
-    Ok((App::new(live).map_err(|e| e.to_string())?, driver))
+    Ok((
+        Workspace::new(live, false).map_err(|e| e.to_string())?,
+        driver,
+    ))
 }
-fn created(outcome: ActionOutcome) -> Result<ModuleInstanceId, String> {
+pub(super) fn created(outcome: ActionOutcome) -> Result<ModuleInstanceId, String> {
     match outcome {
         ActionOutcome::Created(id) => Ok(id),
-        _ => Err("expected created instance".into()),
+        other => Err(format!("expected created instance, got {other:?}")),
     }
 }
-fn action(app: &mut App, action: AppAction) -> Result<ActionOutcome, String> {
-    app.apply_action(action).map_err(|e| e.to_string())
+pub(super) fn action(ws: &mut Workspace, action: WorkspaceAction) -> Result<ActionOutcome, String> {
+    ws.apply_action(action).map_err(|e| e.to_string())
+}
+/// The first leaf of the root window.
+pub(super) fn first_leaf(ws: &Workspace) -> Result<ModuleInstanceId, String> {
+    ws.observation()
+        .window(ROOT_WINDOW)
+        .and_then(|window| window.leaves.first().copied())
+        .ok_or_else(|| "root window has no module".to_owned())
+}
+/// Replace the root window's first leaf with a default instance of `type_id`.
+pub(super) fn replace_first(
+    ws: &mut Workspace,
+    type_id: &'static str,
+) -> Result<ModuleInstanceId, String> {
+    let leaf = first_leaf(ws)?;
+    created(action(
+        ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: leaf,
+            type_id,
+        },
+    )?)
+}
+/// Split the widest root-window leaf that has room and turn the new leaf into
+/// `type_id` (the user path: split, then pick the type).
+pub(super) fn add_module(
+    ws: &mut Workspace,
+    type_id: &'static str,
+) -> Result<ModuleInstanceId, String> {
+    let observation = ws.observation();
+    let window = observation
+        .window(ROOT_WINDOW)
+        .ok_or("root window closed")?;
+    let mut leaves = window.leaf_rects.clone();
+    leaves.sort_by(|a, b| b.1.area().total_cmp(&a.1.area()));
+    let (target, side) = leaves
+        .iter()
+        .flat_map(|(leaf, _)| [(*leaf, Side::Right), (*leaf, Side::Below)])
+        .find(|(leaf, side)| ws.can_split(*leaf, *side))
+        .ok_or("no leaf has room for another module")?;
+    let new = created(action(
+        ws,
+        WorkspaceAction::SplitModule {
+            instance_id: target,
+            side,
+        },
+    )?)?;
+    if observation.module(target).map(|module| module.type_id) == Some(type_id) {
+        return Ok(new);
+    }
+    created(action(
+        ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: new,
+            type_id,
+        },
+    )?)
 }
 fn run_case(id: &str, f: impl FnOnce() -> Result<Value, String>) -> Case {
     let started = Instant::now();
@@ -68,6 +131,9 @@ pub(super) fn core(report: &mut Report) {
     report.cases.push(run_case("C08", c08));
     report.cases.push(run_case("C09", c09));
     report.cases.push(run_case("C10", c10));
+    for (id, scenario) in super::workspace_scenarios::CASES {
+        report.cases.push(run_case(id, scenario));
+    }
 }
 
 fn c01() -> Result<Value, String> {
@@ -353,231 +419,244 @@ fn realtime_smoke() -> Result<Value, String> {
 }
 
 fn c04() -> Result<Value, String> {
-    let (mut app, mut driver) = app()?;
-    let a = app
-        .observation()
-        .active_module
-        .ok_or("initial Spectrum missing")?;
+    let (mut ws, mut driver) = workspace()?;
+    let a = first_leaf(&ws)?;
     let b = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: SPECTRUM_MODULE_ID,
+        &mut ws,
+        WorkspaceAction::SplitModule {
+            instance_id: a,
+            side: Side::Right,
         },
     )?)?;
     action(
-        &mut app,
-        AppAction::SetChannel {
+        &mut ws,
+        WorkspaceAction::SetChannel {
             instance_id: b,
             channel: ChannelSelection::Right,
         },
     )?;
     action(
-        &mut app,
-        AppAction::SetStyle {
+        &mut ws,
+        WorkspaceAction::SetStyle {
             instance_id: b,
             style_id: crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
         },
     )?;
-    let observation = app.observation();
+    let o = ws.observation();
+    let (ma, mb) = (
+        o.module(a).ok_or("A missing")?,
+        o.module(b).ok_or("B missing")?,
+    );
     check(
-        observation.modules.len() == 2
-            && observation.modules[0].channel == Some(ChannelSelection::MonoAverage)
-            && observation.modules[1].channel == Some(ChannelSelection::Right)
-            && observation.modules[1].active_style
-                == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
+        o.modules.len() == 2
+            && a != b
+            && ma.channel == Some(ChannelSelection::MonoAverage)
+            && mb.channel == Some(ChannelSelection::Right)
+            && mb.active_style == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID)
+            && ma.active_style == Some(crate::builtins::DEFAULT_SPECTRUM_STYLE_ID),
         "instances not independent",
     )?;
-    action(&mut app, AppAction::SelectModule { instance_id: a })?;
-    action(&mut app, AppAction::SelectModule { instance_id: b })?;
-    action(&mut app, AppAction::CloseModule { instance_id: b })?;
-    action(&mut app, AppAction::CloseModule { instance_id: a })?;
+    action(&mut ws, WorkspaceAction::SelectModule { instance_id: a })?;
+    action(&mut ws, WorkspaceAction::SelectModule { instance_id: b })?;
+    action(&mut ws, WorkspaceAction::CloseModule { instance_id: b })?;
+    action(&mut ws, WorkspaceAction::CloseModule { instance_id: a })?;
+    let o = ws.observation();
+    let root = o
+        .window(ROOT_WINDOW)
+        .ok_or("closing modules closed the window")?;
     check(
-        app.observation().active_module.is_none(),
-        "last close left selection",
+        root.leaves.is_empty() && root.active.is_none() && o.modules.is_empty(),
+        "last close left selection or instances",
     )?;
-    action(&mut app, AppAction::TogglePause)?;
+    action(&mut ws, WorkspaceAction::TogglePause)?;
     check(
-        app.observation().source_status.state == SourceState::Paused
+        ws.observation().source_status.state == SourceState::Paused
             && driver.advance_frames(160, deadline()).is_err(),
         "zero-module pause did not stop source",
     )?;
-    action(&mut app, AppAction::TogglePause)?;
+    action(&mut ws, WorkspaceAction::TogglePause)?;
     let new_id = created(action(
-        &mut app,
-        AppAction::AddModule {
+        &mut ws,
+        WorkspaceAction::AddModule {
+            window_id: ROOT_WINDOW,
             type_id: SPECTRUM_MODULE_ID,
         },
     )?)?;
     check(new_id != a && new_id != b, "reused instance id")?;
-    let before = app.observation();
+    let before = ws.observation();
+    let rejected = [
+        WorkspaceAction::SelectModule { instance_id: b },
+        WorkspaceAction::AddModule {
+            window_id: ROOT_WINDOW,
+            type_id: SPECTRUM_MODULE_ID,
+        },
+        WorkspaceAction::SetChannel {
+            instance_id: new_id,
+            channel: ChannelSelection::Discrete(9),
+        },
+        WorkspaceAction::SetStyle {
+            instance_id: new_id,
+            style_id: "invalid.style",
+        },
+        WorkspaceAction::ReplaceModule {
+            instance_id: new_id,
+            type_id: "invalid.module",
+        },
+        WorkspaceAction::SplitModule {
+            instance_id: b,
+            side: Side::Right,
+        },
+    ];
+    for rejected_action in rejected {
+        let label = format!("{rejected_action:?}");
+        check(
+            action(&mut ws, rejected_action).is_err(),
+            &format!("invalid action accepted: {label}"),
+        )?;
+    }
+    let after = ws.observation();
     check(
-        action(&mut app, AppAction::SelectModule { instance_id: b }).is_err()
-            && action(
-                &mut app,
-                AppAction::AddModule {
-                    type_id: "invalid.module",
-                },
-            )
-            .is_err()
-            && action(
-                &mut app,
-                AppAction::SetChannel {
-                    instance_id: new_id,
-                    channel: ChannelSelection::Discrete(9),
-                },
-            )
-            .is_err()
-            && action(
-                &mut app,
-                AppAction::SetStyle {
-                    instance_id: new_id,
-                    style_id: "invalid.style",
-                },
-            )
-            .is_err(),
-        "invalid action accepted",
-    )?;
-    let after = app.observation();
-    check(
-        after.active_module == before.active_module
-            && after.modules.len() == before.modules.len()
-            && after.modules[0].channel == before.modules[0].channel
-            && after.modules[0].active_style == before.modules[0].active_style,
+        after.windows == before.windows
+            && after.modules == before.modules
+            && after.modules_created == before.modules_created,
         "failed action partially committed",
     )?;
-    Ok(json!({"original_ids":[a.0,b.0],"new_id":new_id.0,"source":"running"}))
-}
-
-fn c05() -> Result<Value, String> {
-    let (app, mut driver) = app()?;
-    let mut h = Harness::new(app);
-    h.frame(vec![]);
-    let a = h
-        .app
-        .observation()
-        .active_module
-        .ok_or("initial module absent")?;
-    h.dropdown(
-        ControlKey::ModuleAddOpen,
-        ControlKey::ModuleAddItem(SPECTRUM_MODULE_ID),
-    )?;
-    let b = h
-        .app
-        .observation()
-        .active_module
-        .ok_or("add popup did not create")?;
-    check(
-        a != b && h.app.observation().modules.len() == 2,
-        "Add click did not add instance",
-    )?;
-    h.dropdown(
-        ControlKey::ModuleSelectOpen,
-        ControlKey::ModuleSelectInstance(a),
-    )?;
-    check(
-        h.app.observation().active_module == Some(a),
-        "selector did not select A",
-    )?;
-    h.dropdown(
-        ControlKey::ModuleSelectOpen,
-        ControlKey::ModuleSelectInstance(b),
-    )?;
-    h.click(ControlKey::Channel(ChannelSelection::Right))?;
-    check(
-        h.app.observation().modules[1].channel == Some(ChannelSelection::Right)
-            && h.app.observation().modules[0].channel == Some(ChannelSelection::MonoAverage),
-        "Channel click wrong instance",
-    )?;
-    h.dropdown(
-        ControlKey::StyleOpen(b),
-        ControlKey::StyleOption {
-            instance_id: b,
-            style_id: crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
-        },
-    )?;
-    check(
-        h.app.observation().modules[1].active_style
-            == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
-        "style popup did not apply",
-    )?;
-    h.click(ControlKey::ModuleClose)?;
-    h.click(ControlKey::ModuleClose)?;
-    let remaining = h.app.observation().modules.len();
-    check(
-        remaining == 0,
-        &format!("Close clicks left {remaining} modules"),
-    )?;
-    // The release pass recorded the pre-action Response; query the settled layout.
-    h.frame(vec![]);
-    let close = h.control_state(&ControlKey::ModuleClose);
-    check(
-        matches!(close, Some(false)),
-        &format!("zero-module Close should be disabled, got {close:?}"),
-    )?;
-    h.dropdown(
-        ControlKey::ModuleAddOpen,
-        ControlKey::ModuleAddItem(SPECTRUM_MODULE_ID),
-    )?;
-    h.click(ControlKey::SourcePause)?;
-    check(
-        h.app.observation().source_status.state == SourceState::Paused
-            && driver.advance_frames(160, deadline()).is_err(),
-        "Pause button failed",
-    )?;
-    h.click(ControlKey::SourcePause)?;
-    check(
-        h.app.observation().source_status.state == SourceState::Running,
-        "Resume button failed",
-    )?;
-    let old = h.locate(&ControlKey::ModuleClose)?;
-    h.width = 480.0;
-    h.height = 240.0;
-    h.frame(vec![]);
-    check(
-        h.click_target(ControlKey::ModuleClose, old).is_err(),
-        "stale control accepted after resize",
-    )?;
-    check(
-        h.locate(&ControlKey::StyleOption {
-            instance_id: b,
-            style_id: crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
-        })
-        .is_err(),
-        "invisible popup item incorrectly available",
-    )?;
-    h.click(ControlKey::SourcePause)?;
-    check(
-        h.app.observation().source_status.state == SourceState::Paused,
-        "narrow-layout Pause target missed",
-    )?;
-    h.click(ControlKey::SourcePause)?;
-    check(
-        h.app.observation().source_status.state == SourceState::Running,
-        "narrow-layout Resume target missed",
-    )?;
+    ws.check_ownership()?;
     Ok(
-        json!({"created":b.0,"restored_instances":h.app.observation().modules.len(),"narrow_size":[480,240]}),
+        json!({"original_ids":[a.0,b.0],"new_id":new_id.0,"source":"running",
+        "rejected_without_commit":6}),
     )
 }
 
-fn c06() -> Result<Value, String> {
-    let (app, _driver) = app()?;
-    let mut h = Harness::new(app);
+fn c05() -> Result<Value, String> {
+    let (ws, mut driver) = workspace()?;
+    let mut h = Harness::new(ws);
     h.frame(vec![]);
-    let a = h.app.observation().active_module.ok_or("no spectrum")?;
+    let a = first_leaf(&h.ws)?;
+    h.click(ControlKey::SplitZone {
+        instance_id: a,
+        side: Side::Right,
+    })?;
+    let o = h.ws.observation();
+    let leaves = o.window(ROOT_WINDOW).ok_or("root closed")?.leaves.clone();
+    check(
+        leaves.len() == 2 && leaves[0] == a,
+        &format!("split entry did not add a right leaf: {leaves:?}"),
+    )?;
+    let b = leaves[1];
+    h.menu(
+        ControlKey::LeafBody(b),
+        &[
+            MenuItem::ChannelOpen,
+            MenuItem::Channel(ChannelSelection::Right),
+        ],
+    )?;
+    let o = h.ws.observation();
+    check(
+        o.module(b).and_then(|m| m.channel) == Some(ChannelSelection::Right)
+            && o.module(a).and_then(|m| m.channel) == Some(ChannelSelection::MonoAverage),
+        "Channel click wrong instance",
+    )?;
+    h.menu(
+        ControlKey::LeafBody(b),
+        &[
+            MenuItem::StyleOpen,
+            MenuItem::Style(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
+        ],
+    )?;
+    check(
+        h.ws.observation().module(b).and_then(|m| m.active_style)
+            == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
+        "style popup did not apply",
+    )?;
+    h.menu(ControlKey::LeafBody(b), &[MenuItem::CloseModule])?;
+    h.menu(ControlKey::LeafBody(a), &[MenuItem::CloseModule])?;
+    h.frame(vec![]);
+    let remaining = h.ws.observation().modules.len();
+    check(
+        remaining == 0 && h.locate(&ControlKey::EmptyBody).is_ok(),
+        &format!("Close clicks left {remaining} modules or no empty-window entry"),
+    )?;
+    check(
+        h.locate(&ControlKey::LeafBody(a)).is_err(),
+        "closed leaf still has a target",
+    )?;
+    h.dropdown(
+        ControlKey::Menu(MenuItem::AddOpen),
+        ControlKey::Menu(MenuItem::AddModule(SPECTRUM_MODULE_ID)),
+    )?;
+    let c = first_leaf(&h.ws)?;
+    check(c != a && c != b, "Add reused an instance")?;
+    h.menu(
+        ControlKey::LeafBody(c),
+        &[MenuItem::SourceOpen, MenuItem::Pause],
+    )?;
+    check(
+        h.ws.observation().source_status.state == SourceState::Paused
+            && driver.advance_frames(160, deadline()).is_err(),
+        "Pause entry failed",
+    )?;
+    h.menu(
+        ControlKey::LeafBody(c),
+        &[MenuItem::SourceOpen, MenuItem::Pause],
+    )?;
+    check(
+        h.ws.observation().source_status.state == SourceState::Running,
+        "Resume entry failed",
+    )?;
+    let old = h.locate(&ControlKey::LeafBody(c))?;
+    h.set_size(egui::vec2(480.0, 240.0));
+    h.frame(vec![]);
+    check(
+        h.click_target(ControlKey::LeafBody(c), old).is_err(),
+        "stale control accepted after resize",
+    )?;
+    check(
+        h.locate(&ControlKey::Menu(MenuItem::Style(
+            crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
+        )))
+        .is_err(),
+        "closed popup item incorrectly available",
+    )?;
+    h.menu(
+        ControlKey::LeafBody(c),
+        &[MenuItem::SourceOpen, MenuItem::Pause],
+    )?;
+    check(
+        h.ws.observation().source_status.state == SourceState::Paused,
+        "narrow-layout Pause target missed",
+    )?;
+    h.menu(
+        ControlKey::LeafBody(c),
+        &[MenuItem::SourceOpen, MenuItem::Pause],
+    )?;
+    check(
+        h.ws.observation().source_status.state == SourceState::Running,
+        "narrow-layout Resume target missed",
+    )?;
+    h.ws.check_ownership()?;
+    Ok(json!({"split":b.0,"added":c.0,"narrow_size":[480,240]}))
+}
+
+fn c06() -> Result<Value, String> {
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    h.frame(vec![]);
+    let a = first_leaf(&h.ws)?;
+    let channel = |h: &Harness, id| h.ws.observation().module(id).and_then(|m| m.channel);
     h.key(egui::Key::Num2);
     check(
-        h.app.observation().modules[0].channel == Some(ChannelSelection::Right),
+        channel(&h, a) == Some(ChannelSelection::Right),
         "Num2 not routed",
     )?;
     h.key(egui::Key::Num1);
     check(
-        h.app.observation().modules[0].channel == Some(ChannelSelection::Left),
+        channel(&h, a) == Some(ChannelSelection::Left),
         "Num1 not routed",
     )?;
     h.key(egui::Key::M);
     check(
-        h.app.observation().modules[0].channel == Some(ChannelSelection::MonoAverage),
+        channel(&h, a) == Some(ChannelSelection::MonoAverage),
         "M not routed",
     )?;
     // Repeated press/release pairs: each pair applies once, setting the same value is
@@ -588,13 +667,13 @@ fn c06() -> Result<Value, String> {
         h.frame(vec![]);
     }
     check(
-        h.app.observation().modules[0].channel == Some(ChannelSelection::Right)
-            && h.context.input(|input| input.keys_down.is_empty()),
+        channel(&h, a) == Some(ChannelSelection::Right)
+            && h.context().input(|input| input.keys_down.is_empty()),
         "repeated Num2 left a held key or changed channel while idle",
     )?;
     h.key(egui::Key::M);
     check(
-        h.app.observation().modules[0].channel == Some(ChannelSelection::MonoAverage),
+        channel(&h, a) == Some(ChannelSelection::MonoAverage),
         "M after repeated Num2 not routed",
     )?;
     let mut non_channel = Vec::new();
@@ -603,45 +682,49 @@ fn c06() -> Result<Value, String> {
         LEVEL_METER_MODULE_ID,
         EMPTY_MODULE_ID,
     ] {
-        let id = created(action(&mut h.app, AppAction::AddModule { type_id })?)?;
+        let id = add_module(&mut h.ws, type_id)?;
         h.frame(vec![]);
-        let observation = h.app.observation();
+        h.click(ControlKey::LeafBody(id))?;
+        let observation = h.ws.observation();
         check(
-            observation.active_module == Some(id)
+            observation.window(ROOT_WINDOW).and_then(|w| w.active) == Some(id)
                 && observation
-                    .modules
-                    .iter()
-                    .find(|module| module.instance_id == id)
+                    .module(id)
                     .is_some_and(|module| module.channel.is_none()),
-            &format!("{type_id} reports a Channel capability"),
+            &format!("{type_id} not selected or reports a Channel capability"),
         )?;
-        for channel in [
-            ChannelSelection::Left,
-            ChannelSelection::Right,
-            ChannelSelection::MonoAverage,
-        ] {
-            check(
-                h.locate(&ControlKey::Channel(channel)).is_err(),
-                &format!("{type_id} exposes a Channel control"),
-            )?;
-        }
+        h.right_click(ControlKey::LeafBody(id))?;
+        h.frame(vec![]);
+        check(
+            h.locate(&ControlKey::Menu(MenuItem::CloseModule)).is_ok()
+                && h.locate(&ControlKey::Menu(MenuItem::ChannelOpen)).is_err(),
+            &format!("{type_id} menu exposes Channel or misses its entries"),
+        )?;
+        // Escape with the menu open closes only the menu.
+        h.key(egui::Key::Escape);
+        h.frame(vec![]);
+        check(
+            h.ws.has_window(ROOT_WINDOW)
+                && h.locate(&ControlKey::Menu(MenuItem::CloseModule)).is_err(),
+            "Escape with an open menu closed the window or left the menu open",
+        )?;
         for key in [egui::Key::Num1, egui::Key::Num2] {
             h.key(key);
             check(
-                h.app.observation().modules[0].channel == Some(ChannelSelection::MonoAverage),
-                &format!("shortcut on {type_id} touched the inactive Spectrum"),
+                channel(&h, a) == Some(ChannelSelection::MonoAverage),
+                &format!("shortcut on {type_id} touched the unselected Spectrum"),
             )?;
         }
         non_channel.push(json!({"type":type_id,"id":id.0}));
     }
     h.key(egui::Key::Space);
     check(
-        h.app.observation().source_status.state == SourceState::Paused,
+        h.ws.observation().source_status.state == SourceState::Paused,
         "Space did not pause",
     )?;
     h.key(egui::Key::Space);
     check(
-        h.app.observation().source_status.state == SourceState::Running,
+        h.ws.observation().source_status.state == SourceState::Running,
         "Space did not resume",
     )?;
     let mono = SyntheticConfig {
@@ -658,54 +741,55 @@ fn c06() -> Result<Value, String> {
     };
     let (mono_live, _) =
         LiveAudio::open_manual(LiveAudioConfig::default(), mono).map_err(|e| e.to_string())?;
-    let mut mono_h = Harness::new(App::new(mono_live).map_err(|e| e.to_string())?);
+    let mut mono_h = Harness::new(Workspace::new(mono_live, false).map_err(|e| e.to_string())?);
     mono_h.frame(vec![]);
+    let mono_leaf = first_leaf(&mono_h.ws)?;
+    mono_h.menu(ControlKey::LeafBody(mono_leaf), &[MenuItem::ChannelOpen])?;
     check(
         mono_h
-            .locate(&ControlKey::Channel(ChannelSelection::Right))
-            .is_err(),
-        "mono descriptor exposed Right",
+            .locate(&ControlKey::Menu(MenuItem::Channel(
+                ChannelSelection::Right,
+            )))
+            .is_err()
+            && mono_h
+                .locate(&ControlKey::Menu(MenuItem::Channel(
+                    ChannelSelection::Discrete(0),
+                )))
+                .is_ok(),
+        "mono descriptor exposed Right or missed its channel",
     )?;
+    mono_h.key(egui::Key::Escape);
     mono_h.key(egui::Key::Num2);
     check(
-        mono_h.app.observation().modules[0].channel == Some(ChannelSelection::MonoAverage),
+        mono_h
+            .ws
+            .observation()
+            .module(mono_leaf)
+            .and_then(|m| m.channel)
+            == Some(ChannelSelection::MonoAverage),
         "mono Num2 selected missing channel",
     )?;
-    let output = h.frame(vec![egui::Event::Key {
-        key: egui::Key::Escape,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: egui::Modifiers::NONE,
-    }]);
+    h.key(egui::Key::Escape);
     check(
-        output.viewport_output.values().any(|v| {
-            v.commands
-                .iter()
-                .any(|cmd| matches!(cmd, egui::ViewportCommand::Close))
-        }),
-        "Escape did not issue viewport Close",
+        h.ws.windows().is_empty() && h.ws.observation().modules.is_empty(),
+        "idle Escape did not close the window and its modules",
     )?;
-    Ok(json!({"spectrum":a.0,"non_channel_modules":non_channel,"escape":"viewport command only"}))
+    Ok(json!({"spectrum":a.0,"non_channel_modules":non_channel,
+        "escape":"menu first, then closes this Workspace window; native close is the adapter's"}))
 }
 
 fn c07() -> Result<Value, String> {
-    let (mut app, mut driver) = app()?;
-    let osc = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: crate::builtins::OSCILLOSCOPE_MODULE_ID,
-        },
-    )?)?;
+    let (mut ws, mut driver) = workspace()?;
+    let osc = replace_first(&mut ws, crate::builtins::OSCILLOSCOPE_MODULE_ID)?;
     action(
-        &mut app,
-        AppAction::SetStyle {
+        &mut ws,
+        WorkspaceAction::SetStyle {
             instance_id: osc,
             style_id: crate::builtins::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
         },
     )?;
-    let handle = app.dataflow_handle_for_automation();
-    let mut h = Harness::new(app);
+    let handle = ws.dataflow_handle_for_automation();
+    let mut h = Harness::new(ws);
     h.display_time = Duration::from_secs(1);
     h.frame(vec![]);
     driver
@@ -735,7 +819,10 @@ fn c07() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let with_trace = h.frame(vec![]);
     let published = handle.metrics().time_publications;
-    h.click(ControlKey::VisualClear(osc))?;
+    h.menu(
+        ControlKey::LeafBody(osc),
+        &[MenuItem::StyleOpen, MenuItem::ClearVisual],
+    )?;
     let after_clear = h.frame(vec![]);
     check(
         with_trace.shapes.len() > after_clear.shapes.len()
@@ -786,50 +873,26 @@ fn filled_rects(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
         .collect()
 }
 
-/// One Waveform History instance receives `HIDDEN_FRAMES` of audio. With `hidden`,
-/// an Empty instance is active (the Waveform is never drawn) and the only PCM
-/// consumer is the hidden Waveform; otherwise the Waveform is drawn after every second
-/// of audio. Both runs then draw the Waveform once with identical input.
+/// One Waveform History instance (the window's only leaf) receives `HIDDEN_FRAMES`
+/// of audio. With `hidden` its window runs no UI pass meanwhile (a minimized /
+/// invisible viewport is not drawn); otherwise it is drawn after every second of
+/// audio. Both runs then draw the window once with identical input.
 fn waveform_visibility_run(hidden: bool) -> Result<WaveformRun, String> {
-    let (mut app, mut driver) = app()?;
-    let handle = app.dataflow_handle_for_automation();
-    let waveform = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: WAVEFORM_MODULE_ID,
-        },
-    )?)?;
-    let mut h = Harness::new(app);
+    let (mut ws, mut driver) = workspace()?;
+    let handle = ws.dataflow_handle_for_automation();
+    replace_first(&mut ws, WAVEFORM_MODULE_ID)?;
+    let mut h = Harness::new(ws);
     let before_audio = filled_rects(&h.frame(vec![]));
-    created(action(
-        &mut h.app,
-        AppAction::AddModule {
-            type_id: EMPTY_MODULE_ID,
-        },
-    )?)?;
-    if !hidden {
-        action(
-            &mut h.app,
-            AppAction::SelectModule {
-                instance_id: waveform,
-            },
-        )?;
-    }
-    h.frame(vec![]);
     let before = handle.metrics().time_pcm_frames;
     for _ in 0..HIDDEN_FRAMES / 48_000 {
         driver
             .advance_frames(48_000, deadline())
             .map_err(|e| e.to_string())?;
-        h.frame(vec![]);
+        if !hidden {
+            h.frame(vec![]);
+        }
     }
     let pcm_frames = handle.metrics().time_pcm_frames - before;
-    action(
-        &mut h.app,
-        AppAction::SelectModule {
-            instance_id: waveform,
-        },
-    )?;
     let restored = filled_rects(&h.frame(vec![]));
     Ok(WaveformRun {
         pcm_frames,
@@ -839,21 +902,11 @@ fn waveform_visibility_run(hidden: bool) -> Result<WaveformRun, String> {
 }
 
 fn c08() -> Result<Value, String> {
-    let (mut app, mut driver) = app()?;
-    let handle = app.dataflow_handle_for_automation();
-    let spectrum = app.observation().active_module.ok_or("no spectrum")?;
-    let waveform = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: WAVEFORM_MODULE_ID,
-        },
-    )?)?;
-    let levels = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: LEVEL_METER_MODULE_ID,
-        },
-    )?)?;
+    let (mut ws, mut driver) = workspace()?;
+    let handle = ws.dataflow_handle_for_automation();
+    let spectrum = first_leaf(&ws)?;
+    let waveform = add_module(&mut ws, WAVEFORM_MODULE_ID)?;
+    let levels = add_module(&mut ws, LEVEL_METER_MODULE_ID)?;
     driver
         .advance_frames(3200, deadline())
         .map_err(|e| e.to_string())?;
@@ -863,8 +916,8 @@ fn c08() -> Result<Value, String> {
         "mixed time needs did not compute",
     )?;
     action(
-        &mut app,
-        AppAction::CloseModule {
+        &mut ws,
+        WorkspaceAction::CloseModule {
             instance_id: waveform,
         },
     )?;
@@ -880,15 +933,10 @@ fn c08() -> Result<Value, String> {
             && only_levels.time_level_frames > before.time_level_frames,
         "PCM close affected Levels",
     )?;
-    let new_waveform = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: WAVEFORM_MODULE_ID,
-        },
-    )?)?;
+    let new_waveform = add_module(&mut ws, WAVEFORM_MODULE_ID)?;
     action(
-        &mut app,
-        AppAction::CloseModule {
+        &mut ws,
+        WorkspaceAction::CloseModule {
             instance_id: levels,
         },
     )?;
@@ -903,14 +951,14 @@ fn c08() -> Result<Value, String> {
         "Levels close affected PCM",
     )?;
     action(
-        &mut app,
-        AppAction::CloseModule {
+        &mut ws,
+        WorkspaceAction::CloseModule {
             instance_id: new_waveform,
         },
     )?;
     action(
-        &mut app,
-        AppAction::CloseModule {
+        &mut ws,
+        WorkspaceAction::CloseModule {
             instance_id: spectrum,
         },
     )?;
@@ -927,12 +975,13 @@ fn c08() -> Result<Value, String> {
     )?;
     for _ in 0..20 {
         let id = created(action(
-            &mut app,
-            AppAction::AddModule {
+            &mut ws,
+            WorkspaceAction::AddModule {
+                window_id: ROOT_WINDOW,
                 type_id: WAVEFORM_MODULE_ID,
             },
         )?)?;
-        action(&mut app, AppAction::CloseModule { instance_id: id })?;
+        action(&mut ws, WorkspaceAction::CloseModule { instance_id: id })?;
     }
     let after_cycles = handle.metrics();
     driver
@@ -948,34 +997,28 @@ fn c08() -> Result<Value, String> {
 }
 
 fn c09() -> Result<Value, String> {
-    let (mut app, mut driver) = app()?;
-    let id = app.observation().active_module.ok_or("no module")?;
-    action(&mut app, AppAction::TogglePause)?;
+    let (mut ws, mut driver) = workspace()?;
+    action(&mut ws, WorkspaceAction::TogglePause)?;
     check(
         driver.advance_frames(160, deadline()).is_err(),
         "paused input accepted",
     )?;
-    action(&mut app, AppAction::TogglePause)?;
+    action(&mut ws, WorkspaceAction::TogglePause)?;
     check(
         action(
-            &mut app,
-            AppAction::SelectModule {
+            &mut ws,
+            WorkspaceAction::SelectModule {
                 instance_id: ModuleInstanceId(u64::MAX),
             },
         )
         .is_err(),
         "invalid ID accepted",
     )?;
-    let empty = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: EMPTY_MODULE_ID,
-        },
-    )?)?;
+    let empty = add_module(&mut ws, EMPTY_MODULE_ID)?;
     check(
         action(
-            &mut app,
-            AppAction::SetChannel {
+            &mut ws,
+            WorkspaceAction::SetChannel {
                 instance_id: empty,
                 channel: ChannelSelection::Right,
             },
@@ -983,16 +1026,21 @@ fn c09() -> Result<Value, String> {
         .is_err(),
         "unsupported channel accepted",
     )?;
-    let mut h = Harness::new(app);
+    let mut h = Harness::new(ws);
+    h.frame(vec![]);
+    h.right_click(ControlKey::LeafBody(empty))?;
     h.frame(vec![]);
     check(
-        h.locate(&ControlKey::StyleOpen(id)).is_err(),
-        "hidden style control present",
+        h.locate(&ControlKey::Menu(MenuItem::StyleOpen)).is_err()
+            && h.locate(&ControlKey::Menu(MenuItem::ClearVisual)).is_err()
+            && h.locate(&ControlKey::Menu(MenuItem::ModuleOpen)).is_ok(),
+        "Empty menu shows style controls or misses Module",
     )?;
-    let old = h.locate(&ControlKey::ModuleClose)?;
+    h.key(egui::Key::Escape);
+    let old = h.locate(&ControlKey::LeafBody(empty))?;
     h.frame(vec![]);
     check(
-        h.click_target(ControlKey::ModuleClose, old).is_err(),
+        h.click_target(ControlKey::LeafBody(empty), old).is_err(),
         "stale token accepted",
     )?;
     let timeout = wait_until(
@@ -1107,37 +1155,83 @@ fn capture_frame(
     h: &mut Harness,
 ) -> Result<visual::Rendered, String> {
     let first = h.frame(vec![]);
+    let context = h.context();
+    let size = h.window(h.focus)?.size;
     renderer
-        .render(&h.context, first, h.width as u32, h.height as u32)
+        .render(&context, first, size.x as u32, size.y as u32)
         .map_err(|e| e.to_string())
+}
+
+/// Setup for an image of a single full-window Module with an optional style.
+fn single_module(
+    type_id: &'static str,
+    style: Option<&'static str>,
+) -> impl FnOnce(&mut Workspace) -> Result<(), String> {
+    move |ws| {
+        let id = if type_id == SPECTRUM_MODULE_ID {
+            first_leaf(ws)?
+        } else {
+            replace_first(ws, type_id)?
+        };
+        if let Some(style_id) = style {
+            action(
+                ws,
+                WorkspaceAction::SetStyle {
+                    instance_id: id,
+                    style_id,
+                },
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn workspace_layout(ws: &mut Workspace) -> Result<(), String> {
+    let spectrum = first_leaf(ws)?;
+    let waveform = created(action(
+        ws,
+        WorkspaceAction::SplitModule {
+            instance_id: spectrum,
+            side: Side::Right,
+        },
+    )?)?;
+    let waveform = created(action(
+        ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: waveform,
+            type_id: WAVEFORM_MODULE_ID,
+        },
+    )?)?;
+    let levels = created(action(
+        ws,
+        WorkspaceAction::SplitModule {
+            instance_id: waveform,
+            side: Side::Below,
+        },
+    )?)?;
+    action(
+        ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: levels,
+            type_id: LEVEL_METER_MODULE_ID,
+        },
+    )?;
+    Ok(())
 }
 
 fn image_case(
     renderer: &mut visual::OffscreenRenderer,
     id: &str,
-    type_id: &'static str,
-    style: Option<&'static str>,
+    setup: impl FnOnce(&mut Workspace) -> Result<(), String>,
     dpi: f32,
     output: &Path,
     baseline: Option<&Path>,
 ) -> Result<(Case, Value), String> {
-    let (mut app, mut driver) = app()?;
-    if type_id != SPECTRUM_MODULE_ID {
-        action(&mut app, AppAction::AddModule { type_id })?;
-    }
-    if let Some(style_id) = style {
-        let instance_id = app.observation().active_module.ok_or("missing module")?;
-        action(
-            &mut app,
-            AppAction::SetStyle {
-                instance_id,
-                style_id,
-            },
-        )?;
-    }
-    let handle = app.dataflow_handle_for_automation();
-    let mut h = Harness::new(app);
-    h.ppp = dpi;
+    let (mut ws, mut driver) = workspace()?;
+    setup(&mut ws)?;
+    let handle = ws.dataflow_handle_for_automation();
+    let mut h = Harness::new(ws);
+    h.window_mut(ROOT_WINDOW)?.ppp = dpi;
     capture_frame(renderer, &mut h)?;
     driver
         .advance_frames(48_000, deadline())
@@ -1156,8 +1250,8 @@ fn image_case(
     let manifest = json!({"case_id":id,"scene_version":1,"frame_token":h.frame,
         "egui_frame_nr":frame.egui_frame_nr,"egui_pass_nr":frame.egui_pass_nr,
         "gpu_submission_id":frame.submission_id,"readback_submission_id":frame.submission_id,
-        "source": {"id":h.app.source_descriptor_for_automation().source_id.0,
-        "generation":h.app.source_descriptor_for_automation().generation.0}, "delivered_through_frame":48_000,
+        "source": {"id":h.ws.source_descriptor_for_automation().source_id.0,
+        "generation":h.ws.source_descriptor_for_automation().generation.0}, "delivered_through_frame":48_000,
         "processed_through_frame":handle.processed_through_frame().map_err(|e|e.to_string())?,
         "result_revision":null,"result_version":null,
         "result_marker_note":"Module trait does not expose subscription snapshots; no extra analysis probe is created",
@@ -1289,9 +1383,9 @@ fn compare_with_baseline(
 }
 
 fn repeat_frame(renderer: &mut visual::OffscreenRenderer) -> Result<image::RgbaImage, String> {
-    let (app, mut driver) = app()?;
-    let handle = app.dataflow_handle_for_automation();
-    let mut h = Harness::new(app);
+    let (ws, mut driver) = workspace()?;
+    let handle = ws.dataflow_handle_for_automation();
+    let mut h = Harness::new(ws);
     capture_frame(renderer, &mut h)?;
     driver
         .advance_frames(48_000, deadline())
@@ -1313,22 +1407,17 @@ fn persistence_visual(
     output: &Path,
     baseline: Option<&Path>,
 ) -> Result<Case, String> {
-    let (mut app, mut driver) = app()?;
-    let osc = created(action(
-        &mut app,
-        AppAction::AddModule {
-            type_id: crate::builtins::OSCILLOSCOPE_MODULE_ID,
-        },
-    )?)?;
+    let (mut ws, mut driver) = workspace()?;
+    let osc = replace_first(&mut ws, crate::builtins::OSCILLOSCOPE_MODULE_ID)?;
     action(
-        &mut app,
-        AppAction::SetStyle {
+        &mut ws,
+        WorkspaceAction::SetStyle {
             instance_id: osc,
             style_id: crate::builtins::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
         },
     )?;
-    let handle = app.dataflow_handle_for_automation();
-    let mut h = Harness::new(app);
+    let handle = ws.dataflow_handle_for_automation();
+    let mut h = Harness::new(ws);
     h.display_time = Duration::ZERO;
     capture_frame(renderer, &mut h)?;
     driver
@@ -1419,7 +1508,7 @@ fn persistence_visual(
             "case_id":"V03-persistence","scene_version":1,"frame_token":h.frame,
             "egui_frame_nr":rendered.egui_frame_nr,"egui_pass_nr":rendered.egui_pass_nr,
             "gpu_submission_id":rendered.submission_id,"readback_submission_id":rendered.submission_id,
-            "source":h.app.source_descriptor_for_automation().source_id.0,"generation":h.app.source_descriptor_for_automation().generation.0,
+            "source":h.ws.source_descriptor_for_automation().source_id.0,"generation":h.ws.source_descriptor_for_automation().generation.0,
             "delivered_through_frame":1600,"processed_through_frame":1600,
             "result_version":null,"result_marker_note":"no extra analysis probe",
             "display_time_seconds":time,"logical_size":rendered.logical_size,"pixel_size":rendered.pixel_size,
@@ -1446,7 +1535,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
                 Status::Unavailable,
                 format!("{stage}: {message}"),
             ));
-            for id in ["V02", "V03", "V04", "V05"] {
+            for id in ["V02", "V03", "V04", "V05", "V06"] {
                 report.cases.push(Case::incomplete(
                     id,
                     Status::NotRun,
@@ -1459,7 +1548,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
             report
                 .cases
                 .push(Case::fail("V01", "renderer initialization", e));
-            for id in ["V02", "V03", "V04", "V05"] {
+            for id in ["V02", "V03", "V04", "V05", "V06"] {
                 report
                     .cases
                     .push(Case::incomplete(id, Status::NotRun, "V01 failed"));
@@ -1503,8 +1592,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
     match image_case(
         &mut renderer,
         "spectrum-curve",
-        SPECTRUM_MODULE_ID,
-        None,
+        single_module(SPECTRUM_MODULE_ID, None),
         1.0,
         &images,
         baseline,
@@ -1517,7 +1605,14 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
             ));
             let mut results = vec![case];
             for (id, type_id, style) in cases.into_iter().skip(1) {
-                match image_case(&mut renderer, id, type_id, style, 1.0, &images, baseline) {
+                match image_case(
+                    &mut renderer,
+                    id,
+                    single_module(type_id, style),
+                    1.0,
+                    &images,
+                    baseline,
+                ) {
                     Ok((case, _)) => results.push(case),
                     Err(e) => results.push(Case::fail(id, "real frame", e)),
                 }
@@ -1546,7 +1641,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
         }
         Err(e) => {
             report.cases.push(Case::fail("V01", "real frame", e));
-            for id in ["V02", "V03", "V04", "V05"] {
+            for id in ["V02", "V03", "V04", "V05", "V06"] {
                 report
                     .cases
                     .push(Case::incomplete(id, Status::NotRun, "V01 failed"));
@@ -1558,8 +1653,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
         match image_case(
             &mut renderer,
             "spectrum-2x",
-            SPECTRUM_MODULE_ID,
-            None,
+            single_module(SPECTRUM_MODULE_ID, None),
             2.0,
             &images,
             baseline,
@@ -1577,6 +1671,19 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
             Err(e) => Case::fail("V03", "2x DPI frame", e),
         },
     );
+    // V06: a three-leaf BSP layout (Spectrum | Waveform over Level Meter) at 1x and
+    // 2x; layout, dividers and per-leaf clipping come from the production UI body.
+    for (id, dpi) in [("workspace-layout", 1.0), ("workspace-layout-2x", 2.0)] {
+        report.cases.push(
+            match image_case(&mut renderer, id, workspace_layout, dpi, &images, baseline) {
+                Ok((mut case, _)) => {
+                    case.id = format!("V06-{id}");
+                    case
+                }
+                Err(e) => Case::fail(&format!("V06-{id}"), "workspace layout frame", e),
+            },
+        );
+    }
     report
         .cases
         .push(match persistence_visual(&mut renderer, &images, baseline) {

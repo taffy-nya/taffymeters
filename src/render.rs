@@ -10,6 +10,13 @@ pub struct Rect {
     pub max: Point,
 }
 
+/// Width and height in logical points.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Size {
+    pub width: f32,
+    pub height: f32,
+}
+
 impl Rect {
     pub fn width(self) -> f32 {
         (self.max.x - self.min.x).max(0.0)

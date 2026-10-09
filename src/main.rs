@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use eframe::{egui, egui_wgpu, wgpu};
+use eframe::{egui_wgpu, wgpu};
 
 pub mod audio;
 pub mod builtins;
@@ -18,6 +18,7 @@ mod app;
 #[cfg(feature = "automation")]
 mod automation;
 mod live;
+mod workspace;
 
 pub use live::{LiveAudio, LiveAudioConfig};
 
@@ -61,24 +62,18 @@ fn main() -> eframe::Result<()> {
         "system audio: {} Hz, {} channels, {:?}",
         descriptor.sample_rate_hz, descriptor.channel_count, descriptor.channel_layout
     );
-    let app = match app::App::new(live) {
-        Ok(app) => app,
+    let workspace = match workspace::Workspace::new(live, true) {
+        Ok(workspace) => workspace,
         Err(error) => {
             eprintln!("module initialization failed: {error}");
             std::process::exit(1);
         }
     };
-    run_window(app, false)
+    run_window(app::App::new(workspace))
 }
 
-fn run_window(app: app::App, preview: bool) -> eframe::Result<()> {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Taffymeters Phase 3-1")
-        .with_inner_size([900.0, 420.0])
-        .with_min_inner_size([480.0, 240.0]);
-    if !preview {
-        viewport = viewport.with_always_on_top();
-    }
+fn run_window(app: app::App) -> eframe::Result<()> {
+    let viewport = app.root_builder();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: low_power_wgpu_options(),

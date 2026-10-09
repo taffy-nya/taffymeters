@@ -6,7 +6,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices},
     plotting::SpectrumCoordinates,
-    render::{Color, ColoredRect, Point, Rect},
+    render::{Color, ColoredRect, Point, Rect, Size},
     snapshot::{SpectrumHistoryFrame, SpectrumReader},
 };
 
@@ -60,6 +60,13 @@ struct SpectrogramModule {
 }
 
 impl Module for SpectrogramModule {
+    fn min_size(&self) -> Size {
+        Size {
+            width: 160.0,
+            height: 100.0,
+        }
+    }
+
     fn channel(&self) -> Option<ChannelSelection> {
         Some(self.reader.requested_channel())
     }

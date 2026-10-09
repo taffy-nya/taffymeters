@@ -3,6 +3,8 @@
 mod harness;
 mod report;
 mod scenarios;
+mod trace;
+mod workspace_scenarios;
 thread_local! {
     static SCENARIO_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
@@ -22,8 +24,9 @@ use std::{
     time::Duration,
 };
 
-use crate::{LiveAudio, LiveAudioConfig, app::App, audio::synthetic::SyntheticConfig};
+use crate::{LiveAudio, LiveAudioConfig, audio::synthetic::SyntheticConfig, workspace::Workspace};
 use report::new_output;
+pub(crate) use trace::Trace;
 
 fn option_value(args: &[String], flag: &str) -> Result<Option<String>, String> {
     let positions: Vec<_> = args
@@ -71,7 +74,18 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
     let runtime = |error: String| (1, error);
     match args.first().map(String::as_str) {
         Some("preview") => {
-            let values = parse_run(&args[1..], &["--input"]).map_err(usage)?;
+            let tail = &args[1..];
+            let flags: &[&str] = if tail.iter().any(|x| x == "--trace") {
+                &["--input", "--trace"]
+            } else {
+                &["--input"]
+            };
+            let values = parse_run(tail, flags).map_err(usage)?;
+            let trace = values
+                .get(1)
+                .map(|path| Trace::create(Path::new(path)))
+                .transpose()
+                .map_err(runtime)?;
             let live = match values[0].as_str() {
                 "synthetic" => {
                     LiveAudio::open_realtime(LiveAudioConfig::default(), SyntheticConfig::default())
@@ -80,8 +94,12 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 _ => return Err(usage("--input must be synthetic or system".into())),
             }
             .map_err(|e| runtime(e.to_string()))?;
-            let app = App::new(live).map_err(|e| runtime(e.to_string()))?;
-            crate::run_window(app, true).map_err(|e| runtime(e.to_string()))?;
+            let workspace = Workspace::new(live, false).map_err(|e| runtime(e.to_string()))?;
+            let mut app = crate::app::App::new(workspace);
+            if let Some(trace) = trace {
+                app = app.with_trace(trace);
+            }
+            crate::run_window(app).map_err(|e| runtime(e.to_string()))?;
             Ok(0)
         }
         Some("run") => {

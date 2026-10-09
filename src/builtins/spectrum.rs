@@ -9,7 +9,7 @@ use crate::{
         StyleOption,
     },
     plotting::{FREQUENCY_TICKS_HZ, SpectrumCoordinates, db_ticks},
-    render::{Color, ColoredRect, Point, Rect, TextStyle},
+    render::{Color, ColoredRect, Point, Rect, Size, TextStyle},
     snapshot::{SpectrumReader, SpectrumSnapshotSet},
 };
 
@@ -284,6 +284,14 @@ impl SpectrumModule {
 }
 
 impl Module for SpectrumModule {
+    fn min_size(&self) -> Size {
+        // Room for the frequency and dB tick labels.
+        Size {
+            width: 160.0,
+            height: 100.0,
+        }
+    }
+
     fn channel(&self) -> Option<ChannelSelection> {
         Some(self.reader.requested_channel())
     }

@@ -4,7 +4,7 @@ use crate::{
     audio::SourceReader,
     dataflow::{ChannelError, ChannelSelection, ControlError, DataflowHandle},
     extensions::{Registry, RegistryError},
-    render::{Point, Rect, RenderTarget},
+    render::{Point, Rect, RenderTarget, Size},
 };
 
 pub struct ModuleServices {
@@ -34,6 +34,16 @@ pub struct StyleOption {
 
 pub trait Module: Send {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse;
+
+    /// Smallest area, in logical points, in which the Module stays usable. The
+    /// Workspace never shrinks a layout leaf below it unless the window itself is
+    /// forced smaller.
+    fn min_size(&self) -> Size {
+        Size {
+            width: 120.0,
+            height: 80.0,
+        }
+    }
 
     fn channel(&self) -> Option<ChannelSelection> {
         None

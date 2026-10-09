@@ -2288,7 +2288,8 @@ mod tests {
         assert_eq!(first_interval.chunks[0].start_frame, 800);
         assert_eq!(first_interval.chunks[0].frame_count, 800);
         assert!(first_interval.levels.is_none());
-        let levels_interval = levels.reader().latest().unwrap();
+        // Each subscription's slot is written in turn; wait for this one as well.
+        let levels_interval = wait_time_frontier(&levels.reader(), 1_600);
         assert!(levels_interval.levels.is_some());
         wait_time_metrics(&dataflow, 800, 1_600, 2);
 
