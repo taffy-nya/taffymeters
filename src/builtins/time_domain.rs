@@ -2,15 +2,31 @@ use std::time::Duration;
 
 use crate::{
     audio::SourceReader,
-    dataflow::{ChannelSelection, TimeDomainRequest, TimeDomainSubscription},
+    dataflow::{
+        ChannelSelection, DataController, DataSpec, DataSubscription, Keep, NodeSpec, OutputId,
+        SOURCE,
+    },
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         StyleOption,
     },
     render::{Circle, Color, ColoredRect, Point, Rect, Stroke, TextStyle},
-    snapshot::TimeDomainReader,
+    snapshot::{DataReader, HistoryView},
 };
+
+/// Source time the Waveform keeps; it shows up to this much.
+const WAVEFORM_HISTORY_SECONDS: f32 = 10.0;
+
+/// A subscription to the merged source PCM.
+fn subscribe_pcm(
+    services: &ModuleServices,
+    keep: Keep,
+) -> Result<(DataSubscription, OutputId), ModuleError> {
+    let mut spec = DataSpec::new();
+    let output = spec.output(SOURCE, keep);
+    Ok((services.dataflow.subscribe(spec)?, output))
+}
 
 use super::oscilloscope_style::{
     self, LINE_OSCILLOSCOPE_STYLE_ID, OscilloscopeStyle, OscilloscopeStyleContext,
@@ -59,15 +75,13 @@ impl ModuleFactory for OscilloscopeFactory {
         services: &ModuleServices,
         registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        let subscription = services
-            .dataflow
-            .subscribe_time(TimeDomainRequest::Latest)
-            .map_err(ModuleError::from)?;
-        let reader = subscription.reader();
+        let (subscription, output) = subscribe_pcm(services, Keep::Latest)?;
         Ok(Box::new(OscilloscopeModule {
             source: services.source.clone(),
+            controller: subscription.controller(),
+            reader: subscription.reader(),
             _subscription: subscription,
-            reader,
+            output,
             channel: ChannelSelection::MonoAverage,
             y_scale: 1.0,
             style: registry.create_oscilloscope_style(LINE_OSCILLOSCOPE_STYLE_ID)?,
@@ -78,8 +92,10 @@ impl ModuleFactory for OscilloscopeFactory {
 
 struct OscilloscopeModule {
     source: SourceReader,
-    _subscription: TimeDomainSubscription,
-    reader: TimeDomainReader,
+    controller: DataController,
+    reader: DataReader,
+    _subscription: DataSubscription,
+    output: OutputId,
     channel: ChannelSelection,
     y_scale: f32,
     style: Box<dyn OscilloscopeStyle>,
@@ -101,6 +117,10 @@ impl Module for OscilloscopeModule {
         Ok(())
     }
 
+    fn set_visible(&mut self, visible: bool) {
+        let _ = self.controller.set_visible(visible);
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
@@ -109,7 +129,7 @@ impl Module for OscilloscopeModule {
         {
             self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.2, 10.0);
         }
-        let Some(snapshot) = self.reader.latest() else {
+        let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };
         let center_y = frame.rect.center().y;
@@ -132,7 +152,8 @@ impl Module for OscilloscopeModule {
         );
         self.style.draw(
             OscilloscopeStyleContext {
-                snapshot: &snapshot,
+                descriptor: self.reader.descriptor(),
+                frame: &snapshot,
                 channel: self.channel,
                 rect: frame.rect,
                 y_scale: self.y_scale,
@@ -181,15 +202,14 @@ impl ModuleFactory for WaveformFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        let subscription = services
-            .dataflow
-            .subscribe_time(TimeDomainRequest::History { seconds: 10.0 })
-            .map_err(ModuleError::from)?;
-        let reader = subscription.reader();
+        let (subscription, output) =
+            subscribe_pcm(services, Keep::Seconds(WAVEFORM_HISTORY_SECONDS))?;
         Ok(Box::new(WaveformModule {
             source: services.source.clone(),
+            reader: subscription.reader(),
             _subscription: subscription,
-            reader,
+            output,
+            history: HistoryView::new(),
             channel: ChannelSelection::MonoAverage,
             seconds: 4.0,
             y_scale: 1.0,
@@ -201,8 +221,10 @@ impl ModuleFactory for WaveformFactory {
 
 struct WaveformModule {
     source: SourceReader,
-    _subscription: TimeDomainSubscription,
-    reader: TimeDomainReader,
+    reader: DataReader,
+    _subscription: DataSubscription,
+    output: OutputId,
+    history: HistoryView,
     channel: ChannelSelection,
     seconds: f32,
     y_scale: f32,
@@ -247,40 +269,42 @@ impl Module for WaveformModule {
             .is_some_and(|point| frame.rect.contains(point))
         {
             if (frame.zoom_delta - 1.0).abs() > 0.001 {
-                self.seconds = (self.seconds / frame.zoom_delta).clamp(0.25, 10.0);
+                self.seconds =
+                    (self.seconds / frame.zoom_delta).clamp(0.25, WAVEFORM_HISTORY_SECONDS);
             }
             if frame.scroll_delta_y.abs() > 0.01 {
                 self.y_scale =
                     (self.y_scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.1, 20.0);
             }
         }
-        let Some(snapshot) = self.reader.latest() else {
+        self.reader.sync_history(self.output, &mut self.history);
+        let Some(newest) = self.history.newest_frontier() else {
             return ModuleResponse::default();
         };
-        let Ok(channel) = self.channel.resolve(&snapshot.descriptor) else {
+        let descriptor = self.reader.descriptor();
+        let Ok(channel) = self.channel.resolve(descriptor) else {
             return ModuleResponse::default();
         };
         let columns = frame.rect.width().floor().max(1.0) as u64;
-        let span_frames =
-            ((self.seconds * snapshot.descriptor.sample_rate_hz as f32) as u64).max(1);
+        let span_frames = ((self.seconds * descriptor.sample_rate_hz as f32) as u64).max(1);
         let frames_per_bin = (span_frames / columns).max(1);
         let key = (
             frames_per_bin,
             self.channel,
-            snapshot.descriptor.source_id,
-            snapshot.descriptor.generation,
+            descriptor.source_id,
+            descriptor.generation,
         );
         let envelope = &mut self.envelope;
-        if envelope.key != Some(key) || snapshot.processed_through_frame < envelope.through {
+        if envelope.key != Some(key) || newest < envelope.through {
             *envelope = WaveformEnvelope {
                 key: Some(key),
                 ..WaveformEnvelope::default()
             };
         }
-        let last_bin = snapshot.processed_through_frame.saturating_sub(1) / frames_per_bin;
+        let last_bin = newest.saturating_sub(1) / frames_per_bin;
         let first_bin = (last_bin + 1).saturating_sub(columns);
-        let channels = snapshot.descriptor.channel_count as usize;
-        for chunk in snapshot.chunks.iter() {
+        let channels = descriptor.channel_count as usize;
+        for chunk in self.history.iter().filter_map(|entry| entry.frame.pcm()) {
             let chunk_end = chunk.start_frame.saturating_add(chunk.frame_count as u64);
             let start = chunk
                 .start_frame
@@ -358,14 +382,12 @@ impl ModuleFactory for StereometerFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        let subscription = services
-            .dataflow
-            .subscribe_time(TimeDomainRequest::Latest)
-            .map_err(ModuleError::from)?;
-        let reader = subscription.reader();
+        let (subscription, output) = subscribe_pcm(services, Keep::Latest)?;
         Ok(Box::new(StereometerModule {
+            controller: subscription.controller(),
+            reader: subscription.reader(),
             _subscription: subscription,
-            reader,
+            output,
             scale: 1.0,
             circles: Vec::with_capacity(512),
         }))
@@ -373,13 +395,19 @@ impl ModuleFactory for StereometerFactory {
 }
 
 struct StereometerModule {
-    _subscription: TimeDomainSubscription,
-    reader: TimeDomainReader,
+    controller: DataController,
+    reader: DataReader,
+    _subscription: DataSubscription,
+    output: OutputId,
     scale: f32,
     circles: Vec<Circle>,
 }
 
 impl Module for StereometerModule {
+    fn set_visible(&mut self, visible: bool) {
+        let _ = self.controller.set_visible(visible);
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
@@ -388,10 +416,11 @@ impl Module for StereometerModule {
         {
             self.scale = (self.scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.5, 10.0);
         }
-        let Some(snapshot) = self.reader.latest() else {
+        let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };
-        if snapshot.descriptor.channel_count < 2 {
+        let channels = self.reader.descriptor().channel_count as usize;
+        if channels < 2 {
             frame.renderer.text(
                 frame.rect,
                 frame.rect.center(),
@@ -438,8 +467,7 @@ impl Module for StereometerModule {
             guide,
         );
         self.circles.clear();
-        if let Some(chunk) = snapshot.chunks.last() {
-            let channels = snapshot.descriptor.channel_count as usize;
+        if let Some(chunk) = snapshot.pcm() {
             let step = chunk.frame_count.div_ceil(512).max(1);
             for samples in chunk.interleaved.chunks_exact(channels).step_by(step) {
                 let left = samples[0];
@@ -525,14 +553,17 @@ impl ModuleFactory for LevelMeterFactory {
         services: &ModuleServices,
         _registry: &Registry,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        let mut spec = DataSpec::new();
+        let levels = spec.add(SOURCE, NodeSpec::Levels);
+        let output = spec.output(levels, Keep::Latest);
         let subscription = services
             .dataflow
-            .subscribe_time(TimeDomainRequest::Levels)
+            .subscribe(spec)
             .map_err(ModuleError::from)?;
-        let reader = subscription.reader();
         Ok(Box::new(LevelMeterModule {
+            reader: subscription.reader(),
             _subscription: subscription,
-            reader,
+            output,
             peak_holds: Vec::new(),
             last_result_version: 0,
             bars: Vec::with_capacity(12),
@@ -541,8 +572,9 @@ impl ModuleFactory for LevelMeterFactory {
 }
 
 struct LevelMeterModule {
-    _subscription: TimeDomainSubscription,
-    reader: TimeDomainReader,
+    reader: DataReader,
+    _subscription: DataSubscription,
+    output: OutputId,
     peak_holds: Vec<MeterPeakHold>,
     last_result_version: u64,
     bars: Vec<ColoredRect>,
@@ -550,10 +582,10 @@ struct LevelMeterModule {
 
 impl Module for LevelMeterModule {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
-        let Some(snapshot) = self.reader.latest() else {
+        let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };
-        let Some(levels) = snapshot.levels.as_ref() else {
+        let Some(levels) = snapshot.levels() else {
             return ModuleResponse::default();
         };
         let shown_channels = levels

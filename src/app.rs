@@ -100,11 +100,13 @@ fn window_pass(
     {
         let _ = workspace.apply_action(WorkspaceAction::CloseWindow { window_id });
     }
-    // A minimized window is not drawn; its Modules' analysis continues.
-    if ui
+    // A minimized window is not drawn; its Modules' continuous analysis continues and
+    // work that only serves the display stops until it is shown again.
+    let minimized = ui
         .ctx()
-        .input(|input| input.viewport().minimized == Some(true))
-    {
+        .input(|input| input.viewport().minimized == Some(true));
+    workspace.set_window_minimized(window_id, minimized);
+    if minimized {
         return false;
     }
     workspace.window_ui(window_id, ui, started_at.elapsed(), &NativeDesktop);

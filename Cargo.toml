@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [features]
-automation = ["dep:serde", "dep:serde_json", "dep:image", "dep:sha2"]
+automation = ["dep:serde", "dep:serde_json", "dep:image", "dep:sha2", "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_WindowsProgramming"]
 
 [dependencies]
 arc-swap = "1.7.1"
@@ -16,6 +16,7 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.149", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 sha2 = { version = "0.10", optional = true }
+realfft = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse"] }

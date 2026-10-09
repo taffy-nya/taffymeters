@@ -70,6 +70,11 @@ pub trait Module: Send {
     }
 
     fn clear_visual_state(&mut self) {}
+
+    /// The Workspace reports whether the instance can be seen (its window is not
+    /// minimized). Work that only serves what is shown may stop while hidden;
+    /// continuous analysis and History must keep running.
+    fn set_visible(&mut self, _visible: bool) {}
 }
 
 pub trait ModuleFactory: Send + Sync {

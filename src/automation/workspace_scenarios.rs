@@ -25,7 +25,7 @@ use super::{
 
 type Scenario = fn() -> Result<Value, String>;
 
-pub(super) const CASES: [(&str, Scenario); 8] = [
+pub(super) const CASES: [(&str, Scenario); 9] = [
     ("W01", w01),
     ("W02", w02),
     ("W03", w03),
@@ -34,6 +34,7 @@ pub(super) const CASES: [(&str, Scenario); 8] = [
     ("W06", w06),
     ("W07", w07),
     ("W08", w08),
+    ("W09", w09),
 ];
 
 fn split(
@@ -649,7 +650,7 @@ fn w06() -> Result<Value, String> {
         .advance_frames(3200, deadline())
         .map_err(|e| e.to_string())?;
     let both = handle.metrics();
-    check(both.time_pcm_frames > 0, "waveform window not recording")?;
+    check(both.pcm_frames > 0, "waveform window not recording")?;
     h.focus = second;
     h.menu(
         ControlKey::LeafBody(w),
@@ -666,8 +667,7 @@ fn w06() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let after = handle.metrics();
     check(
-        after.time_pcm_frames == before.time_pcm_frames
-            && after.fft_evaluations > before.fft_evaluations,
+        after.pcm_frames == before.pcm_frames && after.fft_evaluations > before.fft_evaluations,
         "closing a window stopped the other window or kept its demand",
     )?;
     // The root window closes (as the adapter does on a native close request) while
@@ -907,9 +907,58 @@ fn w08() -> Result<Value, String> {
     let after = handle.metrics();
     check(
         after.subscriptions == baseline.subscriptions
-            && after.pipelines == baseline.pipelines
-            && after.time_pcm_frames == baseline.time_pcm_frames,
+            && after.nodes == baseline.nodes
+            && after.pcm_frames == baseline.pcm_frames,
         &format!("cycles changed analysis demand: {baseline:?} -> {after:?}"),
     )?;
     Ok(json!({"rounds":10,"windows":1,"modules":1,"subscriptions":after.subscriptions}))
+}
+
+/// A minimized window stops only work that serves the display: the Spectrum keeps
+/// its Peak and the Waveform keeps recording; restoring brings the curve back.
+fn w09() -> Result<Value, String> {
+    let (ws, mut driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    h.frame(vec![]);
+    add_module(&mut h.ws, WAVEFORM_MODULE_ID)?;
+    let handle = h.ws.dataflow_handle_for_automation();
+    driver
+        .advance_frames(4800, deadline())
+        .map_err(|e| e.to_string())?;
+    let shown = handle.metrics();
+    check(
+        shown.active_spectrum_nodes == 4,
+        &format!("visible Spectrum runs Tilt/Center/Gain/Peak: {shown:?}"),
+    )?;
+    // The native adapter reports the viewport's minimized state every pass.
+    h.ws.set_window_minimized(FIRST_WINDOW, true);
+    let hidden = wait_until(deadline(), "display-only work stopping", || {
+        Some(handle.metrics()).filter(|metrics| metrics.active_spectrum_nodes == 1)
+    })?;
+    driver
+        .advance_frames(4800, deadline())
+        .map_err(|e| e.to_string())?;
+    let while_hidden = handle.metrics();
+    check(
+        while_hidden.pcm_frames == hidden.pcm_frames + 4800
+            && while_hidden.spectrum_evaluations > hidden.spectrum_evaluations,
+        &format!("minimizing stopped continuous analysis: {hidden:?} -> {while_hidden:?}"),
+    )?;
+    h.ws.set_window_minimized(FIRST_WINDOW, false);
+    wait_until(deadline(), "display work restarting", || {
+        (handle.metrics().active_spectrum_nodes == 4).then_some(())
+    })?;
+    driver
+        .advance_frames(4800, deadline())
+        .map_err(|e| e.to_string())?;
+    let restored = h.frame(vec![]);
+    check(
+        restored.shapes.len() > 3,
+        "restored window did not draw its Modules",
+    )?;
+    Ok(json!({
+        "visible_spectrum_nodes": shown.active_spectrum_nodes,
+        "hidden_spectrum_nodes": hidden.active_spectrum_nodes,
+        "hidden_pcm_frames": while_hidden.pcm_frames - hidden.pcm_frames,
+    }))
 }

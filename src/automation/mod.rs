@@ -1,6 +1,7 @@
 #![allow(clippy::missing_const_for_thread_local)] // The initializer is const; Clippy 1.98 flags the macro expansion.
 
 mod harness;
+mod perf;
 mod report;
 mod scenarios;
 mod trace;
@@ -116,11 +117,13 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 &["--suite", "--output"]
             };
             let values = parse_run(tail, flags).map_err(usage)?;
-            if suite != "core" && suite != "visual" {
-                return Err(usage("--suite must be core or visual".into()));
+            if !["core", "visual", "dataflow-perf"].contains(&suite.as_str()) {
+                return Err(usage(
+                    "--suite must be core, visual or dataflow-perf".into(),
+                ));
             }
-            if suite == "core" && values.len() > 2 {
-                return Err(usage("core does not accept --baseline".into()));
+            if suite != "visual" && values.len() > 2 {
+                return Err(usage(format!("{suite} does not accept --baseline")));
             }
             if let Some(base) = values.get(2)
                 && !Path::new(base).is_dir()
@@ -129,17 +132,21 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
             }
             let output = PathBuf::from(&values[1]);
             new_output(&output).map_err(runtime)?;
-            let mut report = report::new(
-                &suite,
+            let input = if suite == "dataflow-perf" {
+                json!({"kind": "manual", "sample_rate_hz": 48000,
+                "channels": 2, "layout": "stereo", "block_frames": 480,
+                "signal": "preview sweep (left 80 Hz-12 kHz / right pulsed 440 Hz); absolute frame", "seed": null})
+            } else {
                 json!({"kind": "manual", "sample_rate_hz": 48000,
                 "channels": 2, "layout": "stereo", "block_frames": 160,
-                "signal": "left 3000Hz/right 6000Hz at 0.08 amplitude; absolute frame", "seed": null}),
-            );
+                "signal": "left 3000Hz/right 6000Hz at 0.08 amplitude; absolute frame", "seed": null})
+            };
+            let mut report = report::new(&suite, input);
             let baseline = values.get(2).map(Path::new);
-            if suite == "core" {
-                scenarios::core(&mut report);
-            } else {
-                scenarios::visual(&mut report, &output, baseline);
+            match suite.as_str() {
+                "core" => scenarios::core(&mut report),
+                "visual" => scenarios::visual(&mut report, &output, baseline),
+                _ => perf::suite(&mut report),
             }
             report.finish();
             let path = report.save(&output).map_err(runtime)?;

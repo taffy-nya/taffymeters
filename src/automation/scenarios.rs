@@ -13,7 +13,7 @@ use crate::{
         synthetic::{ManualInputDriver, SignalSpec, SyntheticConfig},
     },
     builtins::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
-    dataflow::{ChannelSelection, FftConfig, SpectrumRequest, TimeDomainRequest},
+    dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeSpec, OutputId, SOURCE},
     workspace::{
         ActionOutcome, ControlKey, FIRST_WINDOW, MenuItem, ModuleInstanceId, Side, Workspace,
         WorkspaceAction,
@@ -37,6 +37,33 @@ pub(super) fn check(condition: bool, message: &str) -> Result<(), String> {
 fn synthetic() -> Result<(LiveAudio, ManualInputDriver), String> {
     LiveAudio::open_manual(LiveAudioConfig::default(), SyntheticConfig::default())
         .map_err(|e| e.to_string())
+}
+/// Merged source PCM kept as `keep`.
+fn pcm_spec(keep: Keep) -> (DataSpec, OutputId) {
+    let mut spec = DataSpec::new();
+    let output = spec.output(SOURCE, keep);
+    (spec, output)
+}
+/// One channel's 2048/512 FFT, latest result only.
+fn fft_spec(channel: ChannelSelection) -> Result<(DataSpec, OutputId), String> {
+    let mut spec = DataSpec::new();
+    let channel = spec.add(SOURCE, NodeSpec::Channel(channel));
+    let fft = spec.add(
+        channel,
+        NodeSpec::Fft(FftConfig::new(2048, 512, -160.0).map_err(|e| e.to_string())?),
+    );
+    let output = spec.output(fft, Keep::Latest);
+    Ok((spec, output))
+}
+fn bins(frame: &crate::snapshot::Frame) -> &[f32] {
+    frame
+        .spectrum()
+        .map_or(&[], |data| data.bins_dbfs.as_slice())
+}
+fn pcm(frame: &crate::snapshot::Frame) -> &[f32] {
+    frame
+        .pcm()
+        .map_or(&[], |chunk| chunk.interleaved.as_slice())
 }
 /// A Workspace over the manual synthetic source: one window, one Spectrum.
 pub(super) fn workspace() -> Result<(Workspace, ManualInputDriver), String> {
@@ -160,7 +187,7 @@ fn c01() -> Result<Value, String> {
     )?;
     drop(live);
     check(
-        handle.subscribe_time(TimeDomainRequest::Latest).is_err(),
+        handle.subscribe(pcm_spec(Keep::Latest).0).is_err(),
         "stopped handle accepted subscription",
     )?;
     Ok(json!({"frontier":end,"analysis": "unchanged", "dropped": status.dropped_blocks}))
@@ -174,41 +201,31 @@ fn fft_run(block_frames: usize) -> Result<(f32, f32, u64), String> {
     let (live, mut driver) =
         LiveAudio::open_manual(LiveAudioConfig::default(), cfg).map_err(|e| e.to_string())?;
     let handle = live.dataflow_handle();
-    let mut left = SpectrumRequest::new(
-        ChannelSelection::Left,
-        FftConfig::new(2048, 512, -160.0).map_err(|e| e.to_string())?,
-    );
-    left.peak = None;
-    let mut right = left;
-    right.channel = ChannelSelection::Right;
-    let a = handle.subscribe_spectrum(left).map_err(|e| e.to_string())?;
-    let b = handle
-        .subscribe_spectrum(right)
-        .map_err(|e| e.to_string())?;
+    let (left, output) = fft_spec(ChannelSelection::Left)?;
+    let (right, _) = fft_spec(ChannelSelection::Right)?;
+    let a = handle.subscribe(left).map_err(|e| e.to_string())?;
+    let b = handle.subscribe(right).map_err(|e| e.to_string())?;
     driver
         .advance_frames(4096, deadline())
         .map_err(|e| e.to_string())?;
     let ra = a.reader();
     let rb = b.reader();
     let sa = wait_until(deadline(), "left FFT snapshot", || {
-        ra.latest().filter(|s| {
-            s.config_revision == ra.requested_revision() && s.processed_through_frame >= 4096
-        })
+        ra.latest(output)
+            .filter(|s| s.processed_through_frame >= 4096)
     })?;
     let sb = wait_until(deadline(), "right FFT snapshot", || {
-        rb.latest().filter(|s| {
-            s.config_revision == rb.requested_revision() && s.processed_through_frame >= 4096
-        })
+        rb.latest(output)
+            .filter(|s| s.processed_through_frame >= 4096)
     })?;
+    let (left_bins, right_bins) = (bins(&sa), bins(&sb));
     check(
-        sa.spectrum_dbfs[128] > sa.spectrum_dbfs[127]
-            && sb.spectrum_dbfs[256] > sb.spectrum_dbfs[255],
+        left_bins[128] > left_bins[127] && right_bins[256] > right_bins[255],
         "wrong tone bins",
     )?;
     let expected = 20.0 * 0.08_f32.log10();
     check(
-        (sa.spectrum_dbfs[128] - expected).abs() <= 0.02
-            && (sb.spectrum_dbfs[256] - expected).abs() <= 0.02,
+        (left_bins[128] - expected).abs() <= 0.02 && (right_bins[256] - expected).abs() <= 0.02,
         "tone calibration error",
     )?;
     // No new audio: repeated reads spread over several 30 Hz publication periods of
@@ -217,16 +234,16 @@ fn fft_run(block_frames: usize) -> Result<(f32, f32, u64), String> {
     for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(40));
         check(
-            ra.latest()
+            ra.latest(output)
                 .is_some_and(|s| s.result_version == sa.result_version)
                 && rb
-                    .latest()
+                    .latest(output)
                     .is_some_and(|s| s.result_version == sb.result_version),
             "reading unchanged input advanced result version",
         )?;
     }
     let evaluations = handle.metrics().fft_evaluations;
-    Ok((sa.spectrum_dbfs[128], sb.spectrum_dbfs[256], evaluations))
+    Ok((left_bins[128], right_bins[256], evaluations))
 }
 
 fn c02() -> Result<Value, String> {
@@ -237,9 +254,10 @@ fn c02() -> Result<Value, String> {
         "phase reset at block boundary",
     )?;
     let (live, mut driver) = synthetic()?;
+    let (spec, output) = pcm_spec(Keep::Latest);
     let subscription = live
         .dataflow_handle()
-        .subscribe_time(TimeDomainRequest::Latest)
+        .subscribe(spec)
         .map_err(|e| e.to_string())?;
     let mut samples = Vec::with_capacity(3200);
     for n in 0..1600 {
@@ -252,16 +270,12 @@ fn c02() -> Result<Value, String> {
     let reader = subscription.reader();
     let snapshot = wait_until(deadline(), "indexed PCM snapshot", || {
         reader
-            .latest()
+            .latest(output)
             .filter(|s| s.processed_through_frame >= 1600)
     })?;
-    let actual: Vec<_> = snapshot
-        .chunks
-        .iter()
-        .flat_map(|c| c.interleaved.iter().copied())
-        .collect();
     check(
-        actual == samples && snapshot.chunks.first().is_some_and(|c| c.start_frame == 0),
+        pcm(&snapshot) == samples.as_slice()
+            && snapshot.pcm().is_some_and(|chunk| chunk.start_frame == 0),
         "indexed PCM order/channel mismatch",
     )?;
     let signals = SyntheticConfig {
@@ -278,7 +292,7 @@ fn c02() -> Result<Value, String> {
         LiveAudio::open_manual(LiveAudioConfig::default(), signals).map_err(|e| e.to_string())?;
     let generated_subscription = generated
         .dataflow_handle()
-        .subscribe_time(TimeDomainRequest::Latest)
+        .subscribe(pcm_spec(Keep::Latest).0)
         .map_err(|e| e.to_string())?;
     generated_driver
         .advance_frames(1600, deadline())
@@ -286,14 +300,10 @@ fn c02() -> Result<Value, String> {
     let generated_reader = generated_subscription.reader();
     let generated_snapshot = wait_until(deadline(), "impulse and indexed generator", || {
         generated_reader
-            .latest()
+            .latest(output)
             .filter(|s| s.processed_through_frame >= 1600)
     })?;
-    let generated_samples: Vec<_> = generated_snapshot
-        .chunks
-        .iter()
-        .flat_map(|chunk| chunk.interleaved.iter().copied())
-        .collect();
+    let generated_samples = pcm(&generated_snapshot);
     check(
         generated_samples.len() == 3200
             && generated_samples[73 * 2] == 0.75
@@ -309,9 +319,8 @@ fn c02() -> Result<Value, String> {
 fn c03() -> Result<Value, String> {
     let (mut live, mut driver) = synthetic()?;
     let handle = live.dataflow_handle();
-    let history = handle
-        .subscribe_time(TimeDomainRequest::History { seconds: 1.0 })
-        .map_err(|e| e.to_string())?;
+    let (spec, output) = pcm_spec(Keep::Seconds(1.0));
+    let history = handle.subscribe(spec).map_err(|e| e.to_string())?;
     driver
         .advance_frames(1600, deadline())
         .map_err(|e| e.to_string())?;
@@ -340,7 +349,7 @@ fn c03() -> Result<Value, String> {
     let snapshot = wait_until(deadline(), "resume history", || {
         history
             .reader()
-            .latest()
+            .latest(output)
             .filter(|s| s.processed_through_frame >= 3200)
     })?;
     check(
@@ -811,14 +820,14 @@ fn c07() -> Result<Value, String> {
             .processed_through_frame()
             .map_err(|e| e.to_string())?
             == frontier
-            && handle.metrics().time_publications == metrics.time_publications,
+            && handle.metrics().publications == metrics.publications,
         "UI-only frame advanced audio",
     )?;
     driver
         .advance_frames(1600, deadline())
         .map_err(|e| e.to_string())?;
     let with_trace = h.frame(vec![]);
-    let published = handle.metrics().time_publications;
+    let published = handle.metrics().publications;
     h.menu(
         ControlKey::LeafBody(osc),
         &[MenuItem::StyleOpen, MenuItem::ClearVisual],
@@ -826,7 +835,7 @@ fn c07() -> Result<Value, String> {
     let after_clear = h.frame(vec![]);
     check(
         with_trace.shapes.len() > after_clear.shapes.len()
-            && handle.metrics().time_publications == published,
+            && handle.metrics().publications == published,
         "Clear did not remove trace without resetting audio",
     )?;
     let hidden = waveform_visibility_run(true)?;
@@ -892,7 +901,7 @@ fn waveform_visibility_run(hidden: bool) -> Result<WaveformRun, String> {
     replace_first(&mut ws, WAVEFORM_MODULE_ID)?;
     let mut h = Harness::new(ws);
     let before_audio = filled_rects(&h.frame(vec![]));
-    let before = handle.metrics().time_pcm_frames;
+    let before = handle.metrics().pcm_frames;
     for _ in 0..HIDDEN_FRAMES / 48_000 {
         driver
             .advance_frames(48_000, deadline())
@@ -901,7 +910,7 @@ fn waveform_visibility_run(hidden: bool) -> Result<WaveformRun, String> {
             h.frame(vec![]);
         }
     }
-    let pcm_frames = handle.metrics().time_pcm_frames - before;
+    let pcm_frames = handle.metrics().pcm_frames - before;
     let restored = filled_rects(&h.frame(vec![]));
     Ok(WaveformRun {
         pcm_frames,
@@ -921,7 +930,7 @@ fn c08() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let both = handle.metrics();
     check(
-        both.time_pcm_frames > 0 && both.time_level_frames > 0,
+        both.pcm_frames > 0 && both.level_frames > 0,
         "mixed time needs did not compute",
     )?;
     action(
@@ -930,16 +939,15 @@ fn c08() -> Result<Value, String> {
             instance_id: waveform,
         },
     )?;
-    // The next drained block follows queued removal commands; the frequency-only
-    // `subscriptions` metric does not count time-domain consumers.
+    // The next drained block follows queued removal commands.
     let before = handle.metrics();
     driver
         .advance_frames(3200, deadline())
         .map_err(|e| e.to_string())?;
     let only_levels = handle.metrics();
     check(
-        only_levels.time_pcm_frames == before.time_pcm_frames
-            && only_levels.time_level_frames > before.time_level_frames,
+        only_levels.pcm_frames == before.pcm_frames
+            && only_levels.level_frames > before.level_frames,
         "PCM close affected Levels",
     )?;
     let new_waveform = add_module(&mut ws, WAVEFORM_MODULE_ID)?;
@@ -955,8 +963,7 @@ fn c08() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let only_pcm = handle.metrics();
     check(
-        only_pcm.time_pcm_frames > before.time_pcm_frames
-            && only_pcm.time_level_frames == before.time_level_frames,
+        only_pcm.pcm_frames > before.pcm_frames && only_pcm.level_frames == before.level_frames,
         "Levels close affected PCM",
     )?;
     action(
@@ -992,6 +999,9 @@ fn c08() -> Result<Value, String> {
         )?)?;
         action(&mut ws, WorkspaceAction::CloseModule { instance_id: id })?;
     }
+    wait_until(deadline(), "cycled needs released", || {
+        (handle.metrics().subscriptions == 0).then_some(())
+    })?;
     let after_cycles = handle.metrics();
     driver
         .advance_frames(1600, deadline())
@@ -1001,7 +1011,7 @@ fn c08() -> Result<Value, String> {
         "create/close cycles retained analysis demand",
     )?;
     Ok(
-        json!({"pcm_frames":both.time_pcm_frames,"level_frames":both.time_level_frames,"cycles":20,"active_subscriptions":handle.metrics().subscriptions}),
+        json!({"pcm_frames":both.pcm_frames,"level_frames":both.level_frames,"cycles":20,"active_subscriptions":handle.metrics().subscriptions}),
     )
 }
 

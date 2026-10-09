@@ -204,6 +204,8 @@ struct ModuleEntry {
     type_id: &'static str,
     label: &'static str,
     module: Box<dyn Module>,
+    /// Visibility last reported to the instance (new instances start visible).
+    visible: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -244,6 +246,8 @@ pub(crate) struct WindowState {
     group: Option<u64>,
     commands: Vec<ViewportCommand>,
     ui: WindowUiState,
+    /// The native window is minimized: its instances are not drawn.
+    minimized: bool,
 }
 
 impl WindowState {
@@ -264,6 +268,7 @@ impl WindowState {
             group: None,
             commands: Vec::new(),
             ui: WindowUiState::default(),
+            minimized: false,
         }
     }
 
@@ -425,6 +430,31 @@ impl Workspace {
         self.windows.contains_key(&id)
     }
 
+    /// Report whether a native window is minimized. Instances in a minimized window
+    /// may stop work that only serves the display; their analysis keeps running.
+    pub(crate) fn set_window_minimized(&mut self, id: WindowId, minimized: bool) {
+        if let Some(window) = self.windows.get_mut(&id)
+            && window.minimized != minimized
+        {
+            window.minimized = minimized;
+            self.sync_visibility();
+        }
+    }
+
+    /// Tell each instance whether its window can be seen, when that changed.
+    fn sync_visibility(&mut self) {
+        for window in self.windows.values() {
+            for leaf in window.layout.leaves() {
+                if let Some(entry) = self.modules.get_mut(&leaf)
+                    && entry.visible == window.minimized
+                {
+                    entry.visible = !window.minimized;
+                    entry.module.set_visible(entry.visible);
+                }
+            }
+        }
+    }
+
     pub(crate) fn source_status(&self) -> SourceStatus {
         self.services.source.source_status()
     }
@@ -458,6 +488,7 @@ impl Workspace {
                 type_id,
                 label,
                 module,
+                visible: true,
             },
         );
         Ok(id)
@@ -562,6 +593,7 @@ impl Workspace {
         action: WorkspaceAction,
     ) -> Result<ActionOutcome, WorkspaceError> {
         let result = self.apply(action);
+        self.sync_visibility();
         match &result {
             Ok(_) => self.control_error = None,
             Err(error) => self.control_error = Some(error.to_string()),
@@ -876,6 +908,7 @@ impl Workspace {
         if source_empty {
             let _ = self.close_window(pending.source);
         }
+        self.sync_visibility();
     }
 
     fn move_module(

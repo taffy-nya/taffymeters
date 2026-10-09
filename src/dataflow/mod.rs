@@ -1,18 +1,22 @@
 mod channel;
+mod engine;
 mod fft;
-mod processing;
+mod kernels;
 mod runtime;
+mod spec;
+pub(crate) mod store;
+#[cfg(test)]
+mod tests;
 mod time;
-mod time_runtime;
 
 pub use channel::{ChannelError, ChannelSelection};
+pub use engine::RuntimeMetrics;
 pub use fft::{FftConfig, FftMetadata, WindowFunction};
-pub use processing::{
-    HistoryConfig, PeakConfig, RequestError, SharedAnalysisId, SmoothConfig, SpectrumRequest,
-};
 pub(crate) use runtime::Dataflow;
 pub use runtime::{
-    ControlError, DataflowHandle, PublicationWaker, RuntimeMetrics, SpectrumController,
-    SpectrumSubscription,
+    ControlError, DataController, DataSubscription, DataflowHandle, PublicationWaker,
 };
-pub use time_runtime::{TimeDomainRequest, TimeDomainRequestError, TimeDomainSubscription};
+pub use spec::{
+    DataSpec, HISTORY_BUDGET_BYTES, Keep, NodeRef, NodeSpec, OutputId, OutputSpec, PeakConfig,
+    SOURCE, SharedAnalysisId, SmoothConfig, SpecError,
+};

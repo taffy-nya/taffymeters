@@ -20,24 +20,6 @@ impl ChannelSelection {
         }
     }
 
-    pub(crate) const fn encode(self) -> u32 {
-        match self {
-            Self::Left => 0,
-            Self::Right => 1,
-            Self::MonoAverage => 2,
-            Self::Discrete(index) => 0x1_0000 | index as u32,
-        }
-    }
-
-    pub(crate) const fn decode(encoded: u32) -> Self {
-        match encoded {
-            0 => Self::Left,
-            1 => Self::Right,
-            2 => Self::MonoAverage,
-            value => Self::Discrete((value & 0xffff) as u16),
-        }
-    }
-
     pub(crate) fn resolve(
         self,
         descriptor: &AudioDescriptor,

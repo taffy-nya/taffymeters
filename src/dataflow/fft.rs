@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, sync::Arc};
 
-use rustfft::{Fft, FftPlanner, num_complex::Complex32};
+use realfft::{RealFftPlanner, RealToComplex, num_complex::Complex32};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowFunction {
@@ -56,6 +56,18 @@ pub struct FftMetadata {
     pub floor_dbfs: f32,
 }
 
+impl FftMetadata {
+    pub(crate) fn of(config: FftConfig, sample_rate_hz: u32) -> Self {
+        Self {
+            window: WindowFunction::PeriodicHann,
+            window_size: config.window_size,
+            hop_size: config.hop_size,
+            bin_hz: sample_rate_hz as f32 / config.window_size as f32,
+            floor_dbfs: config.floor_dbfs,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FftConfigError {
     WindowTooSmall,
@@ -75,75 +87,82 @@ impl fmt::Display for FftConfigError {
 
 impl Error for FftConfigError {}
 
+/// Sliding-window magnitude spectrum: the first result after `window_size`
+/// samples, then one every `hop_size` samples. Bins are peak amplitude in dBFS
+/// (a full-scale sine centered on a bin reads 0 dBFS), clamped to the floor.
 pub(crate) struct StreamingFft {
     config: FftConfig,
-    fft: Arc<dyn Fft<f32>>,
+    fft: Arc<dyn RealToComplex<f32>>,
     window: Box<[f32]>,
-    coherent_sum: f32,
+    /// Per bin, `20·log10` of the one-sided amplitude scale.
+    scale_db: Box<[f32]>,
     ring: Box<[f32]>,
     write_index: usize,
     filled: usize,
     samples_since_evaluation: usize,
-    complex: Box<[Complex32]>,
-    scratch: Box<[Complex32]>,
+    input: Vec<f32>,
+    spectrum: Vec<Complex32>,
+    scratch: Vec<Complex32>,
     bins_dbfs: Box<[f32]>,
 }
 
 impl StreamingFft {
     pub(crate) fn new(config: FftConfig) -> Self {
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(config.window_size);
-        let window: Box<[f32]> = (0..config.window_size)
+        let size = config.window_size;
+        let fft = RealFftPlanner::<f32>::new().plan_fft_forward(size);
+        let window: Box<[f32]> = (0..size)
             .map(|index| {
-                0.5 - 0.5
-                    * (2.0 * std::f32::consts::PI * index as f32 / config.window_size as f32).cos()
+                0.5 - 0.5 * (2.0 * std::f32::consts::PI * index as f32 / size as f32).cos()
             })
             .collect();
-        let coherent_sum = window.iter().sum();
-        let scratch_len = fft.get_inplace_scratch_len();
+        let coherent_sum: f32 = window.iter().sum();
+        let nyquist = size / 2;
+        let scale_db = (0..=nyquist)
+            .map(|index| {
+                let scale = if index == 0 || index == nyquist {
+                    1.0
+                } else {
+                    2.0
+                };
+                20.0 * (scale / coherent_sum).log10()
+            })
+            .collect();
         Self {
             config,
+            input: fft.make_input_vec(),
+            spectrum: fft.make_output_vec(),
+            scratch: fft.make_scratch_vec(),
             fft,
             window,
-            coherent_sum,
-            ring: vec![0.0; config.window_size].into_boxed_slice(),
+            scale_db,
+            ring: vec![0.0; size].into_boxed_slice(),
             write_index: 0,
             filled: 0,
             samples_since_evaluation: 0,
-            complex: vec![Complex32::default(); config.window_size].into_boxed_slice(),
-            scratch: vec![Complex32::default(); scratch_len].into_boxed_slice(),
-            bins_dbfs: vec![config.floor_dbfs; config.window_size / 2 + 1].into_boxed_slice(),
+            bins_dbfs: vec![config.floor_dbfs; nyquist + 1].into_boxed_slice(),
         }
     }
 
-    pub(crate) fn metadata(&self, sample_rate_hz: u32) -> FftMetadata {
-        FftMetadata {
-            window: WindowFunction::PeriodicHann,
-            window_size: self.config.window_size,
-            hop_size: self.config.hop_size,
-            bin_hz: sample_rate_hz as f32 / self.config.window_size as f32,
-            floor_dbfs: self.config.floor_dbfs,
+    /// Consume samples until a result is due. Returns how many samples were
+    /// consumed when a new result was computed, or None when all of `samples` were
+    /// consumed without one.
+    pub(crate) fn push(&mut self, samples: &[f32]) -> Option<usize> {
+        let size = self.config.window_size;
+        let mut consumed = 0;
+        while consumed < samples.len() {
+            let needed = (size - self.filled)
+                .max(self.config.hop_size - self.samples_since_evaluation.min(self.config.hop_size))
+                .max(1);
+            let taken = needed.min(samples.len() - consumed);
+            self.write(&samples[consumed..consumed + taken]);
+            consumed += taken;
+            if taken == needed {
+                self.samples_since_evaluation = 0;
+                self.compute();
+                return Some(consumed);
+            }
         }
-    }
-
-    pub(crate) fn push(&mut self, sample: f32) -> bool {
-        self.ring[self.write_index] = sample;
-        self.write_index += 1;
-        if self.write_index == self.config.window_size {
-            self.write_index = 0;
-        }
-        self.filled = (self.filled + 1).min(self.config.window_size);
-        self.samples_since_evaluation += 1;
-
-        let due = self.filled == self.config.window_size
-            && (self.samples_since_evaluation >= self.config.window_size
-                || self.samples_since_evaluation >= self.config.hop_size);
-        if !due {
-            return false;
-        }
-        self.samples_since_evaluation = 0;
-        self.compute();
-        true
+        None
     }
 
     pub(crate) fn bins_dbfs(&self) -> &[f32] {
@@ -157,26 +176,44 @@ impl StreamingFft {
         self.samples_since_evaluation = 0;
     }
 
+    fn write(&mut self, mut samples: &[f32]) {
+        let size = self.config.window_size;
+        self.filled = (self.filled + samples.len()).min(size);
+        self.samples_since_evaluation += samples.len();
+        if samples.len() > size {
+            samples = &samples[samples.len() - size..];
+        }
+        let first = samples.len().min(size - self.write_index);
+        self.ring[self.write_index..self.write_index + first].copy_from_slice(&samples[..first]);
+        self.ring[..samples.len() - first].copy_from_slice(&samples[first..]);
+        self.write_index = (self.write_index + samples.len()) % size;
+    }
+
     fn compute(&mut self) {
-        for index in 0..self.config.window_size {
-            let sample = self.ring[(self.write_index + index) % self.config.window_size];
-            self.complex[index] = Complex32::new(sample * self.window[index], 0.0);
+        let (newest, oldest) = self.ring.split_at(self.write_index);
+        let (head, tail) = self.input.split_at_mut(oldest.len());
+        let (head_window, tail_window) = self.window.split_at(oldest.len());
+        for ((output, sample), weight) in head.iter_mut().zip(oldest).zip(head_window) {
+            *output = sample * weight;
+        }
+        for ((output, sample), weight) in tail.iter_mut().zip(newest).zip(tail_window) {
+            *output = sample * weight;
         }
         self.fft
-            .process_with_scratch(&mut self.complex, &mut self.scratch);
-
-        let nyquist = self.config.window_size / 2;
-        for (index, output) in self.bins_dbfs.iter_mut().enumerate() {
-            let one_sided_scale = if index == 0 || index == nyquist {
-                1.0 / self.coherent_sum
+            .process_with_scratch(&mut self.input, &mut self.spectrum, &mut self.scratch)
+            .expect("buffers are sized by the planner");
+        let floor = self.config.floor_dbfs;
+        for ((output, bin), scale_db) in self
+            .bins_dbfs
+            .iter_mut()
+            .zip(&self.spectrum)
+            .zip(self.scale_db.iter())
+        {
+            let power = bin.norm_sqr();
+            *output = if power > 0.0 {
+                (10.0 * power.log10() + scale_db).max(floor)
             } else {
-                2.0 / self.coherent_sum
-            };
-            let peak_amplitude = self.complex[index].norm() * one_sided_scale;
-            *output = if peak_amplitude > 0.0 {
-                (20.0 * peak_amplitude.log10()).max(self.config.floor_dbfs)
-            } else {
-                self.config.floor_dbfs
+                floor
             };
         }
     }
@@ -186,22 +223,22 @@ impl StreamingFft {
 mod tests {
     use super::*;
 
+    fn sine(frames: usize, frequency: f32, amplitude: f32) -> Vec<f32> {
+        (0..frames)
+            .map(|index| {
+                amplitude * (2.0 * std::f32::consts::PI * frequency * index as f32 / 48_000.0).sin()
+            })
+            .collect()
+    }
+
     #[test]
     fn periodic_hann_reports_bin_centered_peak_amplitude_in_dbfs() {
         let config = FftConfig::new(2048, 512, -160.0).unwrap();
         let mut fft = StreamingFft::new(config);
-        let sample_rate = 48_000.0;
         let target_bin = 43;
-        let frequency = target_bin as f32 * sample_rate / config.window_size as f32;
+        let frequency = target_bin as f32 * 48_000.0 / config.window_size as f32;
         let amplitude = 0.25_f32;
-        let mut produced = false;
-        for index in 0..config.window_size {
-            produced |= fft.push(
-                amplitude
-                    * (2.0 * std::f32::consts::PI * frequency * index as f32 / sample_rate).sin(),
-            );
-        }
-        assert!(produced);
+        assert_eq!(fft.push(&sine(2048, frequency, amplitude)), Some(2048));
         let measured = fft.bins_dbfs()[target_bin];
         let expected = 20.0 * amplitude.log10();
         assert!(
@@ -211,12 +248,32 @@ mod tests {
     }
 
     #[test]
-    fn fft_advances_only_at_window_and_hop_boundaries() {
+    fn results_are_due_at_window_then_every_hop_regardless_of_slicing() {
         let config = FftConfig::new(32, 8, -120.0).unwrap();
-        let mut fft = StreamingFft::new(config);
-        assert_eq!((0..31).filter(|_| fft.push(0.0)).count(), 0);
-        assert!(fft.push(0.0));
-        assert_eq!((0..7).filter(|_| fft.push(0.0)).count(), 0);
-        assert!(fft.push(0.0));
+        let samples = sine(100, 3_000.0, 0.5);
+        let mut whole = StreamingFft::new(config);
+        let mut due_whole = Vec::new();
+        let mut position = 0;
+        while let Some(consumed) = whole.push(&samples[position..]) {
+            position += consumed;
+            due_whole.push((position, whole.bins_dbfs().to_vec()));
+        }
+        assert_eq!(
+            due_whole.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            [32, 40, 48, 56, 64, 72, 80, 88, 96]
+        );
+
+        let mut sliced = StreamingFft::new(config);
+        let mut due_sliced = Vec::new();
+        let mut offset = 0;
+        for chunk in samples.chunks(7) {
+            let mut position = 0;
+            while let Some(consumed) = sliced.push(&chunk[position..]) {
+                position += consumed;
+                due_sliced.push((offset + position, sliced.bins_dbfs().to_vec()));
+            }
+            offset += chunk.len();
+        }
+        assert_eq!(due_whole, due_sliced);
     }
 }

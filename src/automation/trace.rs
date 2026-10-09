@@ -28,7 +28,11 @@ pub(crate) struct Trace {
     targets_sampled: HashMap<WindowId, Instant>,
     /// UI passes per window since `rate_started`, plus analysis counters then.
     passes: HashMap<WindowId, u64>,
-    rate_started: Option<(Instant, u64, u64)>,
+    rate_started: Option<(
+        Instant,
+        crate::dataflow::RuntimeMetrics,
+        crate::probe::WorkerSample,
+    )>,
 }
 
 impl Trace {
@@ -56,13 +60,16 @@ impl Trace {
     }
 
     /// Count one UI pass of `window`; about once a second write the passes per
-    /// window and the FFT / pipeline evaluations per second over that interval.
+    /// window, the analysis evaluations per second and the worker thread's CPU over
+    /// that interval.
     pub(crate) fn pass(&mut self, workspace: &Workspace, window: WindowId) {
         *self.passes.entry(window).or_default() += 1;
-        let metrics = workspace.dataflow_handle_for_automation().metrics();
+        let handle = workspace.dataflow_handle_for_automation();
+        let metrics = handle.metrics();
+        let worker = handle.worker_sample();
         let now = Instant::now();
-        let Some((started, fft, pipelines)) = self.rate_started else {
-            self.rate_started = Some((now, metrics.fft_evaluations, metrics.pipeline_evaluations));
+        let Some((started, previous, previous_worker)) = self.rate_started else {
+            self.rate_started = Some((now, metrics, worker));
             self.passes.clear();
             return;
         };
@@ -76,17 +83,27 @@ impl Trace {
             .map(|(id, count)| (id.0, count as f64 / elapsed))
             .collect();
         passes.sort_by_key(|(id, _)| *id);
+        let per_second = |now: u64, before: u64| (now - before) as f64 / elapsed;
         let body = json!({
             "seconds": elapsed,
             "passes_per_second": passes,
-            "fft_evaluations_per_second": (metrics.fft_evaluations - fft) as f64 / elapsed,
-            "pipeline_evaluations_per_second": (metrics.pipeline_evaluations - pipelines) as f64 / elapsed,
-            "fft_branches": metrics.fft_branches,
-            "channel_branches": metrics.channel_branches,
-            "pipelines": metrics.pipelines,
+            "fft_evaluations_per_second": per_second(metrics.fft_evaluations, previous.fft_evaluations),
+            "spectrum_evaluations_per_second":
+                per_second(metrics.spectrum_evaluations, previous.spectrum_evaluations),
+            "publications_per_second": per_second(metrics.publications, previous.publications),
+            "worker_cpu_ms_per_second": worker.cpu.zip(previous_worker.cpu)
+                .map(|(now, before)| (now - before).as_secs_f64() * 1_000.0 / elapsed),
+            "worker_megacycles_per_second": worker.cycles.zip(previous_worker.cycles)
+                .map(|(now, before)| (now - before) as f64 / 1.0e6 / elapsed),
+            "worker_allocations_per_second": per_second(worker.allocations, previous_worker.allocations),
+            "nodes": metrics.nodes,
+            "active_channel_nodes": metrics.active_channel_nodes,
+            "active_fft_nodes": metrics.active_fft_nodes,
+            "active_spectrum_nodes": metrics.active_spectrum_nodes,
+            "active_level_nodes": metrics.active_level_nodes,
         });
         self.write("rate", body);
-        self.rate_started = Some((now, metrics.fft_evaluations, metrics.pipeline_evaluations));
+        self.rate_started = Some((now, metrics, worker));
     }
 
     /// Record ownership / demand when it changed.
@@ -122,7 +139,7 @@ impl Trace {
             "move_source": observation.move_source.map(|id| id.0),
             "modules_created": observation.modules_created,
             "subscriptions": metrics.subscriptions,
-            "pipelines": metrics.pipelines,
+            "nodes": metrics.nodes,
             "control_error": observation.control_error,
             "source": format!("{:?}", observation.source_status.state),
         });

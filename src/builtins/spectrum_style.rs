@@ -1,16 +1,25 @@
 use crate::{
+    dataflow::FftMetadata,
     extensions::{Registry, RegistryError},
     plotting::SpectrumCoordinates,
     render::{Color, ColoredRect, Point, Rect, RenderTarget, Stroke},
-    snapshot::SpectrumSnapshotSet,
 };
 
 pub const DEFAULT_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.line";
 pub const BAR_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.bars";
 pub const PIXEL_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.pixel";
 
+/// One Spectrum result: the main curve and, when available, the peak curve of the
+/// same analysis hop.
+#[derive(Clone, Copy, Debug)]
+pub struct SpectrumPlot<'a> {
+    pub fft: FftMetadata,
+    pub spectrum_dbfs: &'a [f32],
+    pub peak_dbfs: Option<&'a [f32]>,
+}
+
 pub struct SpectrumStyleContext<'a> {
-    pub snapshot: &'a SpectrumSnapshotSet,
+    pub snapshot: &'a SpectrumPlot<'a>,
     pub coordinates: &'a SpectrumCoordinates,
     pub rect: Rect,
     pub monotonic_time: std::time::Duration,
@@ -64,7 +73,7 @@ impl SpectrumStyle for LineSpectrumStyle {
             *context.coordinates,
             context.rect,
             &mut self.points,
-            &context.snapshot.spectrum_dbfs,
+            context.snapshot.spectrum_dbfs,
         );
         renderer.polyline(
             context.rect,
@@ -74,7 +83,7 @@ impl SpectrumStyle for LineSpectrumStyle {
                 color: Color::rgb(92, 230, 199),
             },
         );
-        if let Some(peak) = &context.snapshot.peak_dbfs {
+        if let Some(peak) = context.snapshot.peak_dbfs {
             spectrum_points(
                 context.snapshot,
                 *context.coordinates,
@@ -230,7 +239,7 @@ fn pixel_color(strength: f32) -> Color {
 }
 
 fn spectrum_points(
-    snapshot: &SpectrumSnapshotSet,
+    snapshot: &SpectrumPlot<'_>,
     coordinates: SpectrumCoordinates,
     rect: Rect,
     output: &mut Vec<Point>,

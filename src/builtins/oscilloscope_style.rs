@@ -1,18 +1,21 @@
 use std::{collections::VecDeque, time::Duration};
 
 use crate::{
+    audio::AudioDescriptor,
     dataflow::ChannelSelection,
     extensions::{Registry, RegistryError},
     module::ModuleResponse,
     render::{Color, Point, Rect, RenderTarget, Stroke},
-    snapshot::TimeDomainSnapshot,
+    snapshot::Frame,
 };
 
 pub const LINE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.line";
 pub const PERSISTENCE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.persistence";
 
 pub struct OscilloscopeStyleContext<'a> {
-    pub snapshot: &'a TimeDomainSnapshot,
+    pub descriptor: &'a AudioDescriptor,
+    /// The latest merged PCM chunk.
+    pub frame: &'a Frame,
     pub channel: ChannelSelection,
     pub rect: Rect,
     pub y_scale: f32,
@@ -124,8 +127,8 @@ impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
         }) {
             self.traces.pop_front();
         }
-        if context.snapshot.result_version != self.latest_version {
-            self.latest_version = context.snapshot.result_version;
+        if context.frame.result_version != self.latest_version {
+            self.latest_version = context.frame.result_version;
             build_latest_trace(&context, &mut self.scratch);
             let points = std::mem::take(&mut self.scratch);
             self.traces.push_back(Trace {
@@ -169,11 +172,11 @@ impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
 
 fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<Point>) {
     output.clear();
-    let Some(chunk) = context.snapshot.chunks.last() else {
+    let Some(chunk) = context.frame.pcm() else {
         return;
     };
-    let channels = context.snapshot.descriptor.channel_count as usize;
-    let Ok(channel) = context.channel.resolve(&context.snapshot.descriptor) else {
+    let channels = context.descriptor.channel_count as usize;
+    let Ok(channel) = context.channel.resolve(context.descriptor) else {
         return;
     };
     let width = context.rect.width().max(1.0) as usize;
@@ -203,13 +206,11 @@ fn animate() -> ModuleResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::{
-        audio::{AudioDescriptor, ChannelLayout, Generation, SourceId},
+        audio::{ChannelLayout, Generation, SourceId},
         render::{Circle, ColoredRect, TextStyle},
-        snapshot::AudioChunk,
+        snapshot::{AudioChunk, FrameData},
     };
 
     #[derive(Default)]
@@ -231,37 +232,39 @@ mod tests {
         fn text(&mut self, _clip: Rect, _position: Point, _text: &str, _style: TextStyle) {}
     }
 
-    fn snapshot(version: u64) -> TimeDomainSnapshot {
-        let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                .unwrap(),
-        );
+    fn descriptor() -> AudioDescriptor {
+        AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo).unwrap()
+    }
+
+    fn chunk(version: u64) -> Frame {
         let samples: Vec<f32> = (0..128)
             .flat_map(|index| {
                 let sample = (index as f32 * 0.1).sin() * 0.5;
                 [sample, -sample]
             })
             .collect();
-        TimeDomainSnapshot {
-            descriptor,
+        Frame {
             result_version: version,
             processed_through_frame: 128,
+            source_sequence: 0,
             discontinuity_count: 0,
-            chunks: vec![Arc::new(AudioChunk {
+            discontinuity_before: false,
+            data: FrameData::Pcm(AudioChunk {
                 start_frame: 0,
                 frame_count: 128,
-                source_sequence: 0,
-                discontinuity_before: false,
-                interleaved: samples.into(),
-            })]
-            .into(),
-            levels: None,
+                interleaved: samples,
+            }),
         }
     }
 
-    fn context(snapshot: &TimeDomainSnapshot, time: Duration) -> OscilloscopeStyleContext<'_> {
+    fn context<'a>(
+        descriptor: &'a AudioDescriptor,
+        frame: &'a Frame,
+        time: Duration,
+    ) -> OscilloscopeStyleContext<'a> {
         OscilloscopeStyleContext {
-            snapshot,
+            descriptor,
+            frame,
             channel: ChannelSelection::MonoAverage,
             rect: Rect {
                 min: Point { x: 0.0, y: 0.0 },
@@ -274,23 +277,30 @@ mod tests {
 
     #[test]
     fn persistence_instances_keep_and_clear_visual_state_independently() {
-        let snapshot = snapshot(1);
+        let descriptor = descriptor();
+        let snapshot = chunk(1);
         let mut first = PersistenceOscilloscopeStyleFactory.create();
         let mut second = PersistenceOscilloscopeStyleFactory.create();
         let mut first_target = RecordingTarget::default();
         let mut second_target = RecordingTarget::default();
-        first.draw(context(&snapshot, Duration::ZERO), &mut first_target);
-        second.draw(context(&snapshot, Duration::ZERO), &mut second_target);
+        first.draw(
+            context(&descriptor, &snapshot, Duration::ZERO),
+            &mut first_target,
+        );
+        second.draw(
+            context(&descriptor, &snapshot, Duration::ZERO),
+            &mut second_target,
+        );
 
         first.clear();
         first_target.polylines = 0;
         second_target.polylines = 0;
         first.draw(
-            context(&snapshot, Duration::from_millis(100)),
+            context(&descriptor, &snapshot, Duration::from_millis(100)),
             &mut first_target,
         );
         second.draw(
-            context(&snapshot, Duration::from_millis(100)),
+            context(&descriptor, &snapshot, Duration::from_millis(100)),
             &mut second_target,
         );
 

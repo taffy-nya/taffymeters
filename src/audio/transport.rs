@@ -193,47 +193,10 @@ impl ProcessingEndpoint {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::missing_const_for_thread_local)]
-
-    use std::{
-        alloc::{GlobalAlloc, Layout, System},
-        cell::Cell,
-    };
-
     use super::*;
 
-    struct TrackingAllocator;
-
-    thread_local! {
-        static TRACKING: Cell<bool> = const { Cell::new(false) };
-        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    }
-
-    unsafe impl GlobalAlloc for TrackingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            TRACKING.with(|tracking| {
-                if tracking.get() {
-                    ALLOCATIONS.with(|count| count.set(count.get() + 1));
-                }
-            });
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: TrackingAllocator = TrackingAllocator;
-
-    fn allocations_during(action: impl FnOnce()) -> usize {
-        TRACKING.with(|tracking| tracking.set(false));
-        ALLOCATIONS.with(|count| count.set(0));
-        TRACKING.with(|tracking| tracking.set(true));
-        action();
-        TRACKING.with(|tracking| tracking.set(false));
-        ALLOCATIONS.with(Cell::get)
+    fn allocations_during(action: impl FnOnce()) -> u64 {
+        crate::probe::allocations_during(action)
     }
 
     #[test]

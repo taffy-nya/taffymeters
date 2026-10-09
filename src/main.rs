@@ -18,6 +18,8 @@ mod app;
 #[cfg(feature = "automation")]
 mod automation;
 mod live;
+#[cfg(any(test, feature = "automation"))]
+mod probe;
 mod workspace;
 
 pub use live::{LiveAudio, LiveAudioConfig};

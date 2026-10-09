@@ -1,8 +1,11 @@
-use std::{fmt::Write, sync::Arc};
+use std::fmt::Write;
 
 use crate::{
     audio::SourceReader,
-    dataflow::{ChannelSelection, FftConfig, PeakConfig, SpectrumRequest, SpectrumSubscription},
+    dataflow::{
+        ChannelSelection, DataController, DataSpec, DataSubscription, FftConfig, Keep, NodeRef,
+        NodeSpec, OutputId, PeakConfig, SOURCE,
+    },
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
@@ -10,12 +13,12 @@ use crate::{
     },
     plotting::SpectrumCoordinates,
     render::{Color, Point, Rect, TextStyle},
-    snapshot::{SpectrumReader, SpectrumSnapshotSet},
+    snapshot::{DataReader, Snapshot},
 };
 
 use super::spectrum_style::{
-    self, BAR_SPECTRUM_STYLE_ID, DEFAULT_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID, SpectrumStyle,
-    SpectrumStyleContext,
+    self, BAR_SPECTRUM_STYLE_ID, DEFAULT_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID, SpectrumPlot,
+    SpectrumStyle, SpectrumStyleContext,
 };
 
 pub const SPECTRUM_MODULE_ID: &str = "taffymeters.spectrum";
@@ -40,6 +43,44 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(SpectrumModuleFactory)
 }
 
+/// The Spectrum's data: a shared raw FFT feeding the displayed curve and the peak
+/// curve.
+struct SpectrumData {
+    spec: DataSpec,
+    channel: NodeRef,
+    main: OutputId,
+    peak: OutputId,
+}
+
+fn spectrum_data() -> SpectrumData {
+    let mut spec = DataSpec::new();
+    let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
+    let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
+    let curve = spec.chain(
+        fft,
+        [
+            NodeSpec::Tilt { db_per_octave: 0.0 },
+            NodeSpec::Center { db: 0.0 },
+            NodeSpec::Gain { db: 0.0 },
+        ],
+    );
+    let peak = spec.add(
+        fft,
+        NodeSpec::Peak(PeakConfig {
+            hold_ms: 1_000.0,
+            decay_db_per_second: 18.0,
+        }),
+    );
+    let main = spec.output(curve, Keep::Latest);
+    let peak = spec.output(peak, Keep::Latest);
+    SpectrumData {
+        spec,
+        channel,
+        main,
+        peak,
+    }
+}
+
 struct SpectrumModuleFactory;
 
 impl SpectrumModuleFactory {
@@ -48,20 +89,20 @@ impl SpectrumModuleFactory {
         services: &ModuleServices,
         registry: &Registry,
     ) -> Result<SpectrumModule, RegistryError> {
-        let mut request = SpectrumRequest::new(ChannelSelection::MonoAverage, FftConfig::default());
-        request.peak = Some(PeakConfig {
-            hold_ms: 1_000.0,
-            decay_db_per_second: 18.0,
-        });
+        let data = spectrum_data();
         let subscription = services
             .dataflow
-            .subscribe_spectrum(request)
+            .subscribe(data.spec)
             .map_err(ModuleError::from)?;
-        let reader = subscription.reader();
         Ok(SpectrumModule {
             source: services.source.clone(),
-            subscription,
-            reader,
+            controller: subscription.controller(),
+            reader: subscription.reader(),
+            _subscription: subscription,
+            channel_node: data.channel,
+            main: data.main,
+            peak: data.peak,
+            snapshot: Snapshot::default(),
             style: registry.create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)?,
             style_id: DEFAULT_SPECTRUM_STYLE_ID,
             coordinates: SpectrumCoordinates {
@@ -70,7 +111,6 @@ impl SpectrumModuleFactory {
                 min_dbfs: -100.0,
                 max_dbfs: 0.0,
             },
-            latest: None,
             hover_line: String::with_capacity(128),
         })
     }
@@ -96,52 +136,61 @@ impl ModuleFactory for SpectrumModuleFactory {
 
 struct SpectrumModule {
     source: SourceReader,
-    subscription: SpectrumSubscription,
-    reader: SpectrumReader,
+    controller: DataController,
+    reader: DataReader,
+    _subscription: DataSubscription,
+    channel_node: NodeRef,
+    main: OutputId,
+    peak: OutputId,
+    snapshot: Snapshot,
     style: Box<dyn SpectrumStyle>,
     style_id: &'static str,
     coordinates: SpectrumCoordinates,
-    latest: Option<Arc<SpectrumSnapshotSet>>,
     hover_line: String,
 }
 
 impl SpectrumModule {
-    fn update_range(&mut self, frame: &ModuleFrame<'_>, plot: Rect, nyquist: f32) {
+    fn update_range(
+        coordinates: &mut SpectrumCoordinates,
+        frame: &ModuleFrame<'_>,
+        plot: Rect,
+        nyquist: f32,
+    ) {
         if frame.pointer.is_some_and(|point| plot.contains(point)) {
             if (frame.zoom_delta - 1.0).abs() > 0.001 {
-                self.coordinates.max_frequency_hz = (self.coordinates.max_frequency_hz
-                    / frame.zoom_delta)
-                    .clamp(self.coordinates.min_frequency_hz * 4.0, nyquist);
+                coordinates.max_frequency_hz = (coordinates.max_frequency_hz / frame.zoom_delta)
+                    .clamp(coordinates.min_frequency_hz * 4.0, nyquist);
             }
             if frame.scroll_delta_y.abs() > 0.01 {
-                let span = self.coordinates.max_dbfs - self.coordinates.min_dbfs;
+                let span = coordinates.max_dbfs - coordinates.min_dbfs;
                 let next_span = (span * (-frame.scroll_delta_y * 0.002).exp()).clamp(24.0, 180.0);
-                self.coordinates.min_dbfs = self.coordinates.max_dbfs - next_span;
+                coordinates.min_dbfs = coordinates.max_dbfs - next_span;
             }
         }
     }
 
     fn draw_hover(
-        &mut self,
+        coordinates: &SpectrumCoordinates,
+        hover_line: &mut String,
         frame: &mut ModuleFrame<'_>,
         plot: Rect,
-        snapshot: &SpectrumSnapshotSet,
+        data: &SpectrumPlot<'_>,
     ) {
         let Some(pointer) = frame.pointer.filter(|point| plot.contains(*point)) else {
             return;
         };
-        let frequency = self.coordinates.frequency_at_x(pointer.x, plot);
-        let axis_dbfs = self.coordinates.dbfs_at_y(pointer.y, plot);
-        let bin = (frequency / snapshot.fft.bin_hz).round() as usize;
-        let curve_dbfs = snapshot.spectrum_dbfs.get(bin).copied();
-        self.hover_line.clear();
+        let frequency = coordinates.frequency_at_x(pointer.x, plot);
+        let axis_dbfs = coordinates.dbfs_at_y(pointer.y, plot);
+        let bin = (frequency / data.fft.bin_hz).round() as usize;
+        let curve_dbfs = data.spectrum_dbfs.get(bin).copied();
+        hover_line.clear();
         let _ = write!(
-            self.hover_line,
+            hover_line,
             "cursor {:.1} Hz | axis {:.1} dBFS",
             frequency, axis_dbfs
         );
         if let Some(curve_dbfs) = curve_dbfs {
-            let _ = write!(self.hover_line, " | curve {:.1} dBFS", curve_dbfs);
+            let _ = write!(hover_line, " | curve {:.1} dBFS", curve_dbfs);
         }
         frame.renderer.text(
             frame.rect,
@@ -149,7 +198,7 @@ impl SpectrumModule {
                 x: (pointer.x + 10.0).min(frame.rect.max.x - 260.0),
                 y: (pointer.y + 10.0).min(frame.rect.max.y - 18.0),
             },
-            &self.hover_line,
+            hover_line,
             TextStyle {
                 size: 11.0,
                 color: Color::rgb(235, 240, 245),
@@ -160,58 +209,65 @@ impl SpectrumModule {
 
 impl Module for SpectrumModule {
     fn channel(&self) -> Option<ChannelSelection> {
-        Some(self.reader.requested_channel())
+        self.controller
+            .with_spec(|spec| match spec.node(self.channel_node) {
+                Some(NodeSpec::Channel(channel)) => Some(channel),
+                _ => None,
+            })
     }
 
     fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
         channel.resolve(self.source.descriptor())?;
-        self.subscription.controller().set_channel(channel)?;
+        let node = self.channel_node;
+        self.controller
+            .update(|spec| spec.set_node(node, NodeSpec::Channel(channel)))?;
         Ok(())
     }
 
+    fn set_visible(&mut self, visible: bool) {
+        let _ = self.controller.set_visible(visible);
+    }
+
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
-        let requested_channel = self.reader.requested_channel();
-        let requested_revision = self.reader.requested_revision();
-        self.latest = self.reader.latest().filter(|snapshot| {
-            snapshot.channel == requested_channel && snapshot.config_revision == requested_revision
-        });
-        if let Some(error) = self.reader.analysis_error() {
-            let message = format!("Channel error: {error}");
-            frame.renderer.text(
-                frame.rect,
-                Point {
-                    x: frame.rect.min.x + 8.0,
-                    y: frame.rect.min.y + 8.0,
-                },
-                &message,
-                TextStyle {
-                    size: 12.0,
-                    color: Color::rgb(255, 110, 110),
-                },
-            );
+        self.reader.read(&mut self.snapshot);
+        let Some(main) = self.snapshot.get(self.main) else {
+            // No audio yet.
             return ModuleResponse::default();
-        }
-
-        if let Some(snapshot) = self.latest.clone() {
-            let nyquist = snapshot.descriptor.sample_rate_hz as f32 * 0.5;
-            self.coordinates.max_frequency_hz = self.coordinates.max_frequency_hz.min(nyquist);
-            let plot = frame.rect;
-            self.update_range(&frame, plot, nyquist);
-            self.style.draw(
-                SpectrumStyleContext {
-                    snapshot: &snapshot,
-                    coordinates: &self.coordinates,
-                    rect: plot,
-                    monotonic_time: frame.monotonic_time,
-                },
-                frame.renderer,
-            );
-            self.draw_hover(&mut frame, plot, &snapshot);
-        } else {
-            // No audio yet: nothing to draw; check again shortly.
+        };
+        let Some(spectrum) = main.spectrum() else {
             return ModuleResponse::default();
-        }
-
+        };
+        // The peak curve is drawn only when it belongs to the same analysis hop.
+        let peak = self
+            .snapshot
+            .get(self.peak)
+            .filter(|peak| peak.processed_through_frame == main.processed_through_frame)
+            .and_then(|peak| peak.spectrum());
+        let data = SpectrumPlot {
+            fft: spectrum.fft,
+            spectrum_dbfs: &spectrum.bins_dbfs,
+            peak_dbfs: peak.map(|peak| peak.bins_dbfs.as_slice()),
+        };
+        let nyquist = self.reader.descriptor().sample_rate_hz as f32 * 0.5;
+        self.coordinates.max_frequency_hz = self.coordinates.max_frequency_hz.min(nyquist);
+        let plot = frame.rect;
+        Self::update_range(&mut self.coordinates, &frame, plot, nyquist);
+        self.style.draw(
+            SpectrumStyleContext {
+                snapshot: &data,
+                coordinates: &self.coordinates,
+                rect: plot,
+                monotonic_time: frame.monotonic_time,
+            },
+            frame.renderer,
+        );
+        Self::draw_hover(
+            &self.coordinates,
+            &mut self.hover_line,
+            &mut frame,
+            plot,
+            &data,
+        );
         ModuleResponse::default()
     }
 
@@ -240,7 +296,10 @@ impl Module for SpectrumModule {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use super::*;
     use crate::{
@@ -249,8 +308,8 @@ mod tests {
             SourceTelemetry, create_block_transport,
         },
         dataflow::{Dataflow, DataflowHandle, FftMetadata, WindowFunction},
-        extensions::{Registry, RegistryError},
-        render::{Circle, ColoredRect, RenderTarget, Stroke},
+        render::{Circle, ColoredRect, RenderTarget},
+        snapshot::Frame,
     };
 
     #[derive(Default)]
@@ -260,7 +319,7 @@ mod tests {
     }
 
     impl RenderTarget for RecordingTarget {
-        fn polyline(&mut self, _clip: Rect, _points: &[Point], _stroke: Stroke) {
+        fn polyline(&mut self, _clip: Rect, _points: &[Point], _stroke: crate::render::Stroke) {
             self.polylines += 1;
         }
 
@@ -301,30 +360,49 @@ mod tests {
     }
 
     fn wait_for_subscriptions(handle: &DataflowHandle, expected: u64) {
-        for _ in 0..100_000 {
-            if handle.metrics().subscriptions == expected {
-                return;
-            }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while handle.metrics().subscriptions != expected {
+            assert!(
+                Instant::now() < deadline,
+                "dataflow did not reach {expected} subscriptions: {:?}",
+                handle.metrics()
+            );
             std::thread::yield_now();
         }
-        panic!(
-            "dataflow did not reach {expected} active Spectrum subscriptions: {:?}",
-            handle.metrics()
-        );
     }
 
-    fn spectrum_snapshot() -> SpectrumSnapshotSet {
-        SpectrumSnapshotSet {
-            descriptor: Arc::new(
-                AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                    .unwrap(),
-            ),
-            channel: ChannelSelection::MonoAverage,
-            config_revision: 1,
-            result_version: 1,
-            processed_through_frame: 2048,
-            source_sequence: 1,
-            discontinuity_count: 0,
+    /// The module's main curve once it reached `frontier` under `revision`.
+    fn main_at(module: &SpectrumModule, revision: u64, frontier: u64) -> Arc<Frame> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut snapshot = Snapshot::default();
+        loop {
+            module.reader.read(&mut snapshot);
+            if snapshot.config_revision() == revision
+                && let Some(frame) = snapshot.get(module.main)
+                && frame.processed_through_frame >= frontier
+            {
+                return Arc::clone(frame);
+            }
+            assert!(Instant::now() < deadline, "no result at {frontier}");
+            std::thread::yield_now();
+        }
+    }
+
+    fn fft_node(module: &SpectrumModule) -> NodeRef {
+        module.controller.with_spec(|spec| {
+            spec.nodes()
+                .find(|(_, _, node)| matches!(node, NodeSpec::Fft(_)))
+                .expect("the Spectrum has an FFT")
+                .0
+        })
+    }
+
+    #[test]
+    fn pixel_style_generates_cells_instead_of_recoloring_the_curve() {
+        let bins: Vec<f32> = (0..=1024)
+            .map(|index| -100.0 + index as f32 * 0.08)
+            .collect();
+        let plot = SpectrumPlot {
             fft: FftMetadata {
                 window: WindowFunction::PeriodicHann,
                 window_size: 2048,
@@ -332,32 +410,22 @@ mod tests {
                 bin_hz: 48_000.0 / 2048.0,
                 floor_dbfs: -160.0,
             },
-            spectrum_dbfs: (0..=1024)
-                .map(|index| -100.0 + index as f32 * 0.08)
-                .collect::<Vec<_>>()
-                .into(),
+            spectrum_dbfs: &bins,
             peak_dbfs: None,
-            history: Arc::from([]),
-        }
-    }
-
-    #[test]
-    fn pixel_style_generates_cells_instead_of_recoloring_the_curve() {
-        let snapshot = spectrum_snapshot();
+        };
         let coordinates = SpectrumCoordinates {
             min_frequency_hz: 20.0,
             max_frequency_hz: 20_000.0,
             min_dbfs: -100.0,
             max_dbfs: 0.0,
         };
-        let rect = Rect {
-            min: Point { x: 0.0, y: 0.0 },
-            max: Point { x: 800.0, y: 400.0 },
-        };
         let context = SpectrumStyleContext {
-            snapshot: &snapshot,
+            snapshot: &plot,
             coordinates: &coordinates,
-            rect,
+            rect: Rect {
+                min: Point { x: 0.0, y: 0.0 },
+                max: Point { x: 800.0, y: 400.0 },
+            },
             monotonic_time: Duration::ZERO,
         };
         let mut target = RecordingTarget::default();
@@ -385,18 +453,14 @@ mod tests {
             .unwrap();
         wait_for_subscriptions(&fixture.services.dataflow, 2);
 
+        // One shared Channel/FFT/Tilt/Center/Gain chain, one private Peak each.
         let shared_prefix = fixture.services.dataflow.metrics();
-        assert_eq!(shared_prefix.fft_branches, 1);
-        assert_eq!(shared_prefix.pipelines, 2);
-        let request = second.subscription.controller().request().unwrap();
+        assert_eq!(shared_prefix.active_fft_nodes, 1);
+        assert_eq!(shared_prefix.active_spectrum_nodes, 5);
         assert_eq!(
-            request.peak,
-            Some(PeakConfig {
-                hold_ms: 1_000.0,
-                decay_db_per_second: 18.0,
-            })
+            second.controller.spec().node(fft_node(&second)),
+            Some(NodeSpec::Fft(FftConfig::default()))
         );
-        assert_eq!(request.history, None);
 
         second
             .set_channel(ChannelSelection::Right)
@@ -414,95 +478,29 @@ mod tests {
         second.clear_visual_state();
         assert_eq!(fixture.services.dataflow.metrics(), before_style_change);
 
-        let old_reader = first.reader.clone();
-        let second_reader = second.reader.clone();
         let samples: Vec<f32> = (0..4096).flat_map(|_| [0.05_f32, -0.05]).collect();
         fixture.capture.write(&samples);
-        let first_revision = old_reader.requested_revision();
-        let second_revision = second_reader.requested_revision();
-        let mut first_snapshot = None;
-        let mut second_snapshot = None;
-        for _ in 0..100_000 {
-            first_snapshot = old_reader.latest().filter(|snapshot| {
-                snapshot.channel == ChannelSelection::MonoAverage
-                    && snapshot.config_revision == first_revision
-                    && snapshot.processed_through_frame >= 4_096
-            });
-            second_snapshot = second_reader.latest().filter(|snapshot| {
-                snapshot.channel == ChannelSelection::Right
-                    && snapshot.config_revision == second_revision
-                    && snapshot.processed_through_frame >= 4_096
-            });
-            if first_snapshot.is_some() && second_snapshot.is_some() {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        let first_version = first_snapshot
-            .expect("first factory instance should receive its own analysis")
-            .result_version;
-        let second_version = second_snapshot
-            .expect("second factory instance should receive its selected analysis")
-            .result_version;
+        let first_result = main_at(&first, 1, 4_096);
+        let second_result = main_at(&second, 2, 4_096);
+        let old_reader = first.reader.clone();
 
         drop(first);
         wait_for_subscriptions(&fixture.services.dataflow, 1);
         fixture.capture.write(&samples);
-        let mut continued_snapshot = None;
-        for _ in 0..100_000 {
-            continued_snapshot = second_reader.latest().filter(|snapshot| {
-                snapshot.channel == ChannelSelection::Right
-                    && snapshot.config_revision == second_revision
-                    && snapshot.result_version > second_version
-            });
-            if continued_snapshot.is_some() {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        assert!(
-            continued_snapshot.is_some(),
-            "remaining factory instance must continue receiving its selected analysis"
-        );
-        assert_eq!(fixture.services.dataflow.metrics().subscriptions, 1);
+        let continued = main_at(&second, 2, 8_192);
+        assert!(continued.result_version > second_result.result_version);
 
         drop(second);
         wait_for_subscriptions(&fixture.services.dataflow, 0);
-        let retained_snapshot = old_reader.latest().unwrap();
-        assert_eq!(retained_snapshot.result_version, first_version);
         let stopped = fixture.services.dataflow.metrics();
-        assert_eq!(stopped.subscriptions, 0);
-        assert_eq!(stopped.fft_branches, 0);
-        assert_eq!(stopped.pipelines, 0);
-        let _ = old_reader.latest();
-        assert_eq!(fixture.services.dataflow.metrics().subscriptions, 0);
+        assert_eq!((stopped.nodes, stopped.rings), (0, 0));
+        // A result taken earlier stays readable; the closed reader sees nothing new.
+        assert_eq!(first_result.processed_through_frame, 4_096);
+        assert!(old_reader.latest(OutputId::from_index(0)).is_none());
     }
 
     #[test]
     fn real_factory_instances_keep_fft_and_visual_state_when_moved() {
-        use std::time::Instant;
-
-        fn at_frontier(
-            reader: &SpectrumReader,
-            revision: u64,
-            frontier: u64,
-        ) -> Arc<SpectrumSnapshotSet> {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                if let Some(snapshot) = reader.latest()
-                    && snapshot.config_revision == revision
-                    && snapshot.processed_through_frame >= frontier
-                {
-                    return snapshot;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "factory instance did not reach {frontier}"
-                );
-                std::thread::yield_now();
-            }
-        }
-
         let mut fixture = runtime_fixture();
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
@@ -517,9 +515,6 @@ mod tests {
                 .create_instance(&fixture.services, &registry)
                 .unwrap(),
         );
-        let first_reader = first.reader.clone();
-        let second_reader = second.reader.clone();
-        let mut source = vec![first, second];
         let samples: Vec<f32> = (0..4_096)
             .flat_map(|frame| {
                 let time = frame as f32 / 48_000.0;
@@ -530,17 +525,26 @@ mod tests {
             })
             .collect();
         fixture.capture.write(&samples);
-        let first_before = at_frontier(&first_reader, 1, 4_096);
-        at_frontier(&second_reader, 1, 4_096);
+        let first_before = main_at(&first, 1, 4_096);
+        main_at(&second, 1, 4_096);
         let shared = fixture.services.dataflow.metrics();
-        assert_eq!(shared.fft_evaluations, 5);
-        assert_eq!(shared.pipeline_evaluations, 10);
+        assert_eq!(shared.fft_evaluations, 5, "one shared FFT");
+        assert_eq!(
+            shared.spectrum_evaluations, 25,
+            "shared Tilt/Center/Gain and two private Peaks per hop"
+        );
 
+        let mut source: Vec<Box<SpectrumModule>> = vec![first, second];
         source[1].set_channel(ChannelSelection::Right).unwrap();
+        let fft_node = fft_node(&source[1]);
         source[1]
-            .subscription
-            .controller()
-            .set_fft(FftConfig::new(1_024, 256, -160.0).unwrap())
+            .controller
+            .update(|spec| {
+                spec.set_node(
+                    fft_node,
+                    NodeSpec::Fft(FftConfig::new(1_024, 256, -160.0).unwrap()),
+                )
+            })
             .unwrap();
         source[1]
             .set_style(PIXEL_SPECTRUM_STYLE_ID, &registry)
@@ -551,13 +555,14 @@ mod tests {
         assert_eq!(destination[0].channel(), Some(ChannelSelection::Right));
 
         fixture.capture.write(&samples);
-        let first_after = at_frontier(&first_reader, 1, 8_192);
-        let second_after = at_frontier(&second_reader, 3, 8_192);
-        assert_eq!(first_after.fft.window_size, 2_048);
-        assert_eq!(second_after.fft.window_size, 1_024);
+        let first_after = main_at(&source[0], 1, 8_192);
+        let second_after = main_at(&destination[0], 3, 8_192);
+        let bins = |frame: &Frame| frame.spectrum().unwrap().clone();
+        assert_eq!(bins(&first_after).fft.window_size, 2_048);
+        assert_eq!(bins(&second_after).fft.window_size, 1_024);
         assert!(first_after.result_version > first_before.result_version);
-        assert!(first_after.spectrum_dbfs[128] > first_after.spectrum_dbfs[100]);
-        assert!(second_after.spectrum_dbfs[128] > second_after.spectrum_dbfs[100]);
+        assert!(bins(&first_after).bins_dbfs[128] > bins(&first_after).bins_dbfs[100]);
+        assert!(bins(&second_after).bins_dbfs[128] > bins(&second_after).bins_dbfs[100]);
         let evaluated = fixture.services.dataflow.metrics().fft_evaluations;
         let rect = Rect {
             min: Point { x: 0.0, y: 0.0 },
@@ -565,8 +570,6 @@ mod tests {
         };
         let mut target = RecordingTarget::default();
         for _ in 0..10 {
-            let _ = first_reader.latest();
-            let _ = second_reader.latest();
             for module in [&mut *source[0], &mut *destination[0]] {
                 module.draw(ModuleFrame {
                     rect,
@@ -581,7 +584,8 @@ mod tests {
         assert!(target.polylines > 0 && target.rectangles > 0);
         assert_eq!(
             fixture.services.dataflow.metrics().fft_evaluations,
-            evaluated
+            evaluated,
+            "drawing does not advance analysis"
         );
         drop(destination);
         wait_for_subscriptions(&fixture.services.dataflow, 1);
