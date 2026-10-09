@@ -1,13 +1,8 @@
-use std::time::Duration;
-
 use crate::{
     audio::SourceReader,
     dataflow::{ChannelSelection, FftConfig, HistoryConfig, SpectrumRequest, SpectrumSubscription},
     extensions::{Registry, RegistryError},
-    module::{
-        FRAME_INTERVAL, Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse,
-        ModuleServices,
-    },
+    module::{Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices},
     plotting::SpectrumCoordinates,
     render::{Color, ColoredRect, Point, Rect},
     snapshot::{SpectrumHistoryFrame, SpectrumReader},
@@ -92,14 +87,10 @@ impl Module for SpectrogramModule {
         let Some(snapshot) = self.reader.latest().filter(|snapshot| {
             snapshot.channel == requested_channel && snapshot.config_revision == requested_revision
         }) else {
-            return ModuleResponse {
-                repaint_after: Some(Duration::from_millis(100)),
-            };
+            return ModuleResponse::default();
         };
         if snapshot.history.is_empty() {
-            return ModuleResponse {
-                repaint_after: Some(Duration::from_millis(100)),
-            };
+            return ModuleResponse::default();
         }
 
         let bands = (frame.rect.height() / 5.0).floor().clamp(16.0, 96.0) as usize;
@@ -170,9 +161,7 @@ impl Module for SpectrogramModule {
             }
         }
         frame.renderer.fill_rects(frame.rect, &self.cells);
-        ModuleResponse {
-            repaint_after: Some(FRAME_INTERVAL),
-        }
+        ModuleResponse::default()
     }
 }
 

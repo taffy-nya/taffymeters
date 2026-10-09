@@ -25,6 +25,8 @@ pub(crate) const SPLIT_ZONE: f32 = 20.0;
 /// Thickness of the native resize edges and size of the corner squares.
 pub(crate) const RESIZE_EDGE: f32 = 6.0;
 pub(crate) const RESIZE_CORNER: f32 = 12.0;
+/// Poll interval for state that changes without new audio data or input.
+const STATE_POLL: Duration = Duration::from_millis(250);
 /// Poll interval while a native move may still be in progress.
 const MOVE_POLL: Duration = Duration::from_millis(50);
 
@@ -311,6 +313,16 @@ impl Workspace {
         if windows_before != windows_after {
             // The host (root) pass owns native viewport creation and removal.
             ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        // Drawing is otherwise driven by published data and input; keep polling only
+        // for state that changes without either: a detach waiting for its window to
+        // open (timeout) and a source that is not running (status badge).
+        let pending_detach = self
+            .windows
+            .values()
+            .any(|window| window.pending_detach.is_some() && !window.opened);
+        if pending_detach || self.source_status().state != SourceState::Running {
+            ctx.request_repaint_after_for(STATE_POLL, egui::ViewportId::ROOT);
         }
         if let Some(window) = self.windows.get_mut(&window_id) {
             for command in window.commands.drain(..) {

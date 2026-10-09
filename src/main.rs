@@ -83,6 +83,9 @@ fn run_window(app: app::App) -> eframe::Result<()> {
     eframe::run_native(
         "taffymeters",
         options,
-        Box::new(move |_creation_context| Ok(Box::new(app))),
+        Box::new(move |creation_context| {
+            app.install_waker(&creation_context.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
 }

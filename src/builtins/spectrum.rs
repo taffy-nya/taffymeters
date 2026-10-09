@@ -1,12 +1,12 @@
-use std::{fmt::Write, sync::Arc, time::Duration};
+use std::{fmt::Write, sync::Arc};
 
 use crate::{
     audio::SourceReader,
     dataflow::{ChannelSelection, FftConfig, PeakConfig, SpectrumRequest, SpectrumSubscription},
     extensions::{Registry, RegistryError},
     module::{
-        FRAME_INTERVAL, Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse,
-        ModuleServices, StyleOption,
+        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
+        StyleOption,
     },
     plotting::SpectrumCoordinates,
     render::{Color, Point, Rect, TextStyle},
@@ -189,9 +189,7 @@ impl Module for SpectrumModule {
                     color: Color::rgb(255, 110, 110),
                 },
             );
-            return ModuleResponse {
-                repaint_after: Some(Duration::from_millis(100)),
-            };
+            return ModuleResponse::default();
         }
 
         if let Some(snapshot) = self.latest.clone() {
@@ -211,14 +209,10 @@ impl Module for SpectrumModule {
             self.draw_hover(&mut frame, plot, &snapshot);
         } else {
             // No audio yet: nothing to draw; check again shortly.
-            return ModuleResponse {
-                repaint_after: Some(Duration::from_millis(100)),
-            };
+            return ModuleResponse::default();
         }
 
-        ModuleResponse {
-            repaint_after: Some(FRAME_INTERVAL),
-        }
+        ModuleResponse::default()
     }
 
     fn style_options(&self) -> &'static [StyleOption] {
@@ -246,6 +240,8 @@ impl Module for SpectrumModule {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::{
         audio::{

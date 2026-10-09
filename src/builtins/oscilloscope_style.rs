@@ -76,7 +76,8 @@ impl OscilloscopeStyle for LineOscilloscopeStyle {
                 color: Color::rgb(100, 220, 255),
             },
         );
-        animate()
+        // Redrawn when new PCM is published; nothing changes with display time.
+        ModuleResponse::default()
     }
 }
 

@@ -416,6 +416,11 @@ impl Workspace {
             .collect()
     }
 
+    /// Callback run on the analysis worker after it publishes new results.
+    pub(crate) fn set_publication_waker(&self, waker: Option<crate::dataflow::PublicationWaker>) {
+        self.services.dataflow.set_publication_waker(waker);
+    }
+
     pub(crate) fn has_window(&self, id: WindowId) -> bool {
         self.windows.contains_key(&id)
     }

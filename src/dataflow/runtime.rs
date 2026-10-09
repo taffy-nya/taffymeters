@@ -44,6 +44,31 @@ pub struct RuntimeMetrics {
     pub time_publications: u64,
 }
 
+/// Called on the worker thread after a processed block published new results (any
+/// spectrum or time-domain snapshot). Lets a UI sleep until there is something new to
+/// draw. It must be cheap and must not block; it never runs in the audio callback.
+pub type PublicationWaker = Box<dyn Fn() + Send + Sync>;
+
+/// What the worker needs to notice publications and wake the UI.
+struct PublicationNotifier {
+    waker: Arc<ArcSwapOption<PublicationWaker>>,
+    metrics: Arc<Metrics>,
+    time_metrics: Arc<TimeMetrics>,
+}
+
+impl PublicationNotifier {
+    fn published(&self) -> u64 {
+        self.metrics.pipeline_evaluations.load(Ordering::Relaxed)
+            + self.time_metrics.publications.load(Ordering::Relaxed)
+    }
+
+    fn wake(&self) {
+        if let Some(waker) = self.waker.load().as_ref() {
+            waker();
+        }
+    }
+}
+
 #[derive(Default)]
 struct Metrics {
     fft_evaluations: AtomicU64,
@@ -137,6 +162,7 @@ pub struct DataflowHandle {
     telemetry: Arc<SourceTelemetry>,
     metrics: Arc<Metrics>,
     time_metrics: Arc<TimeMetrics>,
+    waker: Arc<ArcSwapOption<PublicationWaker>>,
     #[cfg(any(test, feature = "automation"))]
     processed_through_frame: Arc<AtomicU64>,
 }
@@ -330,6 +356,12 @@ impl Dataflow {
         let time_metrics = Arc::new(TimeMetrics::default());
         let worker_time_metrics = Arc::clone(&time_metrics);
         let worker_descriptor = Arc::clone(&descriptor);
+        let waker = Arc::new(ArcSwapOption::<PublicationWaker>::empty());
+        let notifier = PublicationNotifier {
+            waker: Arc::clone(&waker),
+            metrics: Arc::clone(&metrics),
+            time_metrics: Arc::clone(&time_metrics),
+        };
         #[cfg(any(test, feature = "automation"))]
         let processed_through_frame = Arc::new(AtomicU64::new(0));
         #[cfg(any(test, feature = "automation"))]
@@ -345,10 +377,17 @@ impl Dataflow {
                     &mut endpoint,
                     command_receiver,
                     worker_stop,
+                    &notifier,
                     worker_frontier,
                 );
                 #[cfg(not(any(test, feature = "automation")))]
-                run_worker(&mut processor, &mut endpoint, command_receiver, worker_stop);
+                run_worker(
+                    &mut processor,
+                    &mut endpoint,
+                    command_receiver,
+                    worker_stop,
+                    &notifier,
+                );
             })
             .expect("failed to create dataflow worker");
         let handle = DataflowHandle {
@@ -360,6 +399,7 @@ impl Dataflow {
             telemetry,
             metrics,
             time_metrics,
+            waker,
             #[cfg(any(test, feature = "automation"))]
             processed_through_frame,
         };
@@ -441,6 +481,11 @@ impl DataflowHandle {
 
     pub fn metrics(&self) -> RuntimeMetrics {
         self.metrics.snapshot(&self.time_metrics)
+    }
+
+    /// Install (or clear) the callback run after the worker publishes new results.
+    pub fn set_publication_waker(&self, waker: Option<PublicationWaker>) {
+        self.waker.store(waker.map(Arc::new));
     }
     /// Returns the test/automation input drain frontier, not an analysis snapshot frontier.
     #[cfg(any(test, feature = "automation"))]
@@ -1247,6 +1292,7 @@ fn run_worker(
     endpoint: &mut ProcessingEndpoint,
     commands: Receiver<Command>,
     stop: Arc<AtomicBool>,
+    notifier: &PublicationNotifier,
     #[cfg(any(test, feature = "automation"))] processed_frontier: Arc<AtomicU64>,
 ) {
     while !stop.load(Ordering::Acquire) {
@@ -1296,8 +1342,12 @@ fn run_worker(
             let block_end = u64::try_from(block.frame_count)
                 .ok()
                 .and_then(|frames| block.start_frame.checked_add(frames));
+            let published = notifier.published();
             processor.process_block(&block);
             endpoint.recycle(block);
+            if notifier.published() != published {
+                notifier.wake();
+            }
             #[cfg(any(test, feature = "automation"))]
             if let Some(block_end) = block_end {
                 processed_frontier.store(block_end, Ordering::Release);

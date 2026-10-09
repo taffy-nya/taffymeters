@@ -7,7 +7,10 @@
 //! pending (input and vsync keep it pending), so other windows stopped updating.
 
 use std::{
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -21,6 +24,10 @@ type SharedTrace = Option<Arc<Mutex<crate::automation::Trace>>>;
 pub struct App {
     workspace: Arc<Mutex<Workspace>>,
     started_at: Instant,
+    /// A data wake-up is already queued for the next host pass.
+    wake_pending: Arc<AtomicBool>,
+    /// Some window was drawn in the last host pass (not all minimized).
+    any_window_shown: Arc<AtomicBool>,
     #[cfg(feature = "automation")]
     trace: SharedTrace,
 }
@@ -34,6 +41,8 @@ impl App {
         Self {
             workspace: Arc::new(Mutex::new(workspace)),
             started_at: Instant::now(),
+            wake_pending: Arc::new(AtomicBool::new(false)),
+            any_window_shown: Arc::new(AtomicBool::new(true)),
             #[cfg(feature = "automation")]
             trace: None,
         }
@@ -43,6 +52,24 @@ impl App {
     pub(crate) fn with_trace(mut self, trace: crate::automation::Trace) -> Self {
         self.trace = Some(Arc::new(Mutex::new(trace)));
         self
+    }
+
+    /// Repaint the host when the analysis worker publishes new results, instead of
+    /// redrawing at a fixed rate. At most one wake-up is queued per host pass, and
+    /// none while every window is minimized.
+    pub(crate) fn install_waker(&self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        let pending = Arc::clone(&self.wake_pending);
+        let shown = Arc::clone(&self.any_window_shown);
+        lock(&self.workspace).set_publication_waker(Some(Box::new(move || {
+            if shown.load(Ordering::Relaxed) && !pending.swap(true, Ordering::AcqRel) {
+                // Non-zero on purpose: a zero-delay request makes egui run two passes.
+                ctx.request_repaint_after_for(
+                    std::time::Duration::from_millis(1),
+                    egui::ViewportId::ROOT,
+                );
+            }
+        })));
     }
 
     /// The invisible host viewport. It must stay "visible" to the windowing system:
@@ -67,7 +94,7 @@ fn window_pass(
     ui: &mut egui::Ui,
     started_at: Instant,
     #[cfg(feature = "automation")] trace: &SharedTrace,
-) {
+) -> bool {
     let mut workspace = lock(workspace);
     if ui.ctx().input(|input| input.viewport().close_requested()) && workspace.has_window(window_id)
     {
@@ -78,7 +105,7 @@ fn window_pass(
         .ctx()
         .input(|input| input.viewport().minimized == Some(true))
     {
-        return;
+        return false;
     }
     workspace.window_ui(window_id, ui, started_at.elapsed(), &NativeDesktop);
     #[cfg(feature = "automation")]
@@ -88,6 +115,7 @@ fn window_pass(
         trace.state(&workspace);
         trace.targets(&workspace, window_id);
     }
+    true
 }
 
 impl eframe::App for App {
@@ -100,24 +128,30 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.wake_pending.store(false, Ordering::Release);
         let ctx = ui.ctx().clone();
         let windows = lock(&self.workspace).windows();
+        let mut shown = false;
         for window in windows {
             let window_id = window.id;
-            ctx.show_viewport_immediate(window_id.viewport_id(), window.builder, |ui, _| {
-                window_pass(
-                    &self.workspace,
-                    window_id,
-                    ui,
-                    self.started_at,
-                    #[cfg(feature = "automation")]
-                    &self.trace,
-                );
-            });
+            shown |=
+                ctx.show_viewport_immediate(window_id.viewport_id(), window.builder, |ui, _| {
+                    window_pass(
+                        &self.workspace,
+                        window_id,
+                        ui,
+                        self.started_at,
+                        #[cfg(feature = "automation")]
+                        &self.trace,
+                    )
+                });
         }
+        self.any_window_shown.store(shown, Ordering::Release);
     }
 
     fn on_exit(&mut self) {
-        lock(&self.workspace).shutdown();
+        let mut workspace = lock(&self.workspace);
+        workspace.set_publication_waker(None);
+        workspace.shutdown();
     }
 }

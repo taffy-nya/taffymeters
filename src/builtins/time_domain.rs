@@ -110,7 +110,7 @@ impl Module for OscilloscopeModule {
             self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.2, 10.0);
         }
         let Some(snapshot) = self.reader.latest() else {
-            return repaint(100);
+            return ModuleResponse::default();
         };
         let center_y = frame.rect.center().y;
         frame.renderer.polyline(
@@ -255,7 +255,7 @@ impl Module for WaveformModule {
             }
         }
         let Some(snapshot) = self.reader.latest() else {
-            return repaint(100);
+            return ModuleResponse::default();
         };
         let Ok(channel) = self.channel.resolve(&snapshot.descriptor) else {
             return ModuleResponse::default();
@@ -338,7 +338,7 @@ impl Module for WaveformModule {
             });
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
-        animate()
+        ModuleResponse::default()
     }
 }
 
@@ -389,7 +389,7 @@ impl Module for StereometerModule {
             self.scale = (self.scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.5, 10.0);
         }
         let Some(snapshot) = self.reader.latest() else {
-            return repaint(100);
+            return ModuleResponse::default();
         };
         if snapshot.descriptor.channel_count < 2 {
             frame.renderer.text(
@@ -455,7 +455,7 @@ impl Module for StereometerModule {
             }
         }
         frame.renderer.circles(frame.rect, &self.circles);
-        animate()
+        ModuleResponse::default()
     }
     fn clear_visual_state(&mut self) {
         self.circles.clear();
@@ -551,10 +551,10 @@ struct LevelMeterModule {
 impl Module for LevelMeterModule {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         let Some(snapshot) = self.reader.latest() else {
-            return repaint(100);
+            return ModuleResponse::default();
         };
         let Some(levels) = snapshot.levels.as_ref() else {
-            return repaint(100);
+            return ModuleResponse::default();
         };
         let shown_channels = levels
             .momentary_lufs
@@ -620,7 +620,11 @@ impl Module for LevelMeterModule {
             });
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
-        if animating { animate() } else { repaint(100) }
+        if animating {
+            animate()
+        } else {
+            ModuleResponse::default()
+        }
     }
     fn clear_visual_state(&mut self) {
         self.peak_holds.clear();
@@ -660,12 +664,6 @@ impl Module for EmptyModule {
 fn animate() -> ModuleResponse {
     ModuleResponse {
         repaint_after: Some(crate::module::FRAME_INTERVAL),
-    }
-}
-
-fn repaint(milliseconds: u64) -> ModuleResponse {
-    ModuleResponse {
-        repaint_after: Some(Duration::from_millis(milliseconds)),
     }
 }
 

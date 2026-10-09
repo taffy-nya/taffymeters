@@ -12,6 +12,7 @@ pub use processing::{
 };
 pub(crate) use runtime::Dataflow;
 pub use runtime::{
-    ControlError, DataflowHandle, RuntimeMetrics, SpectrumController, SpectrumSubscription,
+    ControlError, DataflowHandle, PublicationWaker, RuntimeMetrics, SpectrumController,
+    SpectrumSubscription,
 };
 pub use time_runtime::{TimeDomainRequest, TimeDomainRequestError, TimeDomainSubscription};
