@@ -35,7 +35,7 @@ pub(crate) use window::{ControlKey, ControlTarget, MenuItem, ResizeEdge};
 /// Initial logical size of the first window.
 pub(crate) const INITIAL_WINDOW_SIZE: Vec2 = vec2(900.0, 420.0);
 /// Minimum logical size of a window without any Module.
-pub(crate) const EMPTY_WINDOW_MIN_SIZE: Vec2 = vec2(160.0, 100.0);
+pub(crate) const EMPTY_WINDOW_MIN_SIZE: Vec2 = vec2(140.0, 48.0);
 /// Logical offset of a detached window from its source window.
 const DETACH_OFFSET_POINTS: f32 = 32.0;
 /// Display time a detached window may take to show its first frame.
@@ -47,16 +47,13 @@ pub(crate) struct ModuleInstanceId(pub(crate) u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct WindowId(pub(crate) u64);
 
-/// The window created with the process; it maps to egui's root viewport.
-pub(crate) const ROOT_WINDOW: WindowId = WindowId(1);
+/// The window created with the process.
+pub(crate) const FIRST_WINDOW: WindowId = WindowId(1);
 
 impl WindowId {
+    /// Every Workspace window is a child viewport of egui's hidden host root.
     pub(crate) fn viewport_id(self) -> egui::ViewportId {
-        if self == ROOT_WINDOW {
-            egui::ViewportId::ROOT
-        } else {
-            egui::ViewportId::from_hash_of(("taffymeters.window", self.0))
-        }
+        egui::ViewportId::from_hash_of(("taffymeters.window", self.0))
     }
 }
 
@@ -364,6 +361,8 @@ pub struct Workspace {
     next_group_id: u64,
     modules_created: u64,
     control_error: Option<String>,
+    /// Shared repaint clock of animating windows (real time).
+    frame_clock: Option<std::time::Instant>,
     /// Declared last: the source and worker stop only after every Module dropped.
     live: Option<LiveAudio>,
 }
@@ -384,18 +383,19 @@ impl Workspace {
             services,
             move_source: None,
             next_instance_id: 1,
-            next_window_id: ROOT_WINDOW.0 + 1,
+            next_window_id: FIRST_WINDOW.0 + 1,
             next_split_id: 1,
             next_group_id: 1,
             modules_created: 0,
             control_error: None,
+            frame_clock: None,
             live: Some(live),
         };
         let first = workspace.create_module(SPECTRUM_MODULE_ID)?;
         let mut window =
             WindowState::new(Layout::with_leaf(first), INITIAL_WINDOW_SIZE, always_on_top);
         window.active = Some(first);
-        workspace.windows.insert(ROOT_WINDOW, window);
+        workspace.windows.insert(FIRST_WINDOW, window);
         Ok(workspace)
     }
 

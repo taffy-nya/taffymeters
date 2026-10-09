@@ -101,7 +101,7 @@ impl Module for OscilloscopeModule {
         Ok(())
     }
 
-    fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
+    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
@@ -110,7 +110,6 @@ impl Module for OscilloscopeModule {
             self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.2, 10.0);
         }
         let Some(snapshot) = self.reader.latest() else {
-            waiting(&mut frame);
             return repaint(100);
         };
         let center_y = frame.rect.center().y;
@@ -195,8 +194,7 @@ impl ModuleFactory for WaveformFactory {
             seconds: 4.0,
             y_scale: 1.0,
             bars: Vec::with_capacity(2048),
-            minima: Vec::new(),
-            maxima: Vec::new(),
+            envelope: WaveformEnvelope::default(),
         }))
     }
 }
@@ -209,8 +207,23 @@ struct WaveformModule {
     seconds: f32,
     y_scale: f32,
     bars: Vec<ColoredRect>,
-    minima: Vec<f32>,
-    maxima: Vec<f32>,
+    envelope: WaveformEnvelope,
+}
+
+/// Display sampling cache: min/max per fixed-size bin of absolute source frames, so
+/// each draw only folds in samples published since the previous draw.
+#[derive(Default)]
+struct WaveformEnvelope {
+    key: Option<(
+        u64,
+        ChannelSelection,
+        crate::audio::SourceId,
+        crate::audio::Generation,
+    )>,
+    /// Exclusive end of the source frames already folded in.
+    through: u64,
+    /// `(bin, min, max)`, bins ascending; bins without samples are absent (gaps).
+    bins: std::collections::VecDeque<(u64, f32, f32)>,
 }
 
 impl Module for WaveformModule {
@@ -225,11 +238,10 @@ impl Module for WaveformModule {
     }
     fn clear_visual_state(&mut self) {
         self.bars.clear();
-        self.minima.clear();
-        self.maxima.clear();
+        self.envelope = WaveformEnvelope::default();
     }
 
-    fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
+    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
@@ -243,58 +255,82 @@ impl Module for WaveformModule {
             }
         }
         let Some(snapshot) = self.reader.latest() else {
-            waiting(&mut frame);
             return repaint(100);
         };
         let Ok(channel) = self.channel.resolve(&snapshot.descriptor) else {
             return ModuleResponse::default();
         };
-        let columns = frame.rect.width().floor().max(1.0) as usize;
-        self.minima.clear();
-        self.maxima.clear();
-        self.minima.resize(columns, f32::INFINITY);
-        self.maxima.resize(columns, -f32::INFINITY);
-        let span_frames = (self.seconds * snapshot.descriptor.sample_rate_hz as f32) as u64;
-        let first_frame = snapshot
-            .processed_through_frame
-            .saturating_sub(span_frames.max(1));
+        let columns = frame.rect.width().floor().max(1.0) as u64;
+        let span_frames =
+            ((self.seconds * snapshot.descriptor.sample_rate_hz as f32) as u64).max(1);
+        let frames_per_bin = (span_frames / columns).max(1);
+        let key = (
+            frames_per_bin,
+            self.channel,
+            snapshot.descriptor.source_id,
+            snapshot.descriptor.generation,
+        );
+        let envelope = &mut self.envelope;
+        if envelope.key != Some(key) || snapshot.processed_through_frame < envelope.through {
+            *envelope = WaveformEnvelope {
+                key: Some(key),
+                ..WaveformEnvelope::default()
+            };
+        }
+        let last_bin = snapshot.processed_through_frame.saturating_sub(1) / frames_per_bin;
+        let first_bin = (last_bin + 1).saturating_sub(columns);
         let channels = snapshot.descriptor.channel_count as usize;
         for chunk in snapshot.chunks.iter() {
-            if chunk.start_frame.saturating_add(chunk.frame_count as u64) <= first_frame {
+            let chunk_end = chunk.start_frame.saturating_add(chunk.frame_count as u64);
+            let start = chunk
+                .start_frame
+                .max(envelope.through)
+                .max(first_bin * frames_per_bin);
+            if chunk_end <= start {
                 continue;
             }
-            for (offset, samples) in chunk.interleaved.chunks_exact(channels).enumerate() {
-                let source_frame = chunk.start_frame + offset as u64;
-                if source_frame < first_frame {
-                    continue;
-                }
-                let relative = source_frame.saturating_sub(first_frame);
-                let column = ((relative as u128 * columns as u128) / span_frames.max(1) as u128)
-                    .min(columns.saturating_sub(1) as u128) as usize;
+            let skip = (start - chunk.start_frame) as usize;
+            for (offset, samples) in chunk
+                .interleaved
+                .chunks_exact(channels)
+                .enumerate()
+                .skip(skip)
+            {
+                let bin = (chunk.start_frame + offset as u64) / frames_per_bin;
                 let sample = channel.sample(samples);
-                self.minima[column] = self.minima[column].min(sample);
-                self.maxima[column] = self.maxima[column].max(sample);
+                match envelope.bins.back_mut() {
+                    Some((last, minimum, maximum)) if *last == bin => {
+                        *minimum = minimum.min(sample);
+                        *maximum = maximum.max(sample);
+                    }
+                    _ => envelope.bins.push_back((bin, sample, sample)),
+                }
             }
+            envelope.through = chunk_end;
+        }
+        while envelope
+            .bins
+            .front()
+            .is_some_and(|(bin, _, _)| *bin < first_bin)
+        {
+            envelope.bins.pop_front();
         }
         self.bars.clear();
-        for column in 0..columns {
-            if !self.minima[column].is_finite() {
-                continue;
-            }
-            let center = frame.rect.center().y;
-            let half_height = frame.rect.height() * 0.5;
-            let top = center - (self.maxima[column] * self.y_scale).clamp(-1.0, 1.0) * half_height;
-            let bottom =
-                center - (self.minima[column] * self.y_scale).clamp(-1.0, 1.0) * half_height;
-            let amplitude = self.maxima[column].abs().max(self.minima[column].abs()) * self.y_scale;
+        let center = frame.rect.center().y;
+        let half_height = frame.rect.height() * 0.5;
+        for &(bin, minimum, maximum) in &envelope.bins {
+            let column = (bin - first_bin) as f32;
+            let top = center - (maximum * self.y_scale).clamp(-1.0, 1.0) * half_height;
+            let bottom = center - (minimum * self.y_scale).clamp(-1.0, 1.0) * half_height;
+            let amplitude = maximum.abs().max(minimum.abs()) * self.y_scale;
             self.bars.push(ColoredRect {
                 rect: Rect {
                     min: Point {
-                        x: frame.rect.min.x + column as f32,
+                        x: frame.rect.min.x + column,
                         y: top.min(bottom),
                     },
                     max: Point {
-                        x: frame.rect.min.x + column as f32 + 1.0,
+                        x: frame.rect.min.x + column + 1.0,
                         y: top.max(bottom).max(top.min(bottom) + 1.0),
                     },
                 },
@@ -302,7 +338,7 @@ impl Module for WaveformModule {
             });
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
-        repaint(33)
+        animate()
     }
 }
 
@@ -344,7 +380,7 @@ struct StereometerModule {
 }
 
 impl Module for StereometerModule {
-    fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
+    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
@@ -353,7 +389,6 @@ impl Module for StereometerModule {
             self.scale = (self.scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.5, 10.0);
         }
         let Some(snapshot) = self.reader.latest() else {
-            waiting(&mut frame);
             return repaint(100);
         };
         if snapshot.descriptor.channel_count < 2 {
@@ -420,7 +455,7 @@ impl Module for StereometerModule {
             }
         }
         frame.renderer.circles(frame.rect, &self.circles);
-        repaint(33)
+        animate()
     }
     fn clear_visual_state(&mut self) {
         self.circles.clear();
@@ -501,7 +536,6 @@ impl ModuleFactory for LevelMeterFactory {
             peak_holds: Vec::new(),
             last_result_version: 0,
             bars: Vec::with_capacity(12),
-            text: String::with_capacity(64),
         }))
     }
 }
@@ -512,25 +546,14 @@ struct LevelMeterModule {
     peak_holds: Vec<MeterPeakHold>,
     last_result_version: u64,
     bars: Vec<ColoredRect>,
-    text: String,
 }
 
 impl Module for LevelMeterModule {
-    fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
+    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         let Some(snapshot) = self.reader.latest() else {
-            waiting(&mut frame);
             return repaint(100);
         };
         let Some(levels) = snapshot.levels.as_ref() else {
-            frame.renderer.text(
-                frame.rect,
-                frame.rect.center(),
-                "WAITING FOR LEVELS",
-                TextStyle {
-                    size: 12.0,
-                    color: Color::rgb(190, 205, 215),
-                },
-            );
             return repaint(100);
         };
         let shown_channels = levels
@@ -562,7 +585,7 @@ impl Module for LevelMeterModule {
                 },
                 max: Point {
                     x: left + width,
-                    y: frame.rect.max.y - 24.0,
+                    y: frame.rect.max.y - 8.0,
                 },
             };
             self.bars.push(ColoredRect {
@@ -595,36 +618,14 @@ impl Module for LevelMeterModule {
                 },
                 color: Color::rgb(245, 245, 245),
             });
-            self.text.clear();
-            use std::fmt::Write as _;
-            let _ = write!(
-                self.text,
-                "{} {:.1} LUFS / {:.1} dBFS",
-                channel + 1,
-                current_lufs,
-                current_peak_dbfs
-            );
-            frame.renderer.text(
-                frame.rect,
-                Point {
-                    x: bar.min.x,
-                    y: bar.max.y + 5.0,
-                },
-                &self.text,
-                TextStyle {
-                    size: 9.0,
-                    color: Color::rgb(160, 175, 185),
-                },
-            );
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
-        if animating { repaint(33) } else { repaint(100) }
+        if animating { animate() } else { repaint(100) }
     }
     fn clear_visual_state(&mut self) {
         self.peak_holds.clear();
         self.last_result_version = 0;
         self.bars.clear();
-        self.text.clear();
     }
 }
 
@@ -656,19 +657,10 @@ impl Module for EmptyModule {
     }
 }
 
-fn waiting(frame: &mut ModuleFrame<'_>) {
-    frame.renderer.text(
-        frame.rect,
-        Point {
-            x: frame.rect.min.x + 8.0,
-            y: frame.rect.min.y + 8.0,
-        },
-        "WAITING FOR SYSTEM AUDIO",
-        TextStyle {
-            size: 12.0,
-            color: Color::rgb(190, 205, 215),
-        },
-    );
+fn animate() -> ModuleResponse {
+    ModuleResponse {
+        repaint_after: Some(crate::module::FRAME_INTERVAL),
+    }
 }
 
 fn repaint(milliseconds: u64) -> ModuleResponse {

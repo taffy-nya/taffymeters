@@ -236,8 +236,28 @@ fn spectrum_points(
     output: &mut Vec<Point>,
     bins: &[f32],
 ) {
+    // Display sampling: on the log axis many high bins share one point-wide column;
+    // keep only the loudest bin of each column so peaks survive and the path stays
+    // proportional to the drawn width instead of the FFT size.
     output.clear();
+    let mut column: Option<(i32, Point)> = None;
     for index in coordinates.visible_bin_range(snapshot.fft.bin_hz, bins.len()) {
-        output.push(coordinates.point(index as f32 * snapshot.fft.bin_hz, bins[index], rect));
+        let point = coordinates.point(index as f32 * snapshot.fft.bin_hz, bins[index], rect);
+        let x = point.x.floor() as i32;
+        match &mut column {
+            Some((current, loudest)) if *current == x => {
+                if point.y < loudest.y {
+                    *loudest = point;
+                }
+            }
+            _ => {
+                if let Some((_, loudest)) = column.replace((x, point)) {
+                    output.push(loudest);
+                }
+            }
+        }
+    }
+    if let Some((_, loudest)) = column {
+        output.push(loudest);
     }
 }

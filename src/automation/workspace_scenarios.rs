@@ -11,8 +11,8 @@ use crate::{
     builtins::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     dataflow::ChannelSelection,
     workspace::{
-        ActionOutcome, ControlKey, MenuItem, ModuleInstanceId, MoveTarget, ROOT_WINDOW, ResizeEdge,
-        Side, SplitId, WindowId, Workspace, WorkspaceAction,
+        ActionOutcome, ControlKey, FIRST_WINDOW, MenuItem, ModuleInstanceId, MoveTarget,
+        ResizeEdge, Side, SplitId, WindowId, Workspace, WorkspaceAction,
     },
 };
 
@@ -63,7 +63,7 @@ fn leaves(ws: &Workspace, window: WindowId) -> Vec<ModuleInstanceId> {
 
 fn root_split(ws: &Workspace, index: usize) -> Result<(SplitId, f32, bool), String> {
     ws.observation()
-        .window(ROOT_WINDOW)
+        .window(FIRST_WINDOW)
         .and_then(|w| w.splits.get(index).map(|s| (s.id, s.ratio, s.manual)))
         .ok_or_else(|| "missing split".to_owned())
 }
@@ -100,7 +100,7 @@ fn w01() -> Result<Value, String> {
     let c = split(&mut h.ws, b, Side::Right)?;
     h.frame(vec![]);
     let o = h.ws.observation();
-    let root = o.window(ROOT_WINDOW).ok_or("root closed")?;
+    let root = o.window(FIRST_WINDOW).ok_or("root closed")?;
     let widths: Vec<f32> = root.leaf_rects.iter().map(|(_, r)| r.width()).collect();
     check(
         root.leaves == vec![a, b, c] && widths.iter().all(|w| (w - 300.0).abs() < 0.5),
@@ -126,7 +126,7 @@ fn w01() -> Result<Value, String> {
     action(
         &mut h.ws,
         WorkspaceAction::SetSplitRatio {
-            window_id: ROOT_WINDOW,
+            window_id: FIRST_WINDOW,
             split_id: first_split,
             ratio: 0.25,
             manual: true,
@@ -149,25 +149,25 @@ fn w01() -> Result<Value, String> {
         .map(|id| object(&h.ws, *id))
         .collect::<Result<_, _>>()?;
     check(
-        leaves(&h.ws, ROOT_WINDOW) == vec![a, c, d] && after == objects,
+        leaves(&h.ws, FIRST_WINDOW) == vec![a, c, d] && after == objects,
         "closing a leaf disturbed the remaining instances",
     )?;
     subscriptions_settle(&h.ws, 3)?;
-    // Shrink the window: the minimum width (three Spectrum minimums) is enforced and a
+    // Shrink the window: the minimum width (three leaf minimums) is enforced and a
     // further split is rejected without creating anything.
     h.frame(vec![]);
     let min_size =
         h.ws.observation()
-            .window(ROOT_WINDOW)
+            .window(FIRST_WINDOW)
             .ok_or("root closed")?
             .min_size;
-    h.set_size(vec2(300.0, 200.0));
+    h.set_size(vec2(100.0, 60.0));
     h.frame(vec![]);
-    let size = h.window(ROOT_WINDOW)?.size;
+    let size = h.window(FIRST_WINDOW)?.size;
     check(
-        min_size == vec2(480.0, 100.0)
-            && h.window(ROOT_WINDOW)?.min_size == min_size
-            && size == vec2(480.0, 200.0),
+        min_size == vec2(120.0, 32.0)
+            && h.window(FIRST_WINDOW)?.min_size == min_size
+            && size == vec2(120.0, 60.0),
         &format!("window minimum not derived from the layout: {min_size:?}, size {size:?}"),
     )?;
     let before = h.ws.observation();
@@ -187,14 +187,14 @@ fn w01() -> Result<Value, String> {
         after.windows == before.windows && after.modules_created == before.modules_created,
         "rejected split changed the layout or created an instance",
     )?;
-    let rects = &after.window(ROOT_WINDOW).ok_or("root closed")?.leaf_rects;
+    let rects = &after.window(FIRST_WINDOW).ok_or("root closed")?.leaf_rects;
     check(
-        rects.iter().all(|(_, rect)| rect.width() >= 160.0 - 0.01),
+        rects.iter().all(|(_, rect)| rect.width() >= 40.0 - 0.01),
         &format!("leaf below its minimum width: {rects:?}"),
     )?;
     h.ws.check_ownership()?;
     Ok(json!({"equal_widths":widths,"manual_ratio_kept":kept_ratio,
-        "min_inner_size":[480,100],"remaining":[a.0,c.0,d.0]}))
+        "min_inner_size":[120,32],"remaining":[a.0,c.0,d.0]}))
 }
 
 /// Divider drag through real egui events: grid, Alt, legal clamp, Escape, double click,
@@ -208,7 +208,7 @@ fn w02() -> Result<Value, String> {
     let (split_id, _, _) = root_split(&h.ws, 0)?;
     let divider = ControlKey::Divider(split_id);
     let y = 210.0;
-    h.take_commands(ROOT_WINDOW);
+    h.take_commands(FIRST_WINDOW);
     h.drag(
         divider,
         &[pos2(470.0, y), pos2(523.0, y)],
@@ -224,7 +224,7 @@ fn w02() -> Result<Value, String> {
         ),
     )?;
     check(
-        count_start_drag(&h.take_commands(ROOT_WINDOW)) == 0,
+        count_start_drag(&h.take_commands(FIRST_WINDOW)) == 0,
         "divider drag also started a window drag",
     )?;
     h.drag(
@@ -245,9 +245,13 @@ fn w02() -> Result<Value, String> {
         None,
     )?;
     let (_, clamped, _) = root_split(&h.ws, 0)?;
+    // Legal interval starts at the 40-pt minimum; the nearest grid point inside is 48.
     check(
-        (clamped * 900.0 - 160.0).abs() < 0.01,
-        &format!("extreme drag broke the minimum: {}", clamped * 900.0),
+        (clamped * 900.0 - 48.0).abs() < 0.01,
+        &format!(
+            "extreme drag broke the minimum or grid: {}",
+            clamped * 900.0
+        ),
     )?;
     h.drag(
         divider,
@@ -260,7 +264,7 @@ fn w02() -> Result<Value, String> {
     check(
         (after_escape - clamped).abs() < 1e-6
             && observation
-                .window(ROOT_WINDOW)
+                .window(FIRST_WINDOW)
                 .is_some_and(|w| w.divider_drag.is_none()),
         &format!(
             "Escape did not restore the drag start: {} vs {}",
@@ -269,7 +273,7 @@ fn w02() -> Result<Value, String> {
         ),
     )?;
     check(
-        h.ws.has_window(ROOT_WINDOW),
+        h.ws.has_window(FIRST_WINDOW),
         "Escape during a drag closed the window",
     )?;
     h.double_click(divider)?;
@@ -278,20 +282,20 @@ fn w02() -> Result<Value, String> {
         (reset - 0.5).abs() < 1e-6 && !reset_manual,
         "double click did not reset the split",
     )?;
-    h.take_commands(ROOT_WINDOW);
+    h.take_commands(FIRST_WINDOW);
     h.drag(
         ControlKey::LeafBody(a),
         &[pos2(120.0, 120.0), pos2(160.0, 140.0)],
         egui::Modifiers::NONE,
         None,
     )?;
-    let commands = h.take_commands(ROOT_WINDOW);
+    let commands = h.take_commands(FIRST_WINDOW);
     check(
         count_start_drag(&commands) == 1 && (root_split(&h.ws, 0)?.1 - 0.5).abs() < 1e-6,
         &format!("body drag should start exactly one native move: {commands:?}"),
     )?;
     Ok(
-        json!({"grid_position":528,"alt_position":601,"clamped_position":160,
+        json!({"grid_position":528,"alt_position":601,"clamped_position":48,
         "escape_restored":true,"double_click_ratio":0.5,"body_start_drag":1}),
     )
 }
@@ -304,8 +308,8 @@ fn w03() -> Result<Value, String> {
     split(&mut ws, a, Side::Right)?;
     let mut h = Harness::new(ws);
     h.frame(vec![]);
-    let before = leaves(&h.ws, ROOT_WINDOW);
-    h.take_commands(ROOT_WINDOW);
+    let before = leaves(&h.ws, FIRST_WINDOW);
+    h.take_commands(FIRST_WINDOW);
     let zone = ControlKey::SplitZone {
         instance_id: a,
         side: Side::Right,
@@ -317,9 +321,9 @@ fn w03() -> Result<Value, String> {
         egui::Modifiers::NONE,
         None,
     )?;
-    let commands = h.take_commands(ROOT_WINDOW);
+    let commands = h.take_commands(FIRST_WINDOW);
     check(
-        leaves(&h.ws, ROOT_WINDOW) == before && count_start_drag(&commands) == 1,
+        leaves(&h.ws, FIRST_WINDOW) == before && count_start_drag(&commands) == 1,
         &format!("drag on a split entry split or did not move the window: {commands:?}"),
     )?;
     let mut resize = Vec::new();
@@ -336,7 +340,7 @@ fn w03() -> Result<Value, String> {
             egui::Modifiers::NONE,
             None,
         )?;
-        let commands = h.take_commands(ROOT_WINDOW);
+        let commands = h.take_commands(FIRST_WINDOW);
         let resizes: Vec<_> = commands
             .iter()
             .filter(|command| matches!(command, ViewportCommand::BeginResize(_)))
@@ -368,7 +372,7 @@ fn w03() -> Result<Value, String> {
     }]);
     h.frame(vec![]);
     check(
-        leaves(&h.ws, ROOT_WINDOW) == before,
+        leaves(&h.ws, FIRST_WINDOW) == before,
         "a click on the divider over a split entry split the leaf",
     )?;
     Ok(json!({"split_entry_drag":"StartDrag only","resize":resize,"divider_over_entry":"divider"}))
@@ -411,7 +415,7 @@ fn w04() -> Result<Value, String> {
         .map(|w| w.id)
         .ok_or("Detach did not open a window")?;
     check(
-        leaves(&h.ws, ROOT_WINDOW) == vec![a, b] && leaves(&h.ws, pending).is_empty(),
+        leaves(&h.ws, FIRST_WINDOW) == vec![a, b] && leaves(&h.ws, pending).is_empty(),
         "instance left its layout before the new window existed",
     )?;
     h.ws.check_ownership()?;
@@ -419,7 +423,7 @@ fn w04() -> Result<Value, String> {
     let o = h.ws.observation();
     let module = o.module(b).ok_or("detached instance dropped")?;
     check(
-        leaves(&h.ws, ROOT_WINDOW) == vec![a]
+        leaves(&h.ws, FIRST_WINDOW) == vec![a]
             && leaves(&h.ws, pending) == vec![b]
             && module.object == b_object
             && module.channel == Some(ChannelSelection::Right)
@@ -448,7 +452,7 @@ fn w04() -> Result<Value, String> {
     h.display_time += Duration::from_secs(6);
     h.frame(vec![]);
     check(
-        !h.ws.has_window(blocked) && leaves(&h.ws, ROOT_WINDOW) == vec![a, c],
+        !h.ws.has_window(blocked) && leaves(&h.ws, FIRST_WINDOW) == vec![a, c],
         "failed window creation lost the instance",
     )?;
     // Escape in the source cancels a pending detach.
@@ -459,8 +463,8 @@ fn w04() -> Result<Value, String> {
     h.key(egui::Key::Escape);
     check(
         !h.ws.has_window(pending_escape)
-            && h.ws.has_window(ROOT_WINDOW)
-            && leaves(&h.ws, ROOT_WINDOW) == vec![a, c],
+            && h.ws.has_window(FIRST_WINDOW)
+            && leaves(&h.ws, FIRST_WINDOW) == vec![a, c],
         "Escape did not cancel the pending detach",
     )?;
     let sole = leaves(&h.ws, pending)[0];
@@ -514,7 +518,7 @@ fn w05() -> Result<Value, String> {
             .is_err(),
         "source window offered itself",
     )?;
-    h.focus = ROOT_WINDOW;
+    h.focus = FIRST_WINDOW;
     // A new egui Area spends its first pass sizing itself (invisible, disabled).
     h.frame(vec![]);
     h.frame(vec![]);
@@ -525,7 +529,7 @@ fn w05() -> Result<Value, String> {
     h.click(ControlKey::MoveTarget(target))?;
     let o = h.ws.observation();
     check(
-        leaves(&h.ws, ROOT_WINDOW) == vec![a, b]
+        leaves(&h.ws, FIRST_WINDOW) == vec![a, b]
             && !h.ws.has_window(window)
             && o.module(b)
                 .is_some_and(|m| m.object == b_object && m.channel == Some(ChannelSelection::Left))
@@ -534,7 +538,7 @@ fn w05() -> Result<Value, String> {
         "merge did not move the original object into the target or keep the source window",
     )?;
     check(
-        o.window(ROOT_WINDOW).is_some_and(|w| {
+        o.window(FIRST_WINDOW).is_some_and(|w| {
             w.splits.len() == 1 && w.splits[0].axis == crate::workspace::Axis::TopBottom
         }),
         "merge did not insert below the target",
@@ -548,7 +552,7 @@ fn w05() -> Result<Value, String> {
     h.frame(vec![]);
     h.key(egui::Key::Escape);
     check(
-        h.ws.observation().move_source.is_none() && h.ws.has_window(ROOT_WINDOW),
+        h.ws.observation().move_source.is_none() && h.ws.has_window(FIRST_WINDOW),
         "Escape did not cancel Move",
     )?;
     action(&mut h.ws, WorkspaceAction::BeginMove { instance_id: b })?;
@@ -578,6 +582,9 @@ fn w05() -> Result<Value, String> {
     // Too-small targets are disabled; a vanished target fails without losing the source.
     let c = split(&mut h.ws, a, Side::Right)?;
     let d = split(&mut h.ws, c, Side::Right)?;
+    // Three 50-pt columns cannot take a second 40-pt column beside them.
+    h.set_size(vec2(150.0, 420.0));
+    h.frame(vec![]);
     action(&mut h.ws, WorkspaceAction::BeginMove { instance_id: b })?;
     h.frame(vec![]);
     check(
@@ -615,7 +622,7 @@ fn w05() -> Result<Value, String> {
     h.frame(vec![]);
     h.click(ControlKey::MoveTarget(MoveTarget::EmptyWindow(empty)))?;
     check(
-        leaves(&h.ws, empty) == vec![c] && !leaves(&h.ws, ROOT_WINDOW).contains(&c),
+        leaves(&h.ws, empty) == vec![c] && !leaves(&h.ws, FIRST_WINDOW).contains(&c),
         "move into an empty window failed",
     )?;
     h.ws.check_ownership()?;
@@ -652,7 +659,7 @@ fn w06() -> Result<Value, String> {
         !h.ws.has_window(second) && h.ws.observation().module(w).is_none(),
         "Close window did not release its module",
     )?;
-    h.focus = ROOT_WINDOW;
+    h.focus = FIRST_WINDOW;
     let before = handle.metrics();
     driver
         .advance_frames(3200, deadline())
@@ -674,7 +681,7 @@ fn w06() -> Result<Value, String> {
     action(
         &mut h.ws,
         WorkspaceAction::CloseWindow {
-            window_id: ROOT_WINDOW,
+            window_id: FIRST_WINDOW,
         },
     )?;
     subscriptions_settle(&h.ws, 1)?;
@@ -750,23 +757,23 @@ fn w07() -> Result<Value, String> {
     let o = h.ws.observation();
     let group = o.window(second).and_then(|w| w.group);
     check(
-        group.is_some() && o.window(ROOT_WINDOW).and_then(|w| w.group) == group,
+        group.is_some() && o.window(FIRST_WINDOW).and_then(|w| w.group) == group,
         "touching windows were not grouped",
     )?;
     // Moving the root moves the member by the same physical delta.
     h.desktop.button_down.set(true);
-    h.window_mut(ROOT_WINDOW)?.position = pos2(150.0, 130.0);
-    h.frame_window(ROOT_WINDOW, vec![])?;
+    h.window_mut(FIRST_WINDOW)?.position = pos2(150.0, 130.0);
+    h.frame_window(FIRST_WINDOW, vec![])?;
     h.frame_window(second, vec![])?;
     h.desktop.button_down.set(false);
-    h.frame_window(ROOT_WINDOW, vec![])?;
+    h.frame_window(FIRST_WINDOW, vec![])?;
     h.frame_window(second, vec![])?;
     check(
         h.window(second)?.position == pos2(1050.0, 130.0)
-            && h.window(ROOT_WINDOW)?.position == pos2(150.0, 130.0),
+            && h.window(FIRST_WINDOW)?.position == pos2(150.0, 130.0),
         &format!(
             "group did not move together: root {:?}, member {:?}",
-            h.window(ROOT_WINDOW)?.position,
+            h.window(FIRST_WINDOW)?.position,
             h.window(second)?.position
         ),
     )?;
@@ -779,25 +786,25 @@ fn w07() -> Result<Value, String> {
         "Leave group left a one-member group",
     )?;
     h.desktop.button_down.set(true);
-    h.window_mut(ROOT_WINDOW)?.position = pos2(400.0, 300.0);
-    h.frame_window(ROOT_WINDOW, vec![])?;
+    h.window_mut(FIRST_WINDOW)?.position = pos2(400.0, 300.0);
+    h.frame_window(FIRST_WINDOW, vec![])?;
     h.desktop.button_down.set(false);
-    h.frame_window(ROOT_WINDOW, vec![])?;
+    h.frame_window(FIRST_WINDOW, vec![])?;
     h.frame_window(second, vec![])?;
     check(
         h.window(second)?.position == pos2(1050.0, 130.0),
         "ungrouped window followed",
     )?;
     // Logical hit testing and grid on a 2x window.
-    h.focus = ROOT_WINDOW;
-    h.window_mut(ROOT_WINDOW)?.ppp = 2.0;
+    h.focus = FIRST_WINDOW;
+    h.window_mut(FIRST_WINDOW)?.ppp = 2.0;
     h.frame(vec![]);
     h.click(ControlKey::SplitZone {
         instance_id: a,
         side: Side::Right,
     })?;
     check(
-        leaves(&h.ws, ROOT_WINDOW).len() == 2,
+        leaves(&h.ws, FIRST_WINDOW).len() == 2,
         "split entry missed at 2x",
     )?;
     let (split_id, _, _) = root_split(&h.ws, 0)?;
@@ -808,7 +815,7 @@ fn w07() -> Result<Value, String> {
         None,
     )?;
     let (_, ratio, _) = root_split(&h.ws, 0)?;
-    let width = h.window(ROOT_WINDOW)?.size.x;
+    let width = h.window(FIRST_WINDOW)?.size.x;
     check(
         (ratio * width - 528.0).abs() < 0.01,
         &format!("2x grid in physical units: {}", ratio * width),
@@ -824,7 +831,7 @@ fn w07() -> Result<Value, String> {
         modifiers: egui::Modifiers::NONE,
     }]);
     h.frame(vec![Event::PointerMoved(divider + vec2(60.0, 0.0))]);
-    h.window_mut(ROOT_WINDOW)?.ppp = 1.0;
+    h.window_mut(FIRST_WINDOW)?.ppp = 1.0;
     h.frame(vec![Event::PointerMoved(divider + vec2(90.0, 0.0))]);
     h.frame(vec![Event::PointerButton {
         pos: divider + vec2(90.0, 0.0),
@@ -875,7 +882,7 @@ fn w08() -> Result<Value, String> {
         )?;
         h.frame_all()?;
         check(
-            !h.ws.has_window(window) && leaves(&h.ws, ROOT_WINDOW) == vec![a, x],
+            !h.ws.has_window(window) && leaves(&h.ws, FIRST_WINDOW) == vec![a, x],
             &format!("round {round}: merge left a window or lost the module"),
         )?;
         h.ws.check_ownership()?;

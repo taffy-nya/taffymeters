@@ -76,7 +76,7 @@ impl OscilloscopeStyle for LineOscilloscopeStyle {
                 color: Color::rgb(100, 220, 255),
             },
         );
-        repaint(33)
+        animate()
     }
 }
 
@@ -156,7 +156,7 @@ impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
         if self.traces.is_empty() {
             ModuleResponse::default()
         } else {
-            repaint(16)
+            animate()
         }
     }
 
@@ -194,9 +194,9 @@ fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<P
     }
 }
 
-fn repaint(milliseconds: u64) -> ModuleResponse {
+fn animate() -> ModuleResponse {
     ModuleResponse {
-        repaint_after: Some(Duration::from_millis(milliseconds)),
+        repaint_after: Some(crate::module::FRAME_INTERVAL),
     }
 }
 

@@ -73,7 +73,7 @@ fn main() -> eframe::Result<()> {
 }
 
 fn run_window(app: app::App) -> eframe::Result<()> {
-    let viewport = app.root_builder();
+    let viewport = app::App::host_builder();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: low_power_wgpu_options(),

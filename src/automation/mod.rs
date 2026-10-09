@@ -90,8 +90,11 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 "synthetic" => {
                     LiveAudio::open_realtime(LiveAudioConfig::default(), SyntheticConfig::default())
                 }
+                "sweep" => {
+                    LiveAudio::open_realtime(LiveAudioConfig::default(), SyntheticConfig::sweep())
+                }
                 "system" => LiveAudio::open_default(LiveAudioConfig::default()),
-                _ => return Err(usage("--input must be synthetic or system".into())),
+                _ => return Err(usage("--input must be synthetic, sweep or system".into())),
             }
             .map_err(|e| runtime(e.to_string()))?;
             let workspace = Workspace::new(live, false).map_err(|e| runtime(e.to_string()))?;

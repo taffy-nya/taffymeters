@@ -11,7 +11,8 @@ BSP 布局中选择风格绘制。
 - 使用 periodic Hann FFT 和 peak-dBFS 标定
 - 支持 Left、Right、Mono mix 及设备描述中的全部离散声道
 - 提供 Spectrum、Spectrogram、Oscilloscope、Waveform、Stereometer、Level Meter 和 Empty Module
-- Spectrum 支持 Curve、Bars、Pixel 风格、峰值保持、悬停读数和范围缩放
+- Spectrum 支持 Curve、Bars、Pixel 风格、峰值保持、悬停读数和范围缩放（无标题栏／网格／坐标轴，与其他 Module 一致）
+- 动画默认 60 fps，多个窗口共享同一重绘时钟
 - Oscilloscope 支持 Line 与独立实例的 Persistence 风格
 - 多窗口 Workspace：窗口内 BSP 分割、拖动分割线（16 点网格，Alt 临时自由）、关闭叶子；
   Module 拆出为新窗口、移动／合并到任意窗口的叶子；窗口移动、resize、最大化、置顶、

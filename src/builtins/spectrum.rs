@@ -1,15 +1,15 @@
 use std::{fmt::Write, sync::Arc, time::Duration};
 
 use crate::{
-    audio::{SourceReader, SourceState},
+    audio::SourceReader,
     dataflow::{ChannelSelection, FftConfig, PeakConfig, SpectrumRequest, SpectrumSubscription},
     extensions::{Registry, RegistryError},
     module::{
-        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption,
+        FRAME_INTERVAL, Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse,
+        ModuleServices, StyleOption,
     },
-    plotting::{FREQUENCY_TICKS_HZ, SpectrumCoordinates, db_ticks},
-    render::{Color, ColoredRect, Point, Rect, Size, TextStyle},
+    plotting::SpectrumCoordinates,
+    render::{Color, Point, Rect, TextStyle},
     snapshot::{SpectrumReader, SpectrumSnapshotSet},
 };
 
@@ -71,12 +71,7 @@ impl SpectrumModuleFactory {
                 max_dbfs: 0.0,
             },
             latest: None,
-            label_version: 0,
-            label_frequency_range: None,
-            label: String::with_capacity(192),
-            status_line: String::with_capacity(256),
             hover_line: String::with_capacity(128),
-            grid: Vec::with_capacity(24),
         })
     }
 }
@@ -107,63 +102,10 @@ struct SpectrumModule {
     style_id: &'static str,
     coordinates: SpectrumCoordinates,
     latest: Option<Arc<SpectrumSnapshotSet>>,
-    label_version: u64,
-    label_frequency_range: Option<(u32, u32)>,
-    label: String,
-    status_line: String,
     hover_line: String,
-    grid: Vec<ColoredRect>,
 }
 
 impl SpectrumModule {
-    fn update_label(&mut self, snapshot: &SpectrumSnapshotSet) {
-        let frequency_range = (
-            self.coordinates.min_frequency_hz.to_bits(),
-            self.coordinates.max_frequency_hz.to_bits(),
-        );
-        if self.label_version == snapshot.result_version
-            && self.label_frequency_range == Some(frequency_range)
-        {
-            return;
-        }
-        self.label_version = snapshot.result_version;
-        self.label_frequency_range = Some(frequency_range);
-        self.label.clear();
-        let peak = self
-            .coordinates
-            .visible_bin_range(snapshot.fft.bin_hz, snapshot.spectrum_dbfs.len())
-            .map(|index| (index, snapshot.spectrum_dbfs[index]))
-            .max_by(|left, right| left.1.total_cmp(&right.1));
-        match snapshot.channel {
-            crate::dataflow::ChannelSelection::Discrete(index) => {
-                let _ = write!(self.label, "Channel {}", index + 1);
-            }
-            selection => self.label.push_str(selection.label()),
-        }
-        if let Some((peak_bin, peak_dbfs)) = peak {
-            let _ = write!(
-                self.label,
-                " | peak {:.1} Hz {:.1} dBFS | v{}",
-                peak_bin as f32 * snapshot.fft.bin_hz,
-                peak_dbfs,
-                snapshot.result_version,
-            );
-        }
-    }
-
-    fn plot_rect(&self, rect: Rect) -> Rect {
-        Rect {
-            min: Point {
-                x: rect.min.x + 48.0,
-                y: rect.min.y + 30.0,
-            },
-            max: Point {
-                x: rect.max.x - 10.0,
-                y: rect.max.y - 24.0,
-            },
-        }
-    }
-
     fn update_range(&mut self, frame: &ModuleFrame<'_>, plot: Rect, nyquist: f32) {
         if frame.pointer.is_some_and(|point| plot.contains(point)) {
             if (frame.zoom_delta - 1.0).abs() > 0.001 {
@@ -177,73 +119,6 @@ impl SpectrumModule {
                 self.coordinates.min_dbfs = self.coordinates.max_dbfs - next_span;
             }
         }
-    }
-
-    fn draw_axes(&mut self, frame: &mut ModuleFrame<'_>, plot: Rect) {
-        self.grid.clear();
-        let grid_color = Color::rgba(90, 110, 125, 65);
-        for &frequency in FREQUENCY_TICKS_HZ {
-            if frequency < self.coordinates.min_frequency_hz
-                || frequency > self.coordinates.max_frequency_hz
-            {
-                continue;
-            }
-            let x = self.coordinates.x_for_frequency(frequency, plot);
-            self.grid.push(ColoredRect {
-                rect: Rect {
-                    min: Point { x, y: plot.min.y },
-                    max: Point {
-                        x: x + 1.0,
-                        y: plot.max.y,
-                    },
-                },
-                color: grid_color,
-            });
-            let label = if frequency >= 1_000.0 {
-                format!("{:.0}k", frequency / 1_000.0)
-            } else {
-                format!("{frequency:.0}")
-            };
-            frame.renderer.text(
-                frame.rect,
-                Point {
-                    x: x - 8.0,
-                    y: plot.max.y + 5.0,
-                },
-                &label,
-                TextStyle {
-                    size: 9.0,
-                    color: Color::rgb(125, 145, 158),
-                },
-            );
-        }
-        for dbfs in db_ticks(self.coordinates.min_dbfs, self.coordinates.max_dbfs, 20.0) {
-            let y = self.coordinates.y_for_dbfs(dbfs, plot);
-            self.grid.push(ColoredRect {
-                rect: Rect {
-                    min: Point { x: plot.min.x, y },
-                    max: Point {
-                        x: plot.max.x,
-                        y: y + 1.0,
-                    },
-                },
-                color: grid_color,
-            });
-            let label = format!("{dbfs:.0}");
-            frame.renderer.text(
-                frame.rect,
-                Point {
-                    x: frame.rect.min.x + 5.0,
-                    y: y - 5.0,
-                },
-                &label,
-                TextStyle {
-                    size: 9.0,
-                    color: Color::rgb(125, 145, 158),
-                },
-            );
-        }
-        frame.renderer.fill_rects(plot, &self.grid);
     }
 
     fn draw_hover(
@@ -284,14 +159,6 @@ impl SpectrumModule {
 }
 
 impl Module for SpectrumModule {
-    fn min_size(&self) -> Size {
-        // Room for the frequency and dB tick labels.
-        Size {
-            width: 160.0,
-            height: 100.0,
-        }
-    }
-
     fn channel(&self) -> Option<ChannelSelection> {
         Some(self.reader.requested_channel())
     }
@@ -330,10 +197,8 @@ impl Module for SpectrumModule {
         if let Some(snapshot) = self.latest.clone() {
             let nyquist = snapshot.descriptor.sample_rate_hz as f32 * 0.5;
             self.coordinates.max_frequency_hz = self.coordinates.max_frequency_hz.min(nyquist);
-            let plot = self.plot_rect(frame.rect);
+            let plot = frame.rect;
             self.update_range(&frame, plot, nyquist);
-            self.update_label(&snapshot);
-            self.draw_axes(&mut frame, plot);
             self.style.draw(
                 SpectrumStyleContext {
                     snapshot: &snapshot,
@@ -344,47 +209,15 @@ impl Module for SpectrumModule {
                 frame.renderer,
             );
             self.draw_hover(&mut frame, plot, &snapshot);
-            let status = self.source.source_status();
-            let color = match status.state {
-                SourceState::Running | SourceState::Starting => Color::rgb(190, 205, 215),
-                SourceState::Paused => Color::rgb(255, 210, 100),
-                SourceState::DeviceLost | SourceState::Stopped => Color::rgb(255, 110, 110),
-            };
-            self.status_line.clear();
-            let _ = write!(
-                self.status_line,
-                "{} | {} Hz | {} ch | {}",
-                source_state_label(status.state),
-                snapshot.descriptor.sample_rate_hz,
-                snapshot.descriptor.channel_count,
-                self.label,
-            );
-            frame.renderer.text(
-                frame.rect,
-                Point {
-                    x: frame.rect.min.x + 8.0,
-                    y: frame.rect.min.y + 7.0,
-                },
-                &self.status_line,
-                TextStyle { size: 11.0, color },
-            );
         } else {
-            frame.renderer.text(
-                frame.rect,
-                Point {
-                    x: frame.rect.min.x + 8.0,
-                    y: frame.rect.min.y + 8.0,
-                },
-                "WAITING FOR SYSTEM AUDIO",
-                TextStyle {
-                    size: 12.0,
-                    color: Color::rgb(190, 205, 215),
-                },
-            );
+            // No audio yet: nothing to draw; check again shortly.
+            return ModuleResponse {
+                repaint_after: Some(Duration::from_millis(100)),
+            };
         }
 
         ModuleResponse {
-            repaint_after: Some(Duration::from_millis(33)),
+            repaint_after: Some(FRAME_INTERVAL),
         }
     }
 
@@ -411,16 +244,6 @@ impl Module for SpectrumModule {
     }
 }
 
-fn source_state_label(state: SourceState) -> &'static str {
-    match state {
-        SourceState::Starting => "STARTING",
-        SourceState::Running => "RUNNING",
-        SourceState::Paused => "PAUSED",
-        SourceState::DeviceLost => "DEVICE LOST",
-        SourceState::Stopped => "STOPPED",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,7 +254,7 @@ mod tests {
         },
         dataflow::{Dataflow, DataflowHandle, FftMetadata, WindowFunction},
         extensions::{Registry, RegistryError},
-        render::{Circle, RenderTarget, Stroke},
+        render::{Circle, ColoredRect, RenderTarget, Stroke},
     };
 
     #[derive(Default)]
@@ -550,24 +373,6 @@ mod tests {
         pixel.draw(context, &mut target);
         assert_eq!(target.polylines, 0);
         assert!(target.rectangles > 100);
-    }
-
-    #[test]
-    fn peak_label_recomputes_when_frequency_range_changes_without_new_audio() {
-        let fixture = runtime_fixture();
-        let mut registry = Registry::default();
-        register(&mut registry).unwrap();
-        let mut module = SpectrumModuleFactory
-            .create_instance(&fixture.services, &registry)
-            .unwrap();
-        let snapshot = spectrum_snapshot();
-
-        module.update_label(&snapshot);
-        let full_range_label = module.label.clone();
-        module.coordinates.max_frequency_hz = 5_000.0;
-        module.update_label(&snapshot);
-
-        assert_ne!(module.label, full_range_label);
     }
 
     #[test]

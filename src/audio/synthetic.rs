@@ -41,6 +41,20 @@ pub(crate) enum SignalSpec {
     Indexed {
         offset: f32,
     },
+    /// Exponential sine sweep from `start_hz` to `end_hz`, restarting every
+    /// `period_seconds`; a deterministic, visibly changing preview signal.
+    Sweep {
+        start_hz: f64,
+        end_hz: f64,
+        period_seconds: f64,
+        amplitude: f32,
+    },
+    /// Sine whose amplitude rises and falls between 0 and `amplitude` at `rate_hz`.
+    Pulse {
+        frequency_hz: f64,
+        rate_hz: f64,
+        amplitude: f32,
+    },
 }
 
 impl Default for SyntheticConfig {
@@ -74,6 +88,27 @@ impl Default for SyntheticConfig {
 }
 
 impl SyntheticConfig {
+    /// Changing preview signal: Left sweeps 80 Hz–12 kHz every 6 s, Right pulses a
+    /// 440 Hz tone at 0.5 Hz, so every view (and a stalled window) is easy to see.
+    pub(crate) fn sweep() -> Self {
+        Self {
+            signals: vec![
+                SignalSpec::Sweep {
+                    start_hz: 80.0,
+                    end_hz: 12_000.0,
+                    period_seconds: 6.0,
+                    amplitude: 0.25,
+                },
+                SignalSpec::Pulse {
+                    frequency_hz: 440.0,
+                    rate_hz: 0.5,
+                    amplitude: 0.3,
+                },
+            ],
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn validate(&self, max_block_frames: usize) -> Result<usize, SyntheticError> {
         let descriptor = &self.descriptor;
         AudioDescriptor::new(
@@ -122,6 +157,30 @@ impl SyntheticConfig {
                 SignalSpec::Silence => true,
                 SignalSpec::Impulse { amplitude, .. } => amplitude.is_finite(),
                 SignalSpec::Indexed { offset } => offset.is_finite(),
+                SignalSpec::Sweep {
+                    start_hz,
+                    end_hz,
+                    period_seconds,
+                    amplitude,
+                } => {
+                    start_hz > 0.0
+                        && end_hz > 0.0
+                        && start_hz < nyquist_hz
+                        && end_hz < nyquist_hz
+                        && period_seconds.is_finite()
+                        && period_seconds > 0.0
+                        && amplitude.is_finite()
+                }
+                SignalSpec::Pulse {
+                    frequency_hz,
+                    rate_hz,
+                    amplitude,
+                } => {
+                    (0.0..nyquist_hz).contains(&frequency_hz)
+                        && rate_hz.is_finite()
+                        && rate_hz >= 0.0
+                        && amplitude.is_finite()
+                }
             };
             if !valid {
                 return Err(SyntheticError::InvalidSignal { channel });
@@ -168,6 +227,39 @@ impl SignalSpec {
                 }
             }
             Self::Indexed { offset } => ((frame % 1024) as f32 - 512.0) / 1024.0 + offset,
+            Self::Sweep {
+                start_hz,
+                end_hz,
+                period_seconds,
+                amplitude,
+            } => {
+                // Phase of f(t) = start * k^(t / T), k = end / start, from the period
+                // start; computed from the absolute frame so block size never matters.
+                let rate = f64::from(sample_rate_hz);
+                let period_frames = (period_seconds * rate).round().max(1.0) as u64;
+                let t = (frame % period_frames) as f64 / rate;
+                let growth = (end_hz / start_hz).ln();
+                let phase = if growth.abs() < 1e-12 {
+                    std::f64::consts::TAU * start_hz * t
+                } else {
+                    std::f64::consts::TAU
+                        * start_hz
+                        * period_seconds
+                        * ((growth * t / period_seconds).exp() - 1.0)
+                        / growth
+                };
+                (f64::from(amplitude) * phase.sin()) as f32
+            }
+            Self::Pulse {
+                frequency_hz,
+                rate_hz,
+                amplitude,
+            } => {
+                let t = frame as f64 / f64::from(sample_rate_hz);
+                let envelope = 0.5 - 0.5 * (std::f64::consts::TAU * rate_hz * t).cos();
+                (f64::from(amplitude) * envelope * (std::f64::consts::TAU * frequency_hz * t).sin())
+                    as f32
+            }
         }
     }
 }
@@ -1085,5 +1177,30 @@ mod tests {
         assert_eq!(telemetry.snapshot().state, SourceState::Stopped);
         drop(dataflow);
         assert_eq!(handle.processed_through_frame(), Err(ControlError::Stopped));
+    }
+
+    #[test]
+    fn sweep_preview_signal_rises_in_pitch_and_pulses_in_level() {
+        let config = SyntheticConfig::sweep();
+        config.validate(2048).unwrap();
+        let rate = config.descriptor.sample_rate_hz;
+        let crossings = |signal: SignalSpec, start: u64| {
+            (start..start + 4800)
+                .filter(|&frame| {
+                    (signal.sample(frame, rate) >= 0.0) != (signal.sample(frame + 1, rate) >= 0.0)
+                })
+                .count()
+        };
+        let sweep = config.signals[0];
+        // 0.1 s windows near the start and the end of the 6 s period.
+        assert!(crossings(sweep, 0) * 20 < crossings(sweep, 5 * 48_000 + 24_000));
+        let peak = |signal: SignalSpec, start: u64| {
+            (start..start + 480)
+                .map(|frame| signal.sample(frame, rate).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        let pulse = config.signals[1];
+        assert!(peak(pulse, 0) < 0.01);
+        assert!(peak(pulse, 48_000) > 0.29);
     }
 }

@@ -11,7 +11,7 @@ use std::{
 use eframe::egui::{self, Event, PointerButton, Pos2, Rect, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::workspace::{
-    ControlKey, ControlTarget, DesktopProbe, INITIAL_WINDOW_SIZE, MenuItem, ROOT_WINDOW, WindowId,
+    ControlKey, ControlTarget, DesktopProbe, FIRST_WINDOW, INITIAL_WINDOW_SIZE, MenuItem, WindowId,
     Workspace,
 };
 
@@ -84,7 +84,7 @@ impl Harness {
     pub fn new(ws: Workspace) -> Self {
         let mut windows = BTreeMap::new();
         windows.insert(
-            ROOT_WINDOW,
+            FIRST_WINDOW,
             SimWindow::new(INITIAL_WINDOW_SIZE, 1.0, pos2(100.0, 100.0)),
         );
         Self {
@@ -96,7 +96,7 @@ impl Harness {
             },
             display_time: Duration::from_secs(1),
             frame: 0,
-            focus: ROOT_WINDOW,
+            focus: FIRST_WINDOW,
             blocked: HashSet::new(),
             new_window_ppp: 1.0,
             modifiers: egui::Modifiers::NONE,

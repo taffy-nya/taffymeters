@@ -15,11 +15,20 @@ use serde_json::json;
 
 use crate::workspace::{WindowId, Workspace};
 
+const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub(crate) struct Trace {
     out: BufWriter<File>,
     started: Instant,
     last_state: String,
     last_targets: HashMap<WindowId, String>,
+    /// Sampling times: state and control rects are captured at most every
+    /// `SAMPLE_INTERVAL`, so tracing barely perturbs the CPU being measured.
+    state_sampled: Option<Instant>,
+    targets_sampled: HashMap<WindowId, Instant>,
+    /// UI passes per window since `rate_started`, plus analysis counters then.
+    passes: HashMap<WindowId, u64>,
+    rate_started: Option<(Instant, u64, u64)>,
 }
 
 impl Trace {
@@ -33,6 +42,10 @@ impl Trace {
             started: Instant::now(),
             last_state: String::new(),
             last_targets: HashMap::new(),
+            state_sampled: None,
+            targets_sampled: HashMap::new(),
+            passes: HashMap::new(),
+            rate_started: None,
         })
     }
 
@@ -42,8 +55,50 @@ impl Trace {
         let _ = self.out.flush();
     }
 
+    /// Count one UI pass of `window`; about once a second write the passes per
+    /// window and the FFT / pipeline evaluations per second over that interval.
+    pub(crate) fn pass(&mut self, workspace: &Workspace, window: WindowId) {
+        *self.passes.entry(window).or_default() += 1;
+        let metrics = workspace.dataflow_handle_for_automation().metrics();
+        let now = Instant::now();
+        let Some((started, fft, pipelines)) = self.rate_started else {
+            self.rate_started = Some((now, metrics.fft_evaluations, metrics.pipeline_evaluations));
+            self.passes.clear();
+            return;
+        };
+        let elapsed = now.duration_since(started).as_secs_f64();
+        if elapsed < 1.0 {
+            return;
+        }
+        let mut passes: Vec<(u64, f64)> = self
+            .passes
+            .drain()
+            .map(|(id, count)| (id.0, count as f64 / elapsed))
+            .collect();
+        passes.sort_by_key(|(id, _)| *id);
+        let body = json!({
+            "seconds": elapsed,
+            "passes_per_second": passes,
+            "fft_evaluations_per_second": (metrics.fft_evaluations - fft) as f64 / elapsed,
+            "pipeline_evaluations_per_second": (metrics.pipeline_evaluations - pipelines) as f64 / elapsed,
+            "fft_branches": metrics.fft_branches,
+            "channel_branches": metrics.channel_branches,
+            "pipelines": metrics.pipelines,
+        });
+        self.write("rate", body);
+        self.rate_started = Some((now, metrics.fft_evaluations, metrics.pipeline_evaluations));
+    }
+
     /// Record ownership / demand when it changed.
     pub(crate) fn state(&mut self, workspace: &Workspace) {
+        let now = Instant::now();
+        if self
+            .state_sampled
+            .is_some_and(|at| now.duration_since(at) < SAMPLE_INTERVAL)
+        {
+            return;
+        }
+        self.state_sampled = Some(now);
         let observation = workspace.observation();
         let metrics = workspace.dataflow_handle_for_automation().metrics();
         let body = json!({
@@ -80,6 +135,15 @@ impl Trace {
 
     /// Record the control rects of `window`'s last pass when they changed.
     pub(crate) fn targets(&mut self, workspace: &Workspace, window: WindowId) {
+        let now = Instant::now();
+        if self
+            .targets_sampled
+            .get(&window)
+            .is_some_and(|at| now.duration_since(*at) < SAMPLE_INTERVAL)
+        {
+            return;
+        }
+        self.targets_sampled.insert(window, now);
         let mut targets: Vec<(String, [f32; 4], bool)> = workspace
             .control_targets(window)
             .into_iter()

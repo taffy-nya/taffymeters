@@ -15,7 +15,7 @@ use crate::{
     builtins::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
     dataflow::{ChannelSelection, FftConfig, SpectrumRequest, TimeDomainRequest},
     workspace::{
-        ActionOutcome, ControlKey, MenuItem, ModuleInstanceId, ROOT_WINDOW, Side, Workspace,
+        ActionOutcome, ControlKey, FIRST_WINDOW, MenuItem, ModuleInstanceId, Side, Workspace,
         WorkspaceAction,
     },
 };
@@ -58,7 +58,7 @@ pub(super) fn action(ws: &mut Workspace, action: WorkspaceAction) -> Result<Acti
 /// The first leaf of the root window.
 pub(super) fn first_leaf(ws: &Workspace) -> Result<ModuleInstanceId, String> {
     ws.observation()
-        .window(ROOT_WINDOW)
+        .window(FIRST_WINDOW)
         .and_then(|window| window.leaves.first().copied())
         .ok_or_else(|| "root window has no module".to_owned())
 }
@@ -84,7 +84,7 @@ pub(super) fn add_module(
 ) -> Result<ModuleInstanceId, String> {
     let observation = ws.observation();
     let window = observation
-        .window(ROOT_WINDOW)
+        .window(FIRST_WINDOW)
         .ok_or("root window closed")?;
     let mut leaves = window.leaf_rects.clone();
     leaves.sort_by(|a, b| b.1.area().total_cmp(&a.1.area()));
@@ -462,7 +462,7 @@ fn c04() -> Result<Value, String> {
     action(&mut ws, WorkspaceAction::CloseModule { instance_id: a })?;
     let o = ws.observation();
     let root = o
-        .window(ROOT_WINDOW)
+        .window(FIRST_WINDOW)
         .ok_or("closing modules closed the window")?;
     check(
         root.leaves.is_empty() && root.active.is_none() && o.modules.is_empty(),
@@ -478,7 +478,7 @@ fn c04() -> Result<Value, String> {
     let new_id = created(action(
         &mut ws,
         WorkspaceAction::AddModule {
-            window_id: ROOT_WINDOW,
+            window_id: FIRST_WINDOW,
             type_id: SPECTRUM_MODULE_ID,
         },
     )?)?;
@@ -487,7 +487,7 @@ fn c04() -> Result<Value, String> {
     let rejected = [
         WorkspaceAction::SelectModule { instance_id: b },
         WorkspaceAction::AddModule {
-            window_id: ROOT_WINDOW,
+            window_id: FIRST_WINDOW,
             type_id: SPECTRUM_MODULE_ID,
         },
         WorkspaceAction::SetChannel {
@@ -538,7 +538,7 @@ fn c05() -> Result<Value, String> {
         side: Side::Right,
     })?;
     let o = h.ws.observation();
-    let leaves = o.window(ROOT_WINDOW).ok_or("root closed")?.leaves.clone();
+    let leaves = o.window(FIRST_WINDOW).ok_or("root closed")?.leaves.clone();
     check(
         leaves.len() == 2 && leaves[0] == a,
         &format!("split entry did not add a right leaf: {leaves:?}"),
@@ -687,7 +687,7 @@ fn c06() -> Result<Value, String> {
         h.click(ControlKey::LeafBody(id))?;
         let observation = h.ws.observation();
         check(
-            observation.window(ROOT_WINDOW).and_then(|w| w.active) == Some(id)
+            observation.window(FIRST_WINDOW).and_then(|w| w.active) == Some(id)
                 && observation
                     .module(id)
                     .is_some_and(|module| module.channel.is_none()),
@@ -704,7 +704,7 @@ fn c06() -> Result<Value, String> {
         h.key(egui::Key::Escape);
         h.frame(vec![]);
         check(
-            h.ws.has_window(ROOT_WINDOW)
+            h.ws.has_window(FIRST_WINDOW)
                 && h.locate(&ControlKey::Menu(MenuItem::CloseModule)).is_err(),
             "Escape with an open menu closed the window or left the menu open",
         )?;
@@ -862,15 +862,24 @@ struct WaveformRun {
     restored: Vec<(egui::Rect, egui::Color32)>,
 }
 
+/// Filled rectangles drawn this pass: individual rect shapes plus the quads of the
+/// batched fill meshes the render target emits.
 fn filled_rects(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
-    output
-        .shapes
-        .iter()
-        .filter_map(|clipped| match &clipped.shape {
-            egui::Shape::Rect(rect) => Some((rect.rect, rect.fill)),
-            _ => None,
-        })
-        .collect()
+    let mut rects = Vec::new();
+    for clipped in &output.shapes {
+        match &clipped.shape {
+            egui::Shape::Rect(rect) => rects.push((rect.rect, rect.fill)),
+            egui::Shape::Mesh(mesh) => {
+                for quad in mesh.vertices.as_chunks::<4>().0 {
+                    let rect =
+                        egui::Rect::from_points(&quad.iter().map(|v| v.pos).collect::<Vec<_>>());
+                    rects.push((rect, quad[0].color));
+                }
+            }
+            _ => {}
+        }
+    }
+    rects
 }
 
 /// One Waveform History instance (the window's only leaf) receives `HIDDEN_FRAMES`
@@ -977,7 +986,7 @@ fn c08() -> Result<Value, String> {
         let id = created(action(
             &mut ws,
             WorkspaceAction::AddModule {
-                window_id: ROOT_WINDOW,
+                window_id: FIRST_WINDOW,
                 type_id: WAVEFORM_MODULE_ID,
             },
         )?)?;
@@ -1231,7 +1240,7 @@ fn image_case(
     setup(&mut ws)?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
-    h.window_mut(ROOT_WINDOW)?.ppp = dpi;
+    h.window_mut(FIRST_WINDOW)?.ppp = dpi;
     capture_frame(renderer, &mut h)?;
     driver
         .advance_frames(48_000, deadline())

@@ -150,14 +150,20 @@ impl RenderTarget for EguiRenderTarget<'_> {
     }
 
     fn fill_rects(&mut self, clip: Rect, rects: &[ColoredRect]) {
-        let painter = self.painter.with_clip_rect(to_egui_rect(clip));
-        for colored in rects {
-            painter.rect_filled(
-                to_egui_rect(colored.rect),
-                0.0,
-                to_egui_color(colored.color),
-            );
+        if rects.is_empty() {
+            return;
         }
+        // One untessellated mesh for the whole batch: axis-aligned fills need no
+        // feathering, and per-rect shapes made dense bar/heat-map views CPU bound.
+        let mut mesh = eframe::egui::Mesh::default();
+        mesh.reserve_vertices(rects.len() * 4);
+        mesh.reserve_triangles(rects.len() * 2);
+        for colored in rects {
+            mesh.add_colored_rect(to_egui_rect(colored.rect), to_egui_color(colored.color));
+        }
+        self.painter
+            .with_clip_rect(to_egui_rect(clip))
+            .add(eframe::egui::Shape::mesh(mesh));
     }
 
     fn circles(&mut self, clip: Rect, circles: &[Circle]) {

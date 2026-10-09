@@ -16,7 +16,7 @@ use super::{
 use crate::{
     audio::{AudioDescriptor, ChannelLayout, SourceState, SourceStatus},
     dataflow::ChannelSelection,
-    module::ModuleFrame,
+    module::{FRAME_INTERVAL, ModuleFrame},
     render::{EguiRenderTarget, Point, Rect as RenderRect},
 };
 
@@ -283,21 +283,34 @@ impl Workspace {
         display_time: Duration,
         probe: &dyn DesktopProbe,
     ) {
+        let pass_started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0.0, BACKGROUND);
         let windows_before: Vec<WindowId> = self.windows.keys().copied().collect();
         self.tick(display_time);
-        self.window_pass(window_id, ui, rect, display_time, probe);
+        let repaint = self.window_pass(window_id, ui, rect, display_time, probe);
+        if let Some(delay) = repaint {
+            let now = std::time::Instant::now();
+            let wait = if delay <= FRAME_INTERVAL {
+                // All animating windows share one frame clock, so their repaints come
+                // due together instead of each window rescheduling itself at once.
+                // Back-to-back immediate repaints of one window keep the Windows message
+                // queue busy, and the OS then never delivers the other windows' paints.
+                self.next_frame(now).saturating_duration_since(now)
+            } else {
+                delay.saturating_sub(pass_started.elapsed())
+            };
+            // egui subtracts its predicted frame time from every delay; add it back.
+            let predicted = ctx.input(|input| input.predicted_dt);
+            let predicted = Duration::try_from_secs_f32(predicted).unwrap_or_default();
+            // Windows are drawn inside the host (root) viewport's pass: schedule that.
+            ctx.request_repaint_after_for(wait + predicted, egui::ViewportId::ROOT);
+        }
         let windows_after: Vec<WindowId> = self.windows.keys().copied().collect();
         if windows_before != windows_after {
-            // The root pass owns native viewport creation and removal.
+            // The host (root) pass owns native viewport creation and removal.
             ctx.request_repaint_of(egui::ViewportId::ROOT);
-            for id in windows_after {
-                if !windows_before.contains(&id) {
-                    ctx.request_repaint_of(id.viewport_id());
-                }
-            }
         }
         if let Some(window) = self.windows.get_mut(&window_id) {
             for command in window.commands.drain(..) {
@@ -306,6 +319,18 @@ impl Workspace {
         }
     }
 
+    /// Next tick of the shared 60 fps clock after `now`.
+    fn next_frame(&mut self, now: std::time::Instant) -> std::time::Instant {
+        let next = match self.frame_clock {
+            Some(tick) if tick > now => tick,
+            Some(tick) if tick + FRAME_INTERVAL > now => tick + FRAME_INTERVAL,
+            _ => now + FRAME_INTERVAL,
+        };
+        self.frame_clock = Some(next);
+        next
+    }
+
+    /// One window pass; returns the shortest repaint delay its Modules asked for.
     fn window_pass(
         &mut self,
         window_id: WindowId,
@@ -313,11 +338,9 @@ impl Workspace {
         rect: Rect,
         display_time: Duration,
         probe: &dyn DesktopProbe,
-    ) {
+    ) -> Option<Duration> {
         let ctx = ui.ctx().clone();
-        let Some(window) = self.windows.get_mut(&window_id) else {
-            return;
-        };
+        let window = self.windows.get_mut(&window_id)?;
         window.ui.display_time = display_time;
         #[cfg(any(test, feature = "automation"))]
         {
@@ -332,7 +355,7 @@ impl Workspace {
             if window.pending_detach.is_some() {
                 self.commit_detach(window_id);
                 if !self.windows.contains_key(&window_id) {
-                    return;
+                    return None;
                 }
             }
         }
@@ -355,12 +378,12 @@ impl Workspace {
             minimized,
             probe,
         );
-        for id in wake {
-            ctx.request_repaint_of(id.viewport_id());
+        if !wake.is_empty() {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         let window = self.windows.get_mut(&window_id).expect("checked above");
         if window.desktop.moving {
-            ctx.request_repaint_after(MOVE_POLL);
+            ctx.request_repaint_after_for(MOVE_POLL, egui::ViewportId::ROOT);
         }
         if let Some(drag) = window.ui.divider_drag
             && (drag.pixels_per_point - pixels_per_point).abs() > f32::EPSILON
@@ -383,15 +406,16 @@ impl Workspace {
 
         self.handle_shortcuts(window_id, ui);
         if !self.windows.contains_key(&window_id) {
-            return;
+            return None;
         }
 
         let mut controls = Controls::default();
         let mut actions = Vec::new();
+        let mut repaint = None;
         if self.windows[&window_id].layout.is_empty() {
             self.empty_window(window_id, ui, rect, &mut controls, &mut actions);
         } else {
-            self.layout_ui(
+            repaint = self.layout_ui(
                 window_id,
                 ui,
                 rect,
@@ -427,6 +451,7 @@ impl Workspace {
         for action in actions {
             let _ = self.apply_action(action);
         }
+        repaint
     }
 
     fn handle_shortcuts(&mut self, window_id: WindowId, ui: &egui::Ui) {
@@ -520,13 +545,13 @@ impl Workspace {
         maximized: bool,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
-    ) {
+    ) -> Option<Duration> {
         let ctx = ui.ctx().clone();
+        let mut repaint = None;
         let geometry = {
             let window = &self.windows[&window_id];
             window.layout.geometry(rect, &|id| self.module_min_size(id))
         };
-        let multiple = geometry.leaves.len() > 1;
         let picking = self.move_source.is_some();
         let popup_open = egui::Popup::is_any_open(&ctx);
 
@@ -596,16 +621,8 @@ impl Workspace {
                     renderer: &mut renderer,
                 });
                 if let Some(delay) = response.repaint_after {
-                    ctx.request_repaint_after(delay);
+                    repaint = Some(repaint.map_or(delay, |current: Duration| current.min(delay)));
                 }
-            }
-            if multiple && self.windows[&window_id].active == Some(leaf) {
-                ui.painter().rect_stroke(
-                    leaf_rect.shrink(1.0),
-                    0.0,
-                    Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6)),
-                    StrokeKind::Inside,
-                );
             }
         }
 
@@ -655,6 +672,7 @@ impl Workspace {
             ui.painter()
                 .rect_stroke(rect, 0.0, Stroke::new(1.0_f32, ACCENT), StrokeKind::Inside);
         }
+        repaint
     }
 
     fn dividers(

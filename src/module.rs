@@ -21,6 +21,9 @@ pub struct ModuleFrame<'a> {
     pub renderer: &'a mut dyn RenderTarget,
 }
 
+/// Repaint interval an animating Module requests: the default 60 fps display rate.
+pub const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModuleResponse {
     pub repaint_after: Option<Duration>,
@@ -35,13 +38,14 @@ pub struct StyleOption {
 pub trait Module: Send {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse;
 
-    /// Smallest area, in logical points, in which the Module stays usable. The
-    /// Workspace never shrinks a layout leaf below it unless the window itself is
-    /// forced smaller.
+    /// Smallest area, in logical points, the Module accepts. The Workspace never
+    /// shrinks a layout leaf below it unless the window itself is forced smaller. The
+    /// default only keeps a leaf large enough to stay reachable (its split entries and
+    /// body); content simply scales down.
     fn min_size(&self) -> Size {
         Size {
-            width: 120.0,
-            height: 80.0,
+            width: 40.0,
+            height: 32.0,
         }
     }
 
