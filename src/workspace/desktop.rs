@@ -7,6 +7,9 @@ use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 pub(crate) const SNAP_DISTANCE_POINTS: f32 = 12.0;
 /// Two outer frames closer than this (physical pixels) count as touching.
 pub(crate) const TOUCH_TOLERANCE_PX: f32 = 2.0;
+/// A window shows at least this much of itself (logical points per axis, or all
+/// of a smaller window) on a monitor to count as reachable.
+pub(crate) const MIN_VISIBLE_POINTS: f32 = 32.0;
 
 /// Facts about the desktop the egui viewport info does not carry.
 pub(crate) trait DesktopProbe {
@@ -138,6 +141,31 @@ pub(crate) fn touching(a: Rect, b: Rect) -> bool {
     side_by_side || stacked
 }
 
+/// New top-left for `outer` inside `work` when less than `min_visible` (or the
+/// whole window, if smaller) of it is inside `work` on either axis; `None` when
+/// it is reachable where it is. Windows larger than `work` keep their top-left
+/// edge inside it.
+pub(crate) fn reachable_position(outer: Rect, work: Rect, min_visible: f32) -> Option<Pos2> {
+    let visible = outer.intersect(work);
+    let visible_x = visible.width().max(0.0);
+    let visible_y = visible.height().max(0.0);
+    if visible_x + 0.5 >= min_visible.min(outer.width())
+        && visible_y + 0.5 >= min_visible.min(outer.height())
+    {
+        return None;
+    }
+    Some(pos2(
+        outer
+            .min
+            .x
+            .clamp(work.min.x, (work.max.x - outer.width()).max(work.min.x)),
+        outer
+            .min
+            .y
+            .clamp(work.min.y, (work.max.y - outer.height()).max(work.min.y)),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +206,30 @@ mod tests {
         assert!(touching(a, rect(10.0, 100.0, 50.0, 50.0)));
         assert!(!touching(a, rect(105.0, 20.0, 50.0, 50.0)));
         assert!(!touching(a, rect(100.0, 100.0, 50.0, 50.0)), "corner only");
+    }
+
+    #[test]
+    fn windows_off_every_monitor_come_back_but_partly_visible_ones_stay() {
+        let work = rect(0.0, 0.0, 1920.0, 1040.0);
+        // Disconnected monitor on the left: entirely outside.
+        assert_eq!(
+            reachable_position(rect(-1500.0, 200.0, 400.0, 300.0), work, 32.0),
+            Some(pos2(0.0, 200.0))
+        );
+        // Only a sliver on screen.
+        assert_eq!(
+            reachable_position(rect(1910.0, 1030.0, 400.0, 300.0), work, 32.0),
+            Some(pos2(1520.0, 740.0))
+        );
+        // Deliberately half off screen: left alone.
+        assert_eq!(
+            reachable_position(rect(1700.0, 100.0, 400.0, 300.0), work, 32.0),
+            None
+        );
+        // Larger than the work area: top-left inside.
+        assert_eq!(
+            reachable_position(rect(-3000.0, -50.0, 2500.0, 1200.0), work, 32.0),
+            Some(pos2(0.0, 0.0))
+        );
     }
 }

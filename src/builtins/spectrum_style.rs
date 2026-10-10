@@ -2,7 +2,8 @@ use crate::{
     dataflow::FftMetadata,
     extensions::{Registry, RegistryError},
     plotting::SpectrumCoordinates,
-    render::{Color, ColoredRect, Point, Rect, RenderTarget, Stroke},
+    render::{ColoredRect, Point, Rect, RenderTarget, Stroke},
+    theme::{ColorRole, Palette},
 };
 
 pub const DEFAULT_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.line";
@@ -23,6 +24,7 @@ pub struct SpectrumStyleContext<'a> {
     pub coordinates: &'a SpectrumCoordinates,
     pub rect: Rect,
     pub monotonic_time: std::time::Duration,
+    pub palette: &'a Palette,
 }
 
 pub trait SpectrumStyle: Send {
@@ -80,7 +82,7 @@ impl SpectrumStyle for LineSpectrumStyle {
             &self.points,
             Stroke {
                 width: 1.6,
-                color: Color::rgb(92, 230, 199),
+                color: context.palette.color(ColorRole::Primary),
             },
         );
         if let Some(peak) = context.snapshot.peak_dbfs {
@@ -96,7 +98,7 @@ impl SpectrumStyle for LineSpectrumStyle {
                 &self.peak_points,
                 Stroke {
                     width: 1.0,
-                    color: Color::rgba(255, 210, 100, 180),
+                    color: context.palette.color(ColorRole::Secondary),
                 },
             );
         }
@@ -161,7 +163,7 @@ impl SpectrumStyle for BarSpectrumStyle {
                         y: context.rect.max.y,
                     },
                 },
-                color: Color::rgb(100, 190, 255),
+                color: context.palette.color(ColorRole::Primary),
             });
         }
         renderer.fill_rects(context.rect, &self.bars);
@@ -216,7 +218,7 @@ impl SpectrumStyle for PixelSpectrumStyle {
                             y: (y + cell - 1.0).min(context.rect.max.y),
                         },
                     },
-                    color: pixel_color(strength),
+                    color: context.palette.level(strength),
                 });
                 if y < context.rect.min.y + cell {
                     break;
@@ -225,16 +227,6 @@ impl SpectrumStyle for PixelSpectrumStyle {
             }
         }
         renderer.fill_rects(context.rect, &self.pixels);
-    }
-}
-
-fn pixel_color(strength: f32) -> Color {
-    if strength < 0.55 {
-        Color::rgb(45, 145, 215)
-    } else if strength < 0.82 {
-        Color::rgb(160, 90, 245)
-    } else {
-        Color::rgb(255, 70, 145)
     }
 }
 

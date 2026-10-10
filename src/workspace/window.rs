@@ -12,12 +12,14 @@ use super::{
     ModuleInstanceId, MoveTarget, Side, SplitId, WindowId, Workspace, WorkspaceAction,
     desktop::DesktopProbe,
     layout::{Axis, DividerGeometry},
+    panel::{NamePurpose, Panel},
 };
 use crate::{
     audio::{AudioDescriptor, ChannelLayout, SourceState, SourceStatus},
     dataflow::ChannelSelection,
     module::{FRAME_INTERVAL, ModuleFrame},
     render::{EguiRenderTarget, Point, Rect as RenderRect},
+    theme::ColorRole,
 };
 
 /// Width of the right / bottom split entries, in logical points.
@@ -30,11 +32,10 @@ const STATE_POLL: Duration = Duration::from_millis(250);
 /// Poll interval while a native move may still be in progress.
 const MOVE_POLL: Duration = Duration::from_millis(50);
 
-const BACKGROUND: Color32 = Color32::from_rgb(13, 18, 24);
-const DIVIDER: Color32 = Color32::from_rgb(46, 56, 68);
-const DIVIDER_HOVER: Color32 = Color32::from_rgb(120, 170, 220);
-const ACCENT: Color32 = Color32::from_rgb(90, 160, 230);
-const SPLIT_HOVER: Color32 = Color32::from_rgba_premultiplied(30, 50, 70, 160);
+/// egui color of a theme color.
+pub(crate) fn color32(color: crate::render::Color) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ResizeEdge {
@@ -125,6 +126,18 @@ pub(crate) enum MenuItem {
     Pause,
     AddModule(&'static str),
     AddOpen,
+    Settings,
+    Duplicate,
+    WorkspaceOpen,
+    SaveWorkspace,
+    SaveWorkspaceAs,
+    NewWorkspace,
+    SwitchOpen,
+    /// Saved workspace by index in the sorted list.
+    Switch(u16),
+    Theme,
+    ClearNotices,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -139,6 +152,7 @@ pub(crate) enum ControlKey {
     EmptyBody,
     Menu(MenuItem),
     MoveTarget(MoveTarget),
+    Panel(super::panel::PanelControl),
 }
 
 #[cfg(any(test, feature = "automation"))]
@@ -165,6 +179,10 @@ pub(crate) struct WindowUiState {
     pub(crate) divider_drag: Option<DividerDrag>,
     pub(crate) display_time: Duration,
     min_size_sent: Option<Vec2>,
+    /// Settings, theme or naming panel shown in this window.
+    pub(crate) panel: Option<Panel>,
+    /// A panel text field has keyboard focus: keys are text, not shortcuts.
+    pub(crate) typing: bool,
     #[cfg(any(test, feature = "automation"))]
     targets: std::collections::HashMap<ControlKey, ControlTarget>,
     #[cfg(any(test, feature = "automation"))]
@@ -175,13 +193,13 @@ pub(crate) struct WindowUiState {
 
 /// Responses of probe-visible controls collected during one pass.
 #[derive(Default)]
-struct Controls {
+pub(crate) struct Controls {
     #[cfg(any(test, feature = "automation"))]
     responses: Vec<(ControlKey, Response)>,
 }
 
 impl Controls {
-    fn record(&mut self, _key: ControlKey, _response: &Response) {
+    pub(crate) fn record(&mut self, _key: ControlKey, _response: &Response) {
         #[cfg(any(test, feature = "automation"))]
         self.responses.push((_key, _response.clone()));
     }
@@ -288,7 +306,15 @@ impl Workspace {
         let pass_started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
         let rect = ui.max_rect();
-        ui.painter().rect_filled(rect, 0.0, BACKGROUND);
+        if ctx.global_style().visuals.dark_mode != self.chrome.dark {
+            ctx.set_visuals(if self.chrome.dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+        }
+        ui.painter()
+            .rect_filled(rect, 0.0, color32(self.chrome.color(ColorRole::Background)));
         let windows_before: Vec<WindowId> = self.windows.keys().copied().collect();
         self.tick(display_time);
         let repaint = self.window_pass(window_id, ui, rect, display_time, probe);
@@ -443,6 +469,7 @@ impl Workspace {
         if !maximized {
             Self::resize_edges(ui, rect, &mut controls);
         }
+        self.panel_ui(window_id, ui, rect, &mut controls, &mut actions);
         self.status_badge(window_id, ui, rect);
 
         #[cfg(any(test, feature = "automation"))]
@@ -463,7 +490,18 @@ impl Workspace {
         for action in actions {
             let _ = self.apply_action(action);
         }
+        if let Some((target, panel)) = self.panel_request.take()
+            && let Some(window) = self.windows.get_mut(&target)
+        {
+            window.ui.panel = Some(panel);
+        }
         repaint
+    }
+
+    /// Show `panel` in `window_id` once this pass ends (menus only read the
+    /// Workspace while they draw).
+    pub(super) fn request_panel(&self, window_id: WindowId, panel: Panel) {
+        self.panel_request.replace(Some((window_id, panel)));
     }
 
     fn handle_shortcuts(&mut self, window_id: WindowId, ui: &egui::Ui) {
@@ -478,6 +516,18 @@ impl Workspace {
                 input.key_pressed(egui::Key::Num2),
             )
         });
+        if escape
+            && !egui::Popup::is_any_open(ctx)
+            && let Some(window) = self.windows.get_mut(&window_id)
+            && window.ui.panel.is_some()
+        {
+            window.ui.panel = None;
+            return;
+        }
+        // Typing in a panel's text field is not a shortcut.
+        if self.windows[&window_id].ui.typing {
+            return;
+        }
         if escape && !egui::Popup::is_any_open(ctx) {
             let pending_detach = self
                 .windows
@@ -630,6 +680,7 @@ impl Workspace {
                     }),
                     scroll_delta_y,
                     zoom_delta,
+                    palette: &entry.palette,
                     renderer: &mut renderer,
                 });
                 if let Some(delay) = response.repaint_after {
@@ -659,7 +710,11 @@ impl Workspace {
                     let allowed = self.can_split(leaf, side);
                     if response.hovered() && allowed && !dragging {
                         let painter = ui.painter_at(zone);
-                        painter.rect_filled(zone, 0.0, SPLIT_HOVER);
+                        painter.rect_filled(
+                            zone,
+                            0.0,
+                            color32(self.chrome.color(ColorRole::Accent)).gamma_multiply(0.35),
+                        );
                         painter.text(
                             zone.center(),
                             Align2::CENTER_CENTER,
@@ -681,8 +736,12 @@ impl Workspace {
         self.dividers(window_id, ui, &geometry.dividers, controls, actions);
 
         if self.windows[&window_id].group.is_some() {
-            ui.painter()
-                .rect_stroke(rect, 0.0, Stroke::new(1.0_f32, ACCENT), StrokeKind::Inside);
+            ui.painter().rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, color32(self.chrome.color(ColorRole::Accent))),
+                StrokeKind::Inside,
+            );
         }
         repaint
     }
@@ -770,9 +829,9 @@ impl Workspace {
                 }
             }
             let color = if response.hovered() || active {
-                DIVIDER_HOVER
+                color32(self.chrome.color(ColorRole::Accent))
             } else {
-                DIVIDER
+                color32(self.chrome.color(ColorRole::Divider))
             };
             let line = match divider.axis {
                 Axis::LeftRight => [
@@ -988,11 +1047,25 @@ impl Workspace {
             if response.clicked() {
                 actions.push(WorkspaceAction::BeginMove { instance_id: leaf });
             }
+            let response = ui.add_enabled(
+                self.can_split(leaf, Side::Right) && entry.preserved.is_none(),
+                egui::Button::new("Duplicate"),
+            );
+            controls.record(ControlKey::Menu(MenuItem::Duplicate), &response);
+            if response.clicked() {
+                actions.push(WorkspaceAction::DuplicateModule { instance_id: leaf });
+            }
         });
         controls.record(
             ControlKey::Menu(MenuItem::LayoutOpen),
             &layout_open.response,
         );
+        let response = ui.button("Settings…");
+        controls.record(ControlKey::Menu(MenuItem::Settings), &response);
+        if response.clicked() {
+            actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
+            self.request_panel(window_id, Panel::settings(leaf));
+        }
         let response = ui.button("Close module");
         controls.record(ControlKey::Menu(MenuItem::CloseModule), &response);
         if response.clicked() {
@@ -1023,6 +1096,78 @@ impl Workspace {
             ControlKey::Menu(MenuItem::SourceOpen),
             &source_open.response,
         );
+        let workspace_open = ui.menu_button("Workspace", |ui| {
+            self.workspace_menu(window_id, ui, controls, actions);
+        });
+        controls.record(
+            ControlKey::Menu(MenuItem::WorkspaceOpen),
+            &workspace_open.response,
+        );
+    }
+
+    fn workspace_menu(
+        &self,
+        window_id: WindowId,
+        ui: &mut egui::Ui,
+        controls: &mut Controls,
+        actions: &mut Vec<WorkspaceAction>,
+    ) {
+        ui.label(format!("Workspace: {}", self.name()));
+        let response = ui.add_enabled(self.can_save(), egui::Button::new("Save"));
+        controls.record(ControlKey::Menu(MenuItem::SaveWorkspace), &response);
+        if response.clicked() {
+            actions.push(WorkspaceAction::SaveWorkspace);
+        }
+        let has_store = self.store.is_some();
+        for (item, label, purpose) in [
+            (MenuItem::SaveWorkspaceAs, "Save as…", NamePurpose::SaveAs),
+            (MenuItem::NewWorkspace, "New…", NamePurpose::New),
+        ] {
+            let response = ui.add_enabled(has_store, egui::Button::new(label));
+            controls.record(ControlKey::Menu(item), &response);
+            if response.clicked() {
+                self.request_panel(window_id, Panel::name(purpose));
+            }
+        }
+        let saved = self.saved_workspaces();
+        let switch_open = ui.add_enabled_ui(has_store && !saved.is_empty(), |ui| {
+            ui.menu_button("Switch to", |ui| {
+                for (index, name) in saved.iter().enumerate() {
+                    let response = ui.selectable_label(*name == self.name, name);
+                    controls.record(ControlKey::Menu(MenuItem::Switch(index as u16)), &response);
+                    if response.clicked() && *name != self.name {
+                        actions.push(WorkspaceAction::SwitchWorkspace { name: name.clone() });
+                    }
+                }
+            })
+        });
+        controls.record(
+            ControlKey::Menu(MenuItem::SwitchOpen),
+            &switch_open.inner.response,
+        );
+        ui.separator();
+        let response = ui.button("Theme…");
+        controls.record(ControlKey::Menu(MenuItem::Theme), &response);
+        if response.clicked() {
+            self.request_panel(window_id, Panel::theme());
+        }
+        if !self.notices.is_empty() {
+            let response = ui.button("Clear notices");
+            controls.record(ControlKey::Menu(MenuItem::ClearNotices), &response);
+            if response.clicked() {
+                actions.push(WorkspaceAction::ClearNotices);
+            }
+        }
+        ui.separator();
+        let response = ui.button(if self.can_save() {
+            "Quit (save workspace)"
+        } else {
+            "Quit"
+        });
+        controls.record(ControlKey::Menu(MenuItem::Quit), &response);
+        if response.clicked() {
+            actions.push(WorkspaceAction::Quit);
+        }
     }
 
     fn window_menu(
@@ -1125,7 +1270,7 @@ impl Workspace {
                         painter.rect_stroke(
                             leaf_rect.shrink(2.0),
                             0.0,
-                            Stroke::new(2.0_f32, ACCENT),
+                            Stroke::new(2.0_f32, color32(self.chrome.color(ColorRole::Accent))),
                             StrokeKind::Inside,
                         );
                         painter.text(
@@ -1159,9 +1304,10 @@ impl Workspace {
                         })
                         .inner;
                     controls.record(ControlKey::MoveTarget(target), &response);
+                    let accent = color32(self.chrome.color(ColorRole::Accent));
                     let fill = match (valid, response.hovered()) {
-                        (true, true) => ACCENT.gamma_multiply(0.7),
-                        (true, false) => ACCENT.gamma_multiply(0.25),
+                        (true, true) => accent.gamma_multiply(0.7),
+                        (true, false) => accent.gamma_multiply(0.25),
                         (false, _) => Color32::from_white_alpha(8),
                     };
                     painter.rect_filled(zone.shrink(2.0), 0.0, fill);
@@ -1196,6 +1342,12 @@ impl Workspace {
                 text.push_str(" | ");
             }
             text.push_str(error);
+        }
+        for notice in &self.notices {
+            if !text.is_empty() {
+                text.push_str(" | ");
+            }
+            text.push_str(notice);
         }
         if text.is_empty() || !self.windows.contains_key(&window_id) {
             return;

@@ -5,6 +5,7 @@ use crate::{
         oscilloscope_style::{OscilloscopeStyle, OscilloscopeStyleFactory},
         spectrum_style::{SpectrumStyle, SpectrumStyleFactory},
     },
+    dataflow::DataSpec,
     module::{Module, ModuleError, ModuleFactory, ModuleServices},
 };
 
@@ -54,15 +55,24 @@ impl Registry {
         Ok(())
     }
 
+    /// Create an instance of `id`, with its default analysis or the saved `data`.
     pub fn create_module(
         &self,
         id: &str,
         services: &ModuleServices,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         self.modules
             .get(id)
             .ok_or_else(|| RegistryError::UnknownModule(id.to_owned()))?
-            .create(services, self)
+            .create(services, self, data)
+    }
+
+    /// The registered type `id` as `(type_id, display_name)`.
+    pub fn module_type(&self, id: &str) -> Option<(&'static str, &'static str)> {
+        self.modules
+            .get(id)
+            .map(|factory| (factory.type_id(), factory.display_name()))
     }
 
     pub fn module_types(&self) -> Vec<(&'static str, &'static str)> {

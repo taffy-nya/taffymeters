@@ -82,14 +82,9 @@ pub(super) struct Harness {
 
 impl Harness {
     pub fn new(ws: Workspace) -> Self {
-        let mut windows = BTreeMap::new();
-        windows.insert(
-            FIRST_WINDOW,
-            SimWindow::new(INITIAL_WINDOW_SIZE, 1.0, pos2(100.0, 100.0)),
-        );
-        Self {
+        let mut harness = Self {
             ws,
-            windows,
+            windows: BTreeMap::new(),
             desktop: FakeDesktop {
                 button_down: Cell::new(false),
                 work_area: Cell::new(Some(Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0)))),
@@ -100,7 +95,23 @@ impl Harness {
             blocked: HashSet::new(),
             new_window_ppp: 1.0,
             modifiers: egui::Modifiers::NONE,
+        };
+        // The initial default window opens at a fixed spot; restored windows open
+        // where their builder says.
+        harness.sync_windows();
+        if let Some(window) = harness.windows.get_mut(&FIRST_WINDOW)
+            && harness
+                .ws
+                .windows()
+                .iter()
+                .any(|summary| summary.id == FIRST_WINDOW && summary.builder.position.is_none())
+        {
+            window.position = pos2(100.0, 100.0);
         }
+        if let Some(first) = harness.windows.keys().next() {
+            harness.focus = *first;
+        }
+        harness
     }
 
     pub fn window(&self, id: WindowId) -> Result<&SimWindow, String> {

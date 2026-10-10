@@ -9,23 +9,63 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption,
+        StyleOption, number_setting, spec_from_saved,
     },
-    render::{Circle, Color, ColoredRect, Point, Rect, Stroke, TextStyle},
+    render::{Circle, ColoredRect, Point, Rect, Stroke, TextStyle},
+    settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
+    theme::ColorRole,
 };
 
-/// Source time the Waveform keeps; it shows up to this much.
+/// Source time the Waveform keeps by default; it shows up to its History.
 const WAVEFORM_HISTORY_SECONDS: f32 = 10.0;
+/// Shortest Waveform span.
+const WAVEFORM_MIN_SECONDS: f32 = 0.25;
+const OSCILLOSCOPE_SCALE: (f32, f32) = (0.2, 10.0);
+const WAVEFORM_SCALE: (f32, f32) = (0.1, 20.0);
+const STEREOMETER_SCALE: (f32, f32) = (0.5, 10.0);
 
-/// A subscription to the merged source PCM.
+/// A subscription to the merged source PCM (or the saved equivalent).
 fn subscribe_pcm(
     services: &ModuleServices,
     keep: Keep,
+    saved: Option<&DataSpec>,
 ) -> Result<(DataSubscription, OutputId), ModuleError> {
     let mut spec = DataSpec::new();
     let output = spec.output(SOURCE, keep);
+    let spec = spec_from_saved(spec, saved)?;
     Ok((services.dataflow.subscribe(spec)?, output))
+}
+
+fn scale_setting(value: f32, range: (f32, f32)) -> ViewSetting {
+    ViewSetting {
+        key: "scale",
+        label: "Scale",
+        section: "Display",
+        kind: SettingKind::Number {
+            min: range.0,
+            max: range.1,
+            unit: "×",
+            logarithmic: true,
+        },
+        value: SettingValue::Number(value),
+    }
+}
+
+fn channel_setting(channel: ChannelSelection) -> ViewSetting {
+    ViewSetting {
+        key: "channel",
+        label: "Channel",
+        section: "Display",
+        kind: SettingKind::Channel,
+        value: SettingValue::Channel(channel),
+    }
+}
+
+fn channel_value(key: &str, value: &SettingValue) -> Result<ChannelSelection, ModuleError> {
+    value
+        .channel()
+        .ok_or_else(|| ModuleError::InvalidSetting(key.to_owned()))
 }
 
 use super::oscilloscope_style::{
@@ -74,8 +114,9 @@ impl ModuleFactory for OscilloscopeFactory {
         &self,
         services: &ModuleServices,
         registry: &Registry,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        let (subscription, output) = subscribe_pcm(services, Keep::Latest)?;
+        let (subscription, output) = subscribe_pcm(services, Keep::Latest, data)?;
         Ok(Box::new(OscilloscopeModule {
             source: services.source.clone(),
             controller: subscription.controller(),
@@ -121,13 +162,40 @@ impl Module for OscilloscopeModule {
         let _ = self.controller.set_visible(visible);
     }
 
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[ColorRole::Primary, ColorRole::Guide]
+    }
+
+    fn view_settings(&self) -> Vec<ViewSetting> {
+        vec![
+            channel_setting(self.channel),
+            scale_setting(self.y_scale, OSCILLOSCOPE_SCALE),
+        ]
+    }
+
+    fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        match key {
+            "channel" => self.set_channel(channel_value(key, value)?),
+            "scale" => {
+                self.y_scale = number_setting(key, value, OSCILLOSCOPE_SCALE)?;
+                Ok(())
+            }
+            _ => Err(ModuleError::UnknownSetting(key.to_owned())),
+        }
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
             && frame.scroll_delta_y.abs() > 0.01
         {
-            self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.2, 10.0);
+            self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp())
+                .clamp(OSCILLOSCOPE_SCALE.0, OSCILLOSCOPE_SCALE.1);
         }
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
@@ -147,7 +215,7 @@ impl Module for OscilloscopeModule {
             ],
             Stroke {
                 width: 1.0,
-                color: Color::rgba(110, 130, 145, 90),
+                color: frame.palette.color(ColorRole::Guide),
             },
         );
         self.style.draw(
@@ -158,6 +226,7 @@ impl Module for OscilloscopeModule {
                 rect: frame.rect,
                 y_scale: self.y_scale,
                 monotonic_time: frame.monotonic_time,
+                palette: frame.palette,
             },
             frame.renderer,
         )
@@ -201,11 +270,13 @@ impl ModuleFactory for WaveformFactory {
         &self,
         services: &ModuleServices,
         _registry: &Registry,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         let (subscription, output) =
-            subscribe_pcm(services, Keep::Seconds(WAVEFORM_HISTORY_SECONDS))?;
+            subscribe_pcm(services, Keep::Seconds(WAVEFORM_HISTORY_SECONDS), data)?;
         Ok(Box::new(WaveformModule {
             source: services.source.clone(),
+            controller: subscription.controller(),
             reader: subscription.reader(),
             _subscription: subscription,
             output,
@@ -221,6 +292,7 @@ impl ModuleFactory for WaveformFactory {
 
 struct WaveformModule {
     source: SourceReader,
+    controller: DataController,
     reader: DataReader,
     _subscription: DataSubscription,
     output: OutputId,
@@ -230,6 +302,21 @@ struct WaveformModule {
     y_scale: f32,
     bars: Vec<ColoredRect>,
     envelope: WaveformEnvelope,
+}
+
+impl WaveformModule {
+    /// History length of the output: the most the view can show.
+    fn history_seconds(&self) -> f32 {
+        self.controller
+            .with_spec(|spec| match spec.outputs().get(self.output.index()) {
+                Some(output) => match output.keep {
+                    Keep::Seconds(seconds) => seconds,
+                    Keep::Latest => WAVEFORM_HISTORY_SECONDS,
+                },
+                None => WAVEFORM_HISTORY_SECONDS,
+            })
+            .max(WAVEFORM_MIN_SECONDS)
+    }
 }
 
 /// Display sampling cache: min/max per fixed-size bin of absolute source frames, so
@@ -263,18 +350,62 @@ impl Module for WaveformModule {
         self.envelope = WaveformEnvelope::default();
     }
 
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn output_label(&self, output: OutputId) -> Option<&'static str> {
+        (output == self.output).then_some("History")
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[ColorRole::Low, ColorRole::Mid, ColorRole::High]
+    }
+
+    fn view_settings(&self) -> Vec<ViewSetting> {
+        vec![
+            channel_setting(self.channel),
+            ViewSetting {
+                key: "visible_seconds",
+                label: "Visible time",
+                section: "Display",
+                kind: SettingKind::Number {
+                    min: WAVEFORM_MIN_SECONDS,
+                    max: self.history_seconds(),
+                    unit: "s",
+                    logarithmic: false,
+                },
+                value: SettingValue::Number(self.seconds),
+            },
+            scale_setting(self.y_scale, WAVEFORM_SCALE),
+        ]
+    }
+
+    fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        match key {
+            "channel" => return self.set_channel(channel_value(key, value)?),
+            "visible_seconds" => {
+                self.seconds =
+                    number_setting(key, value, (WAVEFORM_MIN_SECONDS, self.history_seconds()))?;
+            }
+            "scale" => self.y_scale = number_setting(key, value, WAVEFORM_SCALE)?,
+            _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
+        }
+        Ok(())
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
         {
             if (frame.zoom_delta - 1.0).abs() > 0.001 {
-                self.seconds =
-                    (self.seconds / frame.zoom_delta).clamp(0.25, WAVEFORM_HISTORY_SECONDS);
+                self.seconds = (self.seconds / frame.zoom_delta)
+                    .clamp(WAVEFORM_MIN_SECONDS, self.history_seconds());
             }
             if frame.scroll_delta_y.abs() > 0.01 {
-                self.y_scale =
-                    (self.y_scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.1, 20.0);
+                self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp())
+                    .clamp(WAVEFORM_SCALE.0, WAVEFORM_SCALE.1);
             }
         }
         self.reader.sync_history(self.output, &mut self.history);
@@ -358,7 +489,7 @@ impl Module for WaveformModule {
                         y: top.max(bottom).max(top.min(bottom) + 1.0),
                     },
                 },
-                color: amplitude_color(amplitude),
+                color: frame.palette.level(amplitude.clamp(0.0, 1.0)),
             });
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
@@ -381,8 +512,9 @@ impl ModuleFactory for StereometerFactory {
         &self,
         services: &ModuleServices,
         _registry: &Registry,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        let (subscription, output) = subscribe_pcm(services, Keep::Latest)?;
+        let (subscription, output) = subscribe_pcm(services, Keep::Latest, data)?;
         Ok(Box::new(StereometerModule {
             controller: subscription.controller(),
             reader: subscription.reader(),
@@ -408,13 +540,34 @@ impl Module for StereometerModule {
         let _ = self.controller.set_visible(visible);
     }
 
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[ColorRole::Primary, ColorRole::Guide, ColorRole::Muted]
+    }
+
+    fn view_settings(&self) -> Vec<ViewSetting> {
+        vec![scale_setting(self.scale, STEREOMETER_SCALE)]
+    }
+
+    fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        if key != "scale" {
+            return Err(ModuleError::UnknownSetting(key.to_owned()));
+        }
+        self.scale = number_setting(key, value, STEREOMETER_SCALE)?;
+        Ok(())
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
             && frame.scroll_delta_y.abs() > 0.01
         {
-            self.scale = (self.scale * (frame.scroll_delta_y * 0.002).exp()).clamp(0.5, 10.0);
+            self.scale = (self.scale * (frame.scroll_delta_y * 0.002).exp())
+                .clamp(STEREOMETER_SCALE.0, STEREOMETER_SCALE.1);
         }
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
@@ -426,8 +579,8 @@ impl Module for StereometerModule {
                 frame.rect.center(),
                 "Stereo input required",
                 TextStyle {
-                    size: 13.0,
-                    color: Color::rgb(150, 160, 170),
+                    size: frame.palette.text_size + 2.0,
+                    color: frame.palette.color(ColorRole::Muted),
                 },
             );
             return ModuleResponse::default();
@@ -436,8 +589,10 @@ impl Module for StereometerModule {
         let radius = frame.rect.width().min(frame.rect.height()) * 0.45;
         let guide = Stroke {
             width: 1.0,
-            color: Color::rgba(110, 125, 135, 100),
+            color: frame.palette.color(ColorRole::Guide),
         };
+        let dot = frame.palette.color(ColorRole::Primary);
+        let dot = dot.with_alpha((f32::from(dot.alpha) * 180.0 / 255.0) as u8);
         frame.renderer.polyline(
             frame.rect,
             &[
@@ -478,7 +633,7 @@ impl Module for StereometerModule {
                         y: center.y - (left + right) * 0.707 * radius * self.scale,
                     },
                     radius: 1.4,
-                    color: Color::rgba(100, 220, 255, 180),
+                    color: dot,
                 });
             }
         }
@@ -552,15 +707,18 @@ impl ModuleFactory for LevelMeterFactory {
         &self,
         services: &ModuleServices,
         _registry: &Registry,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         let mut spec = DataSpec::new();
         let levels = spec.add(SOURCE, NodeSpec::Levels);
         let output = spec.output(levels, Keep::Latest);
+        let spec = spec_from_saved(spec, data)?;
         let subscription = services
             .dataflow
             .subscribe(spec)
             .map_err(ModuleError::from)?;
         Ok(Box::new(LevelMeterModule {
+            controller: subscription.controller(),
             reader: subscription.reader(),
             _subscription: subscription,
             output,
@@ -572,6 +730,7 @@ impl ModuleFactory for LevelMeterFactory {
 }
 
 struct LevelMeterModule {
+    controller: DataController,
     reader: DataReader,
     _subscription: DataSubscription,
     output: OutputId,
@@ -581,6 +740,24 @@ struct LevelMeterModule {
 }
 
 impl Module for LevelMeterModule {
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn output_label(&self, output: OutputId) -> Option<&'static str> {
+        (output == self.output).then_some("Levels")
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[
+            ColorRole::Surface,
+            ColorRole::Low,
+            ColorRole::Mid,
+            ColorRole::High,
+            ColorRole::Text,
+        ]
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
@@ -622,7 +799,7 @@ impl Module for LevelMeterModule {
             };
             self.bars.push(ColoredRect {
                 rect: bar,
-                color: Color::rgba(20, 28, 34, 220),
+                color: frame.palette.color(ColorRole::Surface),
             });
             let normalized = ((current_lufs + 60.0) / 63.0).clamp(0.0, 1.0);
             self.bars.push(ColoredRect {
@@ -633,7 +810,7 @@ impl Module for LevelMeterModule {
                     },
                     max: bar.max,
                 },
-                color: meter_color(normalized),
+                color: meter_color(frame.palette, normalized),
             });
             let peak = ((self.peak_holds[channel].value_dbfs + 60.0) / 63.0).clamp(0.0, 1.0);
             let peak_y = bar.max.y - bar.height() * peak;
@@ -648,7 +825,7 @@ impl Module for LevelMeterModule {
                         y: peak_y + 2.0,
                     },
                 },
-                color: Color::rgb(245, 245, 245),
+                color: frame.palette.color(ColorRole::Text),
             });
         }
         frame.renderer.fill_rects(frame.rect, &self.bars);
@@ -680,6 +857,7 @@ impl ModuleFactory for EmptyFactory {
         &self,
         _services: &ModuleServices,
         _registry: &Registry,
+        _data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         Ok(Box::new(EmptyModule))
     }
@@ -699,24 +877,13 @@ fn animate() -> ModuleResponse {
     }
 }
 
-fn amplitude_color(amplitude: f32) -> Color {
-    let amplitude = amplitude.clamp(0.0, 1.0);
-    if amplitude < 0.45 {
-        Color::rgb(80, 180, 240)
-    } else if amplitude < 0.8 {
-        Color::rgb(165, 90, 245)
-    } else {
-        Color::rgb(255, 70, 120)
-    }
-}
-
-fn meter_color(normalized: f32) -> Color {
+fn meter_color(palette: &crate::theme::Palette, normalized: f32) -> crate::render::Color {
     if normalized < 0.7 {
-        Color::rgb(80, 180, 240)
+        palette.color(ColorRole::Low)
     } else if normalized < 0.85 {
-        Color::rgb(80, 205, 105)
+        palette.color(ColorRole::Mid)
     } else {
-        Color::rgb(235, 80, 55)
+        palette.color(ColorRole::High)
     }
 }
 
@@ -769,7 +936,10 @@ mod tests {
         };
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
-        let mut module = OscilloscopeFactory.create(&services, &registry).unwrap();
+        let mut module = OscilloscopeFactory
+            .create(&services, &registry, None)
+            .unwrap();
+        let palette = crate::theme::Palette::default();
         module
             .set_style(PERSISTENCE_OSCILLOSCOPE_STYLE_ID, &registry)
             .unwrap();
@@ -790,6 +960,7 @@ mod tests {
                 pointer: None,
                 scroll_delta_y: 0.0,
                 zoom_delta: 1.0,
+                palette: &palette,
                 renderer: &mut target,
             });
             if target.polylines == 2 {
@@ -810,6 +981,7 @@ mod tests {
             pointer: None,
             scroll_delta_y: 0.0,
             zoom_delta: 1.0,
+            palette: &palette,
             renderer: &mut target,
         });
         assert_eq!(target.polylines, 2, "reselecting cleared a live trace");

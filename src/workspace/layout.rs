@@ -231,6 +231,15 @@ impl Layout {
         }
     }
 
+    /// A layout with the given tree (restored from a saved workspace).
+    pub(crate) fn from_root(root: Option<Node>) -> Self {
+        Self { root }
+    }
+
+    pub(crate) fn root(&self) -> Option<&Node> {
+        self.root.as_ref()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.root.is_none()
     }

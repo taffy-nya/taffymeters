@@ -142,6 +142,9 @@ impl Trace {
             "nodes": metrics.nodes,
             "control_error": observation.control_error,
             "source": format!("{:?}", observation.source_status.state),
+            "workspace": observation.name,
+            "theme": observation.theme.preset,
+            "notices": observation.notices,
         });
         let text = body.to_string();
         if text != self.last_state {

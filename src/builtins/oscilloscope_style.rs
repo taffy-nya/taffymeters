@@ -5,8 +5,9 @@ use crate::{
     dataflow::ChannelSelection,
     extensions::{Registry, RegistryError},
     module::ModuleResponse,
-    render::{Color, Point, Rect, RenderTarget, Stroke},
+    render::{Point, Rect, RenderTarget, Stroke},
     snapshot::Frame,
+    theme::{ColorRole, Palette},
 };
 
 pub const LINE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.line";
@@ -20,6 +21,7 @@ pub struct OscilloscopeStyleContext<'a> {
     pub rect: Rect,
     pub y_scale: f32,
     pub monotonic_time: Duration,
+    pub palette: &'a Palette,
 }
 
 pub trait OscilloscopeStyle: Send {
@@ -76,7 +78,7 @@ impl OscilloscopeStyle for LineOscilloscopeStyle {
             &self.points,
             Stroke {
                 width: 1.4,
-                color: Color::rgb(100, 220, 255),
+                color: context.palette.color(ColorRole::Primary),
             },
         );
         // Redrawn when new PCM is published; nothing changes with display time.
@@ -142,18 +144,20 @@ impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
                 self.scratch = oldest.points;
             }
         }
+        let trace_color = context.palette.color(ColorRole::Primary);
         for trace in &self.traces {
             let age = context
                 .monotonic_time
                 .saturating_sub(trace.captured_at)
                 .as_secs_f32();
-            let alpha = ((1.0 - age / LIFETIME.as_secs_f32()).clamp(0.0, 1.0) * 190.0) as u8;
+            let fade = (1.0 - age / LIFETIME.as_secs_f32()).clamp(0.0, 1.0);
+            let alpha = (fade * 190.0 * f32::from(trace_color.alpha) / 255.0) as u8;
             renderer.polyline(
                 context.rect,
                 &trace.points,
                 Stroke {
                     width: 1.3,
-                    color: Color::rgba(100, 230, 255, alpha),
+                    color: trace_color.with_alpha(alpha),
                 },
             );
         }
@@ -261,6 +265,7 @@ mod tests {
         descriptor: &'a AudioDescriptor,
         frame: &'a Frame,
         time: Duration,
+        palette: &'a Palette,
     ) -> OscilloscopeStyleContext<'a> {
         OscilloscopeStyleContext {
             descriptor,
@@ -272,6 +277,7 @@ mod tests {
             },
             y_scale: 1.0,
             monotonic_time: time,
+            palette,
         }
     }
 
@@ -279,16 +285,17 @@ mod tests {
     fn persistence_instances_keep_and_clear_visual_state_independently() {
         let descriptor = descriptor();
         let snapshot = chunk(1);
+        let palette = Palette::default();
         let mut first = PersistenceOscilloscopeStyleFactory.create();
         let mut second = PersistenceOscilloscopeStyleFactory.create();
         let mut first_target = RecordingTarget::default();
         let mut second_target = RecordingTarget::default();
         first.draw(
-            context(&descriptor, &snapshot, Duration::ZERO),
+            context(&descriptor, &snapshot, Duration::ZERO, &palette),
             &mut first_target,
         );
         second.draw(
-            context(&descriptor, &snapshot, Duration::ZERO),
+            context(&descriptor, &snapshot, Duration::ZERO, &palette),
             &mut second_target,
         );
 
@@ -296,11 +303,11 @@ mod tests {
         first_target.polylines = 0;
         second_target.polylines = 0;
         first.draw(
-            context(&descriptor, &snapshot, Duration::from_millis(100)),
+            context(&descriptor, &snapshot, Duration::from_millis(100), &palette),
             &mut first_target,
         );
         second.draw(
-            context(&descriptor, &snapshot, Duration::from_millis(100)),
+            context(&descriptor, &snapshot, Duration::from_millis(100), &palette),
             &mut second_target,
         );
 

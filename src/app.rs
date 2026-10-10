@@ -153,6 +153,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         let mut workspace = lock(&self.workspace);
+        workspace.autosave();
         workspace.set_publication_waker(None);
         workspace.shutdown();
     }

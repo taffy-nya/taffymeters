@@ -1178,3 +1178,41 @@ fn steady_state_worker_does_not_allocate_while_readers_keep_up() {
     let after = dataflow.handle.worker_sample().allocations;
     assert_eq!(after - before, 0, "steady-state allocations on the worker");
 }
+
+#[test]
+fn saved_spec_round_trips_and_malformed_graphs_are_rejected_before_use() {
+    let mut spec = DataSpec::new();
+    let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::Discrete(3)));
+    let fft = spec.add(
+        channel,
+        NodeSpec::Fft(FftConfig::new(4096, 1024, -150.0).unwrap()),
+    );
+    let peak = spec.add(fft, NodeSpec::Peak(PeakConfig::new(250.0, 30.0).unwrap()));
+    spec.add(SOURCE, NodeSpec::Levels);
+    spec.output(fft, Keep::Seconds(2.5));
+    let bound = spec.output(peak, Keep::Latest);
+    spec.output(SOURCE, Keep::Latest);
+    spec.bind(bound, Some(SharedAnalysisId(7)));
+    let text = serde_json::to_string(&spec).unwrap();
+    assert_eq!(serde_json::from_str::<DataSpec>(&text).unwrap(), spec);
+
+    // A node reading a later node, or an output naming a missing node, would make
+    // the graph walk out of bounds: refused when reading the file.
+    for broken in [
+        r#"{"nodes":[{"input":1,"kind":"levels"},{"input":null,"kind":"levels"}],"outputs":[]}"#,
+        r#"{"nodes":[{"input":null,"kind":"levels"}],"outputs":[{"node":4,"keep":"latest"}]}"#,
+        r#"{"nodes":[{"input":0,"kind":"levels"}],"outputs":[]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<DataSpec>(broken).is_err(),
+            "{broken}"
+        );
+    }
+    // Structurally sound but wrong for the source: rejected by subscribe.
+    let (_capture, dataflow, _) = fixture(2, 4, 512);
+    let saved: DataSpec = serde_json::from_str(&text).unwrap();
+    assert!(matches!(
+        dataflow.handle.subscribe(saved),
+        Err(ControlError::InvalidSpec(SpecError::InvalidChannel(_)))
+    ));
+}

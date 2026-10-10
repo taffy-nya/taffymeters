@@ -5,6 +5,8 @@
 
 mod desktop;
 mod layout;
+mod panel;
+mod persist;
 mod window;
 
 use std::{
@@ -18,9 +20,15 @@ use crate::{
     LiveAudio,
     audio::{SourceState, SourceStatus},
     builtins::{self, SPECTRUM_MODULE_ID},
-    dataflow::ChannelSelection,
+    dataflow::{
+        ChannelSelection, ControlError, Keep, NodeRef, NodeSpec, OutputId, SharedAnalysisId,
+    },
     extensions::{Registry, RegistryError},
     module::{Module, ModuleServices},
+    persistence::{InputConfig, ModuleFile, PersistError, WorkspaceStore},
+    render::Color,
+    settings::SettingValue,
+    theme::{ColorRole, Palette, Preset, RoleOverrides, ThemeSettings},
 };
 
 pub(crate) use desktop::{DesktopProbe, NativeDesktop};
@@ -28,6 +36,9 @@ pub(crate) use desktop::{DesktopProbe, NativeDesktop};
 pub(crate) use layout::Axis;
 use layout::{Layout, LayoutError, fits};
 pub(crate) use layout::{Side, SplitId};
+use panel::Panel;
+#[cfg(feature = "automation")]
+pub(crate) use panel::{PanelControl, SWATCHES};
 use window::WindowUiState;
 #[cfg(feature = "automation")]
 pub(crate) use window::{ControlKey, ControlTarget, MenuItem, ResizeEdge};
@@ -64,6 +75,17 @@ pub(crate) enum MoveTarget {
         side: Side,
     },
     EmptyWindow(WindowId),
+}
+
+/// Whose colors a theme edit changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ColorScope {
+    /// The workspace's global roles.
+    Global,
+    /// The style of every instance of a Module type.
+    Type(&'static str),
+    /// One instance's explicit overrides.
+    Instance(ModuleInstanceId),
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +164,66 @@ pub(crate) enum WorkspaceAction {
     LeaveGroup {
         window_id: WindowId,
     },
+    /// Copy configuration, analysis spec and bindings into a new instance on the
+    /// right; the copy gets fresh private state.
+    DuplicateModule {
+        instance_id: ModuleInstanceId,
+    },
+    /// Set the parameters of one node of the instance's analysis. Nodes in the
+    /// shared group of an explicit binding change for every member.
+    EditNode {
+        instance_id: ModuleInstanceId,
+        node: NodeRef,
+        spec: NodeSpec,
+    },
+    /// History length of one output.
+    SetKeep {
+        instance_id: ModuleInstanceId,
+        output: OutputId,
+        seconds: f32,
+    },
+    /// Start an explicit binding for an output (and its stateful ancestors).
+    ShareOutput {
+        instance_id: ModuleInstanceId,
+        output: OutputId,
+    },
+    /// Leave the binding: this instance continues with private state.
+    UnshareOutput {
+        instance_id: ModuleInstanceId,
+        output: OutputId,
+    },
+    SetViewSetting {
+        instance_id: ModuleInstanceId,
+        key: &'static str,
+        value: SettingValue,
+    },
+    /// Set (`Some`) or remove (`None`) an explicit color.
+    SetColor {
+        scope: ColorScope,
+        role: ColorRole,
+        color: Option<Color>,
+    },
+    SetThemePreset {
+        preset: Preset,
+    },
+    SetTextSize {
+        size: f32,
+    },
+    SaveWorkspace,
+    SaveWorkspaceAs {
+        name: String,
+    },
+    /// Save the current workspace, then replace it with the saved one.
+    SwitchWorkspace {
+        name: String,
+    },
+    /// Save the current workspace, then start a new default one.
+    NewWorkspace {
+        name: String,
+    },
+    ClearNotices,
+    /// Save the workspace and close every window (the application exits).
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,7 +243,17 @@ pub(crate) enum WorkspaceError {
     Layout(LayoutError),
     Registry(RegistryError),
     Module(crate::module::ModuleError),
+    Control(ControlError),
     LiveAudio(crate::live::LiveAudioError),
+    Persist(PersistError),
+    /// The workspace has no directory to save to.
+    NoStore,
+    /// Its file could not be read; saving would overwrite it.
+    Protected(String),
+    WorkspaceExists(String),
+    NoSuchWorkspace(String),
+    /// A copy could not take over every setting of the original.
+    CopyIncomplete(String),
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -175,7 +267,17 @@ impl std::fmt::Display for WorkspaceError {
             Self::Layout(error) => std::fmt::Display::fmt(error, f),
             Self::Registry(error) => std::fmt::Display::fmt(error, f),
             Self::Module(error) => std::fmt::Display::fmt(error, f),
+            Self::Control(error) => std::fmt::Display::fmt(error, f),
             Self::LiveAudio(error) => std::fmt::Display::fmt(error, f),
+            Self::Persist(error) => std::fmt::Display::fmt(error, f),
+            Self::NoStore => f.write_str("this workspace has no save location"),
+            Self::Protected(name) => write!(
+                f,
+                "workspace {name:?} could not be read; save it under another name"
+            ),
+            Self::WorkspaceExists(name) => write!(f, "workspace {name:?} already exists"),
+            Self::NoSuchWorkspace(name) => write!(f, "workspace {name:?} is not saved"),
+            Self::CopyIncomplete(reason) => write!(f, "could not copy the module: {reason}"),
         }
     }
 }
@@ -200,12 +302,33 @@ impl From<LayoutError> for WorkspaceError {
     }
 }
 
+impl From<ControlError> for WorkspaceError {
+    fn from(error: ControlError) -> Self {
+        Self::Control(error)
+    }
+}
+
+impl From<PersistError> for WorkspaceError {
+    fn from(error: PersistError) -> Self {
+        Self::Persist(error)
+    }
+}
+
 struct ModuleEntry {
     type_id: &'static str,
     label: &'static str,
     module: Box<dyn Module>,
     /// Visibility last reported to the instance (new instances start visible).
     visible: bool,
+    /// The instance's explicit colors; everything else follows the theme.
+    colors: RoleOverrides,
+    /// Resolved colors handed to the Module when it draws.
+    palette: Palette,
+    /// Saved configuration of an instance this build could not restore; written
+    /// back unchanged.
+    preserved: Option<ModuleFile>,
+    /// Saved style this build does not provide; kept until the user picks one.
+    preserved_style: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -248,6 +371,10 @@ pub(crate) struct WindowState {
     ui: WindowUiState,
     /// The native window is minimized: its instances are not drawn.
     minimized: bool,
+    /// Saved desktop position (physical pixels) to verify once the window shows:
+    /// the builder converts logical points with a scale that may differ.
+    restore_target: Option<Pos2>,
+    initial_maximized: bool,
 }
 
 impl WindowState {
@@ -269,6 +396,8 @@ impl WindowState {
             commands: Vec::new(),
             ui: WindowUiState::default(),
             minimized: false,
+            restore_target: None,
+            initial_maximized: false,
         }
     }
 
@@ -283,6 +412,9 @@ impl WindowState {
         }
         if self.initial_always_on_top {
             builder = builder.with_always_on_top();
+        }
+        if self.initial_maximized {
+            builder = builder.with_maximized(true);
         }
         builder
     }
@@ -303,6 +435,13 @@ pub(crate) struct ObservedModule {
     pub(crate) window_id: Option<WindowId>,
     pub(crate) channel: Option<ChannelSelection>,
     pub(crate) active_style: Option<&'static str>,
+    /// The applied analysis spec.
+    pub(crate) data: Option<crate::dataflow::DataSpec>,
+    pub(crate) view: Vec<(&'static str, SettingValue)>,
+    pub(crate) colors: RoleOverrides,
+    pub(crate) palette: Palette,
+    /// Saved type of an instance that could not be restored.
+    pub(crate) missing: Option<String>,
     /// Address of the Module object; unchanged while the same object is kept.
     pub(crate) object: usize,
 }
@@ -341,6 +480,9 @@ pub(crate) struct WorkspaceObservation {
     pub(crate) source_status: SourceStatus,
     pub(crate) control_error: Option<String>,
     pub(crate) modules_created: u64,
+    pub(crate) name: String,
+    pub(crate) notices: Vec<String>,
+    pub(crate) theme: ThemeSettings,
 }
 
 #[cfg(any(test, feature = "automation"))]
@@ -368,40 +510,78 @@ pub struct Workspace {
     control_error: Option<String>,
     /// Shared repaint clock of animating windows (real time).
     frame_clock: Option<std::time::Instant>,
+    /// Name under which the workspace saves.
+    name: String,
+    store: Option<WorkspaceStore>,
+    /// The file under `name` could not be read; saving must not replace it.
+    protected: bool,
+    theme: ThemeSettings,
+    /// Colors of the window chrome (global roles).
+    chrome: Palette,
+    input: InputConfig,
+    /// Restore and save problems shown to the user until cleared.
+    notices: Vec<String>,
+    /// File number of each binding of this workspace (restored or saved).
+    binding_numbers: HashMap<SharedAnalysisId, u64>,
+    /// Panel a menu asked to show (menus only borrow the Workspace).
+    panel_request: std::cell::RefCell<Option<(WindowId, Panel)>>,
     /// Declared last: the source and worker stop only after every Module dropped.
     live: Option<LiveAudio>,
 }
 
 impl Workspace {
-    /// A workspace with one window holding one default Spectrum.
-    pub fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
+    fn empty(live: LiveAudio) -> Result<Self, WorkspaceError> {
         let mut registry = Registry::default();
         builtins::register(&mut registry)?;
         let services = ModuleServices {
             source: live.reader(),
             dataflow: live.dataflow_handle(),
         };
-        let mut workspace = Self {
+        let theme = ThemeSettings::dark();
+        Ok(Self {
             modules: HashMap::new(),
             windows: BTreeMap::new(),
             registry,
             services,
             move_source: None,
             next_instance_id: 1,
-            next_window_id: FIRST_WINDOW.0 + 1,
+            next_window_id: FIRST_WINDOW.0,
             next_split_id: 1,
             next_group_id: 1,
             modules_created: 0,
             control_error: None,
             frame_clock: None,
+            name: crate::persistence::DEFAULT_WORKSPACE.to_owned(),
+            store: None,
+            protected: false,
+            chrome: theme.global_palette(),
+            theme,
+            input: InputConfig::default(),
+            notices: Vec::new(),
+            binding_numbers: HashMap::new(),
+            panel_request: std::cell::RefCell::new(None),
             live: Some(live),
-        };
-        let first = workspace.create_module(SPECTRUM_MODULE_ID)?;
+        })
+    }
+
+    /// A workspace with one window holding one default Spectrum, not saved
+    /// (automation and tests; the product opens its saved workspace).
+    #[cfg(any(test, feature = "automation"))]
+    pub fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
+        let mut workspace = Self::empty(live)?;
+        workspace.add_default_window(always_on_top)?;
+        Ok(workspace)
+    }
+
+    /// One window with one default Spectrum.
+    fn add_default_window(&mut self, always_on_top: bool) -> Result<WindowId, WorkspaceError> {
+        let first = self.create_module(SPECTRUM_MODULE_ID)?;
         let mut window =
             WindowState::new(Layout::with_leaf(first), INITIAL_WINDOW_SIZE, always_on_top);
         window.active = Some(first);
-        workspace.windows.insert(FIRST_WINDOW, window);
-        Ok(workspace)
+        let id = WindowId(Self::allocate(&mut self.next_window_id)?);
+        self.windows.insert(id, window);
+        Ok(id)
     }
 
     /// Drop every Module before stopping capture and the worker.
@@ -465,22 +645,41 @@ impl Workspace {
         Ok(id)
     }
 
-    /// Create through the factory; the ID is consumed only on success.
-    fn create_module(&mut self, type_id: &'static str) -> Result<ModuleInstanceId, WorkspaceError> {
+    /// Create a default instance through the factory.
+    fn create_module(&mut self, type_id: &str) -> Result<ModuleInstanceId, WorkspaceError> {
+        self.create_instance(type_id, None)
+    }
+
+    /// Create through the factory, with the saved analysis `data` when given; the
+    /// ID is consumed only on success.
+    fn create_instance(
+        &mut self,
+        type_id: &str,
+        data: Option<&crate::dataflow::DataSpec>,
+    ) -> Result<ModuleInstanceId, WorkspaceError> {
         let next = self
             .next_instance_id
             .checked_add(1)
             .ok_or(WorkspaceError::IdExhausted)?;
-        let label = self
+        let (type_id, label) = self
             .registry
-            .module_types()
-            .into_iter()
-            .find(|(id, _)| *id == type_id)
-            .map(|(_, label)| label)
+            .module_type(type_id)
             .ok_or_else(|| RegistryError::UnknownModule(type_id.to_owned()))?;
-        let module = self.registry.create_module(type_id, &self.services)?;
+        let module = self.registry.create_module(type_id, &self.services, data)?;
         let id = ModuleInstanceId(self.next_instance_id);
         self.next_instance_id = next;
+        self.insert_entry(id, type_id, label, module, None);
+        Ok(id)
+    }
+
+    fn insert_entry(
+        &mut self,
+        id: ModuleInstanceId,
+        type_id: &'static str,
+        label: &'static str,
+        module: Box<dyn Module>,
+        preserved: Option<ModuleFile>,
+    ) {
         self.modules_created += 1;
         self.modules.insert(
             id,
@@ -489,9 +688,26 @@ impl Workspace {
                 label,
                 module,
                 visible: true,
+                colors: RoleOverrides::new(),
+                palette: self.theme.resolve(type_id, &RoleOverrides::new()),
+                preserved,
+                preserved_style: None,
             },
         );
-        Ok(id)
+    }
+
+    /// Re-resolve every instance's colors after a theme or override change.
+    fn refresh_palettes(&mut self) {
+        self.chrome = self.theme.global_palette();
+        for entry in self.modules.values_mut() {
+            entry.palette = self.theme.resolve(entry.type_id, &entry.colors);
+        }
+    }
+
+    fn push_notice(&mut self, notice: String) {
+        if !self.notices.contains(&notice) {
+            self.notices.push(notice);
+        }
     }
 
     fn window_of(&self, instance: ModuleInstanceId) -> Option<WindowId> {
@@ -709,6 +925,7 @@ impl Workspace {
                     return Err(RegistryError::UnknownStyle(style_id.to_owned()).into());
                 }
                 entry.module.set_style(style_id, &self.registry)?;
+                entry.preserved_style = None;
                 Ok(ActionOutcome::Applied)
             }
             WorkspaceAction::ClearVisualState { instance_id } => {
@@ -784,6 +1001,11 @@ impl Workspace {
                 target,
             } => self.move_module(instance_id, target),
             WorkspaceAction::CloseWindow { window_id } => {
+                self.window(window_id)?;
+                if self.windows.len() == 1 {
+                    // Closing the last window ends the session: keep its layout.
+                    self.autosave();
+                }
                 self.close_window(window_id)?;
                 Ok(ActionOutcome::Applied)
             }
@@ -827,7 +1049,222 @@ impl Workspace {
                 }
                 Ok(ActionOutcome::Applied)
             }
+            WorkspaceAction::DuplicateModule { instance_id } => self.duplicate(instance_id),
+            WorkspaceAction::EditNode {
+                instance_id,
+                node,
+                spec,
+            } => {
+                let controller = self.controller(instance_id)?;
+                self.services.dataflow.edit_node(&controller, node, spec)?;
+                self.reconcile_views();
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SetKeep {
+                instance_id,
+                output,
+                seconds,
+            } => {
+                let controller = self.controller(instance_id)?;
+                let current =
+                    controller.with_spec(|spec| spec.outputs().get(output.index()).map(|o| o.keep));
+                if !matches!(current, Some(Keep::Seconds(_))) {
+                    return Err(WorkspaceError::Unsupported("history length of this output"));
+                }
+                controller.update(|spec| spec.set_keep(output, Keep::Seconds(seconds)))?;
+                self.reconcile_views();
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::ShareOutput {
+                instance_id,
+                output,
+            } => {
+                let controller = self.controller(instance_id)?;
+                let shareable = controller.with_spec(|spec| {
+                    spec.outputs().get(output.index()).is_some_and(|entry| {
+                        entry.binding.is_none() && spec.depends_on_state(entry.node)
+                    })
+                });
+                if !shareable {
+                    return Err(WorkspaceError::Unsupported("sharing this output"));
+                }
+                let binding = self.services.dataflow.allocate_binding();
+                controller.update(|spec| spec.bind(output, Some(binding)))?;
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::UnshareOutput {
+                instance_id,
+                output,
+            } => {
+                let controller = self.controller(instance_id)?;
+                let bound = controller.with_spec(|spec| {
+                    spec.outputs()
+                        .get(output.index())
+                        .is_some_and(|entry| entry.binding.is_some())
+                });
+                if !bound {
+                    return Err(WorkspaceError::Unsupported("unsharing a private output"));
+                }
+                controller.update(|spec| spec.bind(output, None))?;
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SetViewSetting {
+                instance_id,
+                key,
+                value,
+            } => {
+                self.located(instance_id)?;
+                let entry = self
+                    .modules
+                    .get_mut(&instance_id)
+                    .ok_or(WorkspaceError::StaleInstance(instance_id))?;
+                let setting = entry
+                    .module
+                    .view_settings()
+                    .into_iter()
+                    .find(|setting| setting.key == key)
+                    .ok_or_else(|| crate::module::ModuleError::UnknownSetting(key.to_owned()))?;
+                let value = setting
+                    .accept(&value)
+                    .ok_or_else(|| crate::module::ModuleError::InvalidSetting(key.to_owned()))?;
+                entry.module.set_view_setting(key, &value)?;
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SetColor { scope, role, color } => {
+                let overrides = match scope {
+                    ColorScope::Global => &mut self.theme.colors,
+                    ColorScope::Type(type_id) => {
+                        if self.registry.module_type(type_id).is_none() {
+                            return Err(RegistryError::UnknownModule(type_id.to_owned()).into());
+                        }
+                        self.theme
+                            .type_styles
+                            .entry(type_id.to_owned())
+                            .or_default()
+                    }
+                    ColorScope::Instance(instance_id) => {
+                        self.located(instance_id)?;
+                        &mut self
+                            .modules
+                            .get_mut(&instance_id)
+                            .ok_or(WorkspaceError::StaleInstance(instance_id))?
+                            .colors
+                    }
+                };
+                match color {
+                    Some(color) => {
+                        overrides.insert(role, color);
+                    }
+                    None => {
+                        overrides.remove(&role);
+                    }
+                }
+                self.theme.type_styles.retain(|_, style| !style.is_empty());
+                self.refresh_palettes();
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SetThemePreset { preset } => {
+                self.theme.preset = preset.id().to_owned();
+                self.refresh_palettes();
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SetTextSize { size } => {
+                if !size.is_finite() {
+                    return Err(WorkspaceError::Unsupported("a non-finite text size"));
+                }
+                let (min, max) = crate::theme::TEXT_SIZE_RANGE;
+                self.theme.text_size = Some(size.clamp(min, max));
+                self.refresh_palettes();
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SaveWorkspace => {
+                self.save()?;
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SaveWorkspaceAs { name } => self.save_as(name),
+            WorkspaceAction::SwitchWorkspace { name } => self.switch_to(name),
+            WorkspaceAction::NewWorkspace { name } => self.new_workspace(name),
+            WorkspaceAction::ClearNotices => {
+                self.notices.clear();
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::Quit => {
+                self.autosave();
+                self.windows.clear();
+                self.modules.clear();
+                self.move_source = None;
+                Ok(ActionOutcome::Applied)
+            }
         }
+    }
+
+    /// The analysis controller of a placed instance.
+    fn controller(
+        &self,
+        instance_id: ModuleInstanceId,
+    ) -> Result<crate::dataflow::DataController, WorkspaceError> {
+        self.located(instance_id)?;
+        self.modules[&instance_id]
+            .module
+            .data()
+            .cloned()
+            .ok_or(WorkspaceError::Unsupported("analysis settings"))
+    }
+
+    /// View settings whose range follows the analysis (a visible span bounded by
+    /// the History length) are brought back into range after an analysis edit, so
+    /// the instance, its saved form and its copies agree.
+    fn reconcile_views(&mut self) {
+        for entry in self.modules.values_mut() {
+            for setting in entry.module.view_settings() {
+                if let Some(accepted) = setting.accept(&setting.value)
+                    && accepted != setting.value
+                {
+                    let _ = entry.module.set_view_setting(setting.key, &accepted);
+                }
+            }
+        }
+    }
+
+    /// Copy an instance next to itself: same type, `DataSpec` (with bindings),
+    /// style, view settings and colors; new subscription and fresh private state.
+    fn duplicate(
+        &mut self,
+        instance_id: ModuleInstanceId,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let window_id = self.located(instance_id)?;
+        if self.modules[&instance_id].preserved.is_some() {
+            return Err(WorkspaceError::Unsupported(
+                "copying a module that is not installed",
+            ));
+        }
+        if !self.can_split(instance_id, Side::Right) {
+            return Err(WorkspaceError::InsufficientSpace("copy this module"));
+        }
+        let config = persist::ModuleConfig::of(&self.modules[&instance_id]);
+        let split_id = SplitId(self.next_split_id);
+        let next_split = self
+            .next_split_id
+            .checked_add(1)
+            .ok_or(WorkspaceError::IdExhausted)?;
+        let new = self.create_instance(config.type_id, config.data.as_ref())?;
+        // A copy that lost settings is not a copy: nothing is committed. A style this
+        // build lacks stays the kept, unavailable style of the original.
+        if let Err(reason) = self.apply_config(new, &config) {
+            self.modules.remove(&new);
+            return Err(WorkspaceError::CopyIncomplete(reason));
+        }
+        let window = self.window_mut(window_id)?;
+        if let Err(error) = window
+            .layout
+            .insert_beside(instance_id, Side::Right, new, split_id)
+        {
+            self.modules.remove(&new);
+            return Err(error.into());
+        }
+        window.active = Some(new);
+        self.next_split_id = next_split;
+        Ok(ActionOutcome::Created(new))
     }
 
     fn detach(&mut self, instance_id: ModuleInstanceId) -> Result<ActionOutcome, WorkspaceError> {
@@ -1093,6 +1530,23 @@ impl Workspace {
         );
         let previous = window.desktop.outer.replace(outer);
         let Some(previous) = previous else {
+            // First placement: land on the saved desktop position, or bring a window
+            // that opened off every monitor back where it can be used. The OS owns
+            // the placement of maximized and minimized windows; during a drag the
+            // correction waits for the release (handled below on later passes).
+            if maximized || minimized {
+                window.restore_target = None;
+            }
+            let target = (!maximized && !minimized && !probe.primary_button_down())
+                .then(|| Self::placement_target(window, outer, pixels_per_point, probe))
+                .flatten();
+            if let Some(target) = target {
+                window.desktop.expected = Some(target);
+                window
+                    .commands
+                    .push(ViewportCommand::OuterPosition(target / pixels_per_point));
+                followers_to_wake.push(window_id);
+            }
             return followers_to_wake;
         };
         let delta = outer.min - previous.min;
@@ -1172,7 +1626,50 @@ impl Workspace {
                 followers_to_wake.push(*id);
             }
         }
+        // A restore correction that waited for a release, then a window left
+        // without a usable area on any monitor (its display was disconnected, or it
+        // was restored there): it comes back into the nearest one.
+        let window = self.windows.get_mut(&window_id).expect("checked above");
+        if user_delta.is_some() {
+            // The user placed the window; the saved position no longer applies.
+            window.restore_target = None;
+        }
+        if !button_down
+            && !maximized
+            && !minimized
+            && !window.desktop.moving
+            && window.desktop.expected.is_none()
+            && let Some(target) = Self::placement_target(window, outer, pixels_per_point, probe)
+        {
+            window.desktop.expected = Some(target);
+            window
+                .commands
+                .push(ViewportCommand::OuterPosition(target / pixels_per_point));
+            followers_to_wake.push(window_id);
+        }
         followers_to_wake
+    }
+
+    /// Where `outer` (physical pixels) must go to show enough of itself on the
+    /// nearest monitor, if it does not already.
+    fn rescue_target(outer: Rect, pixels_per_point: f32, probe: &dyn DesktopProbe) -> Option<Pos2> {
+        let work = probe.work_area(outer.center())?;
+        desktop::reachable_position(outer, work, desktop::MIN_VISIBLE_POINTS * pixels_per_point)
+    }
+
+    /// The saved position still to land on (once), otherwise a position that makes
+    /// the window reachable again.
+    fn placement_target(
+        window: &mut WindowState,
+        outer: Rect,
+        pixels_per_point: f32,
+        probe: &dyn DesktopProbe,
+    ) -> Option<Pos2> {
+        window
+            .restore_target
+            .take()
+            .filter(|target| (*target - outer.min).length() > desktop::TOUCH_TOLERANCE_PX)
+            .or_else(|| Self::rescue_target(outer, pixels_per_point, probe))
     }
 
     #[cfg(any(test, feature = "automation"))]
@@ -1186,6 +1683,16 @@ impl Workspace {
                 window_id: self.window_of(*id),
                 channel: entry.module.channel(),
                 active_style: entry.module.active_style(),
+                data: entry.module.data().map(|controller| controller.spec()),
+                view: entry
+                    .module
+                    .view_settings()
+                    .into_iter()
+                    .map(|setting| (setting.key, setting.value))
+                    .collect(),
+                colors: entry.colors.clone(),
+                palette: entry.palette,
+                missing: entry.preserved.as_ref().map(|file| file.type_id.clone()),
                 object: std::ptr::from_ref::<dyn Module>(entry.module.as_ref()).cast::<u8>()
                     as usize,
             })
@@ -1232,6 +1739,9 @@ impl Workspace {
             source_status: self.services.source.source_status(),
             control_error: self.control_error.clone(),
             modules_created: self.modules_created,
+            name: self.name.clone(),
+            notices: self.notices.clone(),
+            theme: self.theme.clone(),
         }
     }
 

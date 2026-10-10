@@ -86,6 +86,59 @@ impl Color {
     }
 }
 
+impl Color {
+    /// `self` moved toward `other` by `t` in [0, 1], per channel.
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t) as u8;
+        Self {
+            red: mix(self.red, other.red),
+            green: mix(self.green, other.green),
+            blue: mix(self.blue, other.blue),
+            alpha: mix(self.alpha, other.alpha),
+        }
+    }
+
+    /// `#rrggbb`, or `#rrggbbaa` when not opaque.
+    pub fn to_hex(self) -> String {
+        if self.alpha == 255 {
+            format!("#{:02x}{:02x}{:02x}", self.red, self.green, self.blue)
+        } else {
+            format!(
+                "#{:02x}{:02x}{:02x}{:02x}",
+                self.red, self.green, self.blue, self.alpha
+            )
+        }
+    }
+
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix('#')?;
+        if !digits.is_ascii() || !matches!(digits.len(), 6 | 8) {
+            return None;
+        }
+        let channel = |index: usize| u8::from_str_radix(&digits[index..index + 2], 16).ok();
+        Some(Self {
+            red: channel(0)?,
+            green: channel(2)?,
+            blue: channel(4)?,
+            alpha: if digits.len() == 8 { channel(6)? } else { 255 },
+        })
+    }
+}
+
+impl serde::Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Color {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::from_hex(&text)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid color {text:?}")))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stroke {
     pub width: f32,

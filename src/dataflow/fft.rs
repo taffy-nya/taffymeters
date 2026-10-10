@@ -7,7 +7,7 @@ pub enum WindowFunction {
     PeriodicHann,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FftConfig {
     pub window_size: usize,
     pub hop_size: usize,

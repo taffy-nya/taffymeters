@@ -3,17 +3,19 @@ use std::fmt::Write;
 use crate::{
     audio::SourceReader,
     dataflow::{
-        ChannelSelection, DataController, DataSpec, DataSubscription, FftConfig, Keep, NodeRef,
-        NodeSpec, OutputId, PeakConfig, SOURCE,
+        ChannelSelection, DataController, DataSpec, DataSubscription, DataflowHandle, FftConfig,
+        Keep, NodeRef, NodeSpec, OutputId, PeakConfig, SOURCE,
     },
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption,
+        StyleOption, number_setting, spec_from_saved,
     },
     plotting::SpectrumCoordinates,
-    render::{Color, Point, Rect, TextStyle},
+    render::{Point, Rect, TextStyle},
+    settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, Snapshot},
+    theme::ColorRole,
 };
 
 use super::spectrum_style::{
@@ -81,6 +83,19 @@ fn spectrum_data() -> SpectrumData {
     }
 }
 
+const COLOR_ROLES: &[ColorRole] = &[
+    ColorRole::Primary,
+    ColorRole::Secondary,
+    ColorRole::Low,
+    ColorRole::Mid,
+    ColorRole::High,
+    ColorRole::Text,
+];
+
+/// Highest frequency shown, and the shown dB range below 0 dBFS.
+const MAX_FREQUENCY_RANGE: (f32, f32) = (1_000.0, 96_000.0);
+const DB_RANGE: (f32, f32) = (24.0, 180.0);
+
 struct SpectrumModuleFactory;
 
 impl SpectrumModuleFactory {
@@ -88,14 +103,17 @@ impl SpectrumModuleFactory {
         &self,
         services: &ModuleServices,
         registry: &Registry,
+        saved: Option<&DataSpec>,
     ) -> Result<SpectrumModule, RegistryError> {
         let data = spectrum_data();
+        let spec = spec_from_saved(data.spec, saved)?;
         let subscription = services
             .dataflow
-            .subscribe(data.spec)
+            .subscribe(spec)
             .map_err(ModuleError::from)?;
         Ok(SpectrumModule {
             source: services.source.clone(),
+            dataflow: services.dataflow.clone(),
             controller: subscription.controller(),
             reader: subscription.reader(),
             _subscription: subscription,
@@ -129,13 +147,15 @@ impl ModuleFactory for SpectrumModuleFactory {
         &self,
         services: &ModuleServices,
         registry: &Registry,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        Ok(Box::new(self.create_instance(services, registry)?))
+        Ok(Box::new(self.create_instance(services, registry, data)?))
     }
 }
 
 struct SpectrumModule {
     source: SourceReader,
+    dataflow: DataflowHandle,
     controller: DataController,
     reader: DataReader,
     _subscription: DataSubscription,
@@ -163,7 +183,8 @@ impl SpectrumModule {
             }
             if frame.scroll_delta_y.abs() > 0.01 {
                 let span = coordinates.max_dbfs - coordinates.min_dbfs;
-                let next_span = (span * (-frame.scroll_delta_y * 0.002).exp()).clamp(24.0, 180.0);
+                let next_span =
+                    (span * (-frame.scroll_delta_y * 0.002).exp()).clamp(DB_RANGE.0, DB_RANGE.1);
                 coordinates.min_dbfs = coordinates.max_dbfs - next_span;
             }
         }
@@ -200,8 +221,8 @@ impl SpectrumModule {
             },
             hover_line,
             TextStyle {
-                size: 11.0,
-                color: Color::rgb(235, 240, 245),
+                size: frame.palette.text_size,
+                color: frame.palette.color(ColorRole::Text),
             },
         );
     }
@@ -218,14 +239,78 @@ impl Module for SpectrumModule {
 
     fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
         channel.resolve(self.source.descriptor())?;
-        let node = self.channel_node;
-        self.controller
-            .update(|spec| spec.set_node(node, NodeSpec::Channel(channel)))?;
+        self.dataflow.edit_node(
+            &self.controller,
+            self.channel_node,
+            NodeSpec::Channel(channel),
+        )?;
         Ok(())
     }
 
     fn set_visible(&mut self, visible: bool) {
         let _ = self.controller.set_visible(visible);
+    }
+
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn output_label(&self, output: OutputId) -> Option<&'static str> {
+        if output == self.main {
+            Some("Curve")
+        } else if output == self.peak {
+            Some("Peak curve")
+        } else {
+            None
+        }
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
+    }
+
+    fn view_settings(&self) -> Vec<ViewSetting> {
+        vec![
+            ViewSetting {
+                key: "max_frequency_hz",
+                label: "Max frequency",
+                section: "Display",
+                kind: SettingKind::Number {
+                    min: MAX_FREQUENCY_RANGE.0,
+                    max: MAX_FREQUENCY_RANGE.1,
+                    unit: "Hz",
+                    logarithmic: true,
+                },
+                value: SettingValue::Number(self.coordinates.max_frequency_hz),
+            },
+            ViewSetting {
+                key: "range_db",
+                label: "Range",
+                section: "Display",
+                kind: SettingKind::Number {
+                    min: DB_RANGE.0,
+                    max: DB_RANGE.1,
+                    unit: "dB",
+                    logarithmic: false,
+                },
+                value: SettingValue::Number(self.coordinates.max_dbfs - self.coordinates.min_dbfs),
+            },
+        ]
+    }
+
+    fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        match key {
+            "max_frequency_hz" => {
+                self.coordinates.max_frequency_hz =
+                    number_setting(key, value, MAX_FREQUENCY_RANGE)?;
+            }
+            "range_db" => {
+                self.coordinates.min_dbfs =
+                    self.coordinates.max_dbfs - number_setting(key, value, DB_RANGE)?;
+            }
+            _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
+        }
+        Ok(())
     }
 
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
@@ -258,6 +343,7 @@ impl Module for SpectrumModule {
                 coordinates: &self.coordinates,
                 rect: plot,
                 monotonic_time: frame.monotonic_time,
+                palette: frame.palette,
             },
             frame.renderer,
         );
@@ -427,6 +513,7 @@ mod tests {
                 max: Point { x: 800.0, y: 400.0 },
             },
             monotonic_time: Duration::ZERO,
+            palette: &crate::theme::Palette::default(),
         };
         let mut target = RecordingTarget::default();
         let mut registry = Registry::default();
@@ -446,10 +533,10 @@ mod tests {
         register(&mut registry).unwrap();
         let factory = SpectrumModuleFactory;
         let first = factory
-            .create_instance(&fixture.services, &registry)
+            .create_instance(&fixture.services, &registry, None)
             .unwrap();
         let mut second = factory
-            .create_instance(&fixture.services, &registry)
+            .create_instance(&fixture.services, &registry, None)
             .unwrap();
         wait_for_subscriptions(&fixture.services.dataflow, 2);
 
@@ -507,12 +594,12 @@ mod tests {
         let factory = SpectrumModuleFactory;
         let first = Box::new(
             factory
-                .create_instance(&fixture.services, &registry)
+                .create_instance(&fixture.services, &registry, None)
                 .unwrap(),
         );
         let second = Box::new(
             factory
-                .create_instance(&fixture.services, &registry)
+                .create_instance(&fixture.services, &registry, None)
                 .unwrap(),
         );
         let samples: Vec<f32> = (0..4_096)
@@ -577,6 +664,7 @@ mod tests {
                     pointer: None,
                     scroll_delta_y: 0.0,
                     zoom_delta: 1.0,
+                    palette: &crate::theme::Palette::default(),
                     renderer: &mut target,
                 });
             }
@@ -599,7 +687,8 @@ mod tests {
         let registry = Registry::default();
 
         let error =
-            match ModuleFactory::create(&SpectrumModuleFactory, &fixture.services, &registry) {
+            match ModuleFactory::create(&SpectrumModuleFactory, &fixture.services, &registry, None)
+            {
                 Ok(_) => panic!("a Spectrum module requires its registered visual style"),
                 Err(error) => error,
             };

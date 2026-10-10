@@ -6,15 +6,19 @@
 
 use std::{error::Error, fmt};
 
+use serde::{Deserialize, Serialize};
+
 use crate::audio::AudioDescriptor;
 
 use super::{ChannelError, ChannelSelection, FftConfig};
 
-/// Explicit sharing of one output and the stateful nodes it depends on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Explicit sharing of one output and the stateful nodes it depends on. A logical
+/// value: persistence renumbers it per file, it is never a runtime handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SharedAnalysisId(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SmoothConfig {
     pub attack_ms: f32,
     pub release_ms: f32,
@@ -44,7 +48,7 @@ impl SmoothConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PeakConfig {
     pub hold_ms: f32,
     pub decay_db_per_second: f32,
@@ -75,7 +79,8 @@ impl PeakConfig {
 }
 
 /// One processing step and its parameters.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum NodeSpec {
     /// Source PCM → one channel (Left/Right by layout, a discrete index, or the
     /// average of all channels).
@@ -182,7 +187,8 @@ impl NodeRef {
 }
 
 /// How much of an output a reader keeps available.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Keep {
     /// Only the most recent result.
     Latest,
@@ -215,10 +221,96 @@ pub(crate) struct SpecNode {
     pub(crate) spec: NodeSpec,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(into = "SpecFile", try_from = "SpecFile")]
 pub struct DataSpec {
     nodes: Vec<SpecNode>,
     outputs: Vec<OutputSpec>,
+}
+
+/// Saved form of a `DataSpec`: node inputs and output nodes are indices into
+/// `nodes`, `null` meaning the source.
+#[derive(Clone, Serialize, Deserialize)]
+struct SpecFile {
+    nodes: Vec<NodeFile>,
+    outputs: Vec<OutputFile>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NodeFile {
+    input: Option<u32>,
+    #[serde(flatten)]
+    spec: NodeSpec,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct OutputFile {
+    node: Option<u32>,
+    keep: Keep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding: Option<SharedAnalysisId>,
+}
+
+fn file_ref(node: NodeRef) -> Option<u32> {
+    (node != SOURCE).then_some(node.0)
+}
+
+impl From<DataSpec> for SpecFile {
+    fn from(spec: DataSpec) -> Self {
+        Self {
+            nodes: spec
+                .nodes
+                .iter()
+                .map(|node| NodeFile {
+                    input: file_ref(node.input),
+                    spec: node.spec,
+                })
+                .collect(),
+            outputs: spec
+                .outputs
+                .iter()
+                .map(|output| OutputFile {
+                    node: file_ref(output.node),
+                    keep: output.keep,
+                    binding: output.binding,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<SpecFile> for DataSpec {
+    type Error = String;
+
+    /// Only the graph structure is checked here (inputs come before their nodes,
+    /// outputs name existing nodes); parameters are validated on subscribe.
+    fn try_from(file: SpecFile) -> Result<Self, Self::Error> {
+        let mut spec = Self::new();
+        for (index, node) in file.nodes.into_iter().enumerate() {
+            let input = match node.input {
+                None => SOURCE,
+                Some(input) if (input as usize) < index => NodeRef(input),
+                Some(input) => return Err(format!("node {index} reads node {input}")),
+            };
+            spec.nodes.push(SpecNode {
+                input,
+                spec: node.spec,
+            });
+        }
+        for output in file.outputs {
+            let node = match output.node {
+                None => SOURCE,
+                Some(node) if (node as usize) < spec.nodes.len() => NodeRef(node),
+                Some(node) => return Err(format!("an output names missing node {node}")),
+            };
+            spec.outputs.push(OutputSpec {
+                node,
+                keep: output.keep,
+                binding: output.binding,
+            });
+        }
+        Ok(spec)
+    }
 }
 
 impl DataSpec {
@@ -285,6 +377,101 @@ impl DataSpec {
 
     pub(crate) fn spec_nodes(&self) -> &[SpecNode] {
         &self.nodes
+    }
+
+    /// Input of `node` (the source has none).
+    fn input_of(&self, node: NodeRef) -> Option<NodeRef> {
+        node.index()
+            .and_then(|index| self.nodes.get(index))
+            .map(|node| node.input)
+    }
+
+    /// The first binding whose shared group contains `node`, and the distance from
+    /// the bound output's node up to `node`. The shared group of a binding is its
+    /// output node with every ancestor: changing any of them changes the shared
+    /// node.
+    pub fn binding_covering(&self, node: NodeRef) -> Option<(SharedAnalysisId, usize)> {
+        self.bindings_covering(node).next()
+    }
+
+    fn bindings_covering(
+        &self,
+        node: NodeRef,
+    ) -> impl Iterator<Item = (SharedAnalysisId, usize)> + '_ {
+        self.outputs.iter().filter_map(move |output| {
+            let binding = output.binding?;
+            let mut current = Some(output.node);
+            let mut depth = 0;
+            while let Some(at) = current {
+                if at == node {
+                    return Some((binding, depth));
+                }
+                current = self.input_of(at);
+                depth += 1;
+            }
+            None
+        })
+    }
+
+    /// Whether more than one binding covers `node`.
+    pub fn covered_by_several_bindings(&self, node: NodeRef) -> bool {
+        let mut bindings = self.bindings_covering(node).map(|(binding, _)| binding);
+        let first = bindings.next();
+        bindings.any(|binding| Some(binding) != first)
+    }
+
+    /// The node `depth` steps above the node of the output bound to `binding`.
+    pub fn binding_ancestor(&self, binding: SharedAnalysisId, depth: usize) -> Option<NodeRef> {
+        let output = self
+            .outputs
+            .iter()
+            .find(|output| output.binding == Some(binding))?;
+        let mut current = output.node;
+        for _ in 0..depth {
+            current = self.input_of(current)?;
+        }
+        Some(current)
+    }
+
+    /// Whether `node` or one of its ancestors keeps state.
+    pub fn depends_on_state(&self, node: NodeRef) -> bool {
+        let mut current = node.index();
+        while let Some(index) = current {
+            if self.nodes[index].spec.is_stateful() {
+                return true;
+            }
+            current = self.nodes[index].input.index();
+        }
+        false
+    }
+
+    /// Same graph: node kinds and inputs, output nodes and kinds of retention.
+    /// Parameters, durations and bindings may differ.
+    pub fn same_shape(&self, other: &Self) -> bool {
+        self.nodes.len() == other.nodes.len()
+            && self.outputs.len() == other.outputs.len()
+            && self.nodes.iter().zip(&other.nodes).all(|(a, b)| {
+                a.input == b.input
+                    && std::mem::discriminant(&a.spec) == std::mem::discriminant(&b.spec)
+            })
+            && self.outputs.iter().zip(&other.outputs).all(|(a, b)| {
+                a.node == b.node
+                    && std::mem::discriminant(&a.keep) == std::mem::discriminant(&b.keep)
+            })
+    }
+
+    /// Replace every binding through `map`.
+    pub fn rebind(&mut self, mut map: impl FnMut(SharedAnalysisId) -> SharedAnalysisId) {
+        for output in &mut self.outputs {
+            output.binding = output.binding.map(&mut map);
+        }
+    }
+
+    /// Set how long `output` is kept.
+    pub fn set_keep(&mut self, output: OutputId, keep: Keep) {
+        if let Some(entry) = self.outputs.get_mut(output.index()) {
+            entry.keep = keep;
+        }
     }
 
     /// Canonical copy checked against the source: node kinds connect, parameters

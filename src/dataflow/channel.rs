@@ -2,7 +2,8 @@ use std::{error::Error, fmt};
 
 use crate::audio::{AudioDescriptor, ChannelLayout};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChannelSelection {
     Left,
     Right,

@@ -12,12 +12,15 @@ pub mod extensions;
 pub mod module;
 pub mod plotting;
 pub mod render;
+pub mod settings;
 pub mod snapshot;
+pub mod theme;
 
 mod app;
 #[cfg(feature = "automation")]
 mod automation;
 mod live;
+mod persistence;
 #[cfg(any(test, feature = "automation"))]
 mod probe;
 mod workspace;
@@ -48,10 +51,20 @@ fn main() -> eframe::Result<()> {
             std::process::exit(2);
         }
     }
-    if !args.is_empty() {
-        eprintln!("unknown arguments: {}", args.join(" "));
-        std::process::exit(2);
-    }
+    let store = match parse_config_dir(&args) {
+        Ok(Some(root)) => persistence::WorkspaceStore::new(root),
+        Ok(None) => match persistence::WorkspaceStore::default_root() {
+            Ok(root) => persistence::WorkspaceStore::new(root),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
     let live = match LiveAudio::open_default(LiveAudioConfig::default()) {
         Ok(live) => live,
         Err(error) => {
@@ -64,7 +77,7 @@ fn main() -> eframe::Result<()> {
         "system audio: {} Hz, {} channels, {:?}",
         descriptor.sample_rate_hz, descriptor.channel_count, descriptor.channel_layout
     );
-    let workspace = match workspace::Workspace::new(live, true) {
+    let workspace = match workspace::Workspace::open(live, store, true) {
         Ok(workspace) => workspace,
         Err(error) => {
             eprintln!("module initialization failed: {error}");
@@ -72,6 +85,20 @@ fn main() -> eframe::Result<()> {
         }
     };
     run_window(app::App::new(workspace))
+}
+
+/// `[--config-dir <dir>]`: where workspaces are saved (default `%APPDATA%\taffymeters`).
+fn parse_config_dir(args: &[String]) -> Result<Option<std::path::PathBuf>, String> {
+    match args {
+        [] => Ok(None),
+        [flag, dir] if flag == "--config-dir" && !dir.starts_with("--") => {
+            Ok(Some(std::path::PathBuf::from(dir)))
+        }
+        _ => Err(format!(
+            "unknown arguments: {} (expected [--config-dir <dir>])",
+            args.join(" ")
+        )),
+    }
 }
 
 fn run_window(app: app::App) -> eframe::Result<()> {

@@ -158,7 +158,10 @@ pub(super) fn core(report: &mut Report) {
     report.cases.push(run_case("C08", c08));
     report.cases.push(run_case("C09", c09));
     report.cases.push(run_case("C10", c10));
-    for (id, scenario) in super::workspace_scenarios::CASES {
+    for (id, scenario) in super::workspace_scenarios::CASES
+        .into_iter()
+        .chain(super::settings_scenarios::CASES)
+    {
         report.cases.push(run_case(id, scenario));
     }
 }
@@ -1238,6 +1241,26 @@ fn workspace_layout(ws: &mut Workspace) -> Result<(), String> {
     Ok(())
 }
 
+fn themed_layout(ws: &mut Workspace) -> Result<(), String> {
+    workspace_layout(ws)?;
+    let spectrum = first_leaf(ws)?;
+    action(
+        ws,
+        WorkspaceAction::SetThemePreset {
+            preset: crate::theme::Preset::Light,
+        },
+    )?;
+    action(
+        ws,
+        WorkspaceAction::SetColor {
+            scope: crate::workspace::ColorScope::Instance(spectrum),
+            role: crate::theme::ColorRole::Primary,
+            color: Some(crate::render::Color::rgb(220, 40, 90)),
+        },
+    )?;
+    Ok(())
+}
+
 fn image_case(
     renderer: &mut visual::OffscreenRenderer,
     id: &str,
@@ -1277,7 +1300,7 @@ fn image_case(
         "display_time_seconds":h.display_time.as_secs_f64(),"logical_size":frame.logical_size,
         "pixel_size":frame.pixel_size,"pixels_per_point":frame.pixels_per_point,
         "signal":"48k stereo left 3000Hz/right 6000Hz peak 0.08 block 160",
-        "renderer":frame.renderer,"font":"egui bundled defaults","theme":"dark","os":std::env::consts::OS,
+        "renderer":frame.renderer,"font":"egui bundled defaults","theme":h.ws.observation().theme.preset,"os":std::env::consts::OS,
         "dependency":{"egui":"0.34.1","egui-wgpu":"0.34.1","wgpu":"29.0.1"},"pixel_sha256":hash});
     let candidate = output.join(format!("{id}.png"));
     let manifest_path = output.join(format!("{id}.json"));
@@ -1554,7 +1577,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
                 Status::Unavailable,
                 format!("{stage}: {message}"),
             ));
-            for id in ["V02", "V03", "V04", "V05", "V06"] {
+            for id in ["V02", "V03", "V04", "V05", "V06", "V07"] {
                 report.cases.push(Case::incomplete(
                     id,
                     Status::NotRun,
@@ -1567,7 +1590,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
             report
                 .cases
                 .push(Case::fail("V01", "renderer initialization", e));
-            for id in ["V02", "V03", "V04", "V05", "V06"] {
+            for id in ["V02", "V03", "V04", "V05", "V06", "V07"] {
                 report
                     .cases
                     .push(Case::incomplete(id, Status::NotRun, "V01 failed"));
@@ -1660,7 +1683,7 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
         }
         Err(e) => {
             report.cases.push(Case::fail("V01", "real frame", e));
-            for id in ["V02", "V03", "V04", "V05", "V06"] {
+            for id in ["V02", "V03", "V04", "V05", "V06", "V07"] {
                 report
                     .cases
                     .push(Case::incomplete(id, Status::NotRun, "V01 failed"));
@@ -1703,6 +1726,24 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
             },
         );
     }
+    // V07: the same layout under the Light preset with one instance override; the
+    // chrome, egui visuals and every Module follow the theme, the override stays.
+    report.cases.push(
+        match image_case(
+            &mut renderer,
+            "theme-light",
+            themed_layout,
+            1.0,
+            &images,
+            baseline,
+        ) {
+            Ok((mut case, _)) => {
+                case.id = "V07-theme-light".to_owned();
+                case
+            }
+            Err(e) => Case::fail("V07-theme-light", "themed layout frame", e),
+        },
+    );
     report
         .cases
         .push(match persistence_visual(&mut renderer, &images, baseline) {

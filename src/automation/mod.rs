@@ -4,6 +4,7 @@ mod harness;
 mod perf;
 mod report;
 mod scenarios;
+mod settings_scenarios;
 mod trace;
 mod workspace_scenarios;
 thread_local! {
@@ -76,15 +77,21 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
     match args.first().map(String::as_str) {
         Some("preview") => {
             let tail = &args[1..];
-            let flags: &[&str] = if tail.iter().any(|x| x == "--trace") {
-                &["--input", "--trace"]
-            } else {
-                &["--input"]
+            let mut flags = vec!["--input"];
+            for optional in ["--trace", "--config-dir"] {
+                if tail.iter().any(|x| x == optional) {
+                    flags.push(optional);
+                }
+            }
+            let values = parse_run(tail, &flags).map_err(usage)?;
+            let value_of = |flag: &str| {
+                flags
+                    .iter()
+                    .position(|candidate| *candidate == flag)
+                    .map(|index| values[index].clone())
             };
-            let values = parse_run(tail, flags).map_err(usage)?;
-            let trace = values
-                .get(1)
-                .map(|path| Trace::create(Path::new(path)))
+            let trace = value_of("--trace")
+                .map(|path| Trace::create(Path::new(&path)))
                 .transpose()
                 .map_err(runtime)?;
             let live = match values[0].as_str() {
@@ -98,7 +105,15 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 _ => return Err(usage("--input must be synthetic, sweep or system".into())),
             }
             .map_err(|e| runtime(e.to_string()))?;
-            let workspace = Workspace::new(live, false).map_err(|e| runtime(e.to_string()))?;
+            // With a configuration directory the preview opens, edits and saves
+            // workspaces there like the product; without it nothing is saved.
+            let workspace = match value_of("--config-dir") {
+                Some(root) => {
+                    Workspace::open(live, crate::persistence::WorkspaceStore::new(root), false)
+                }
+                None => Workspace::new(live, false),
+            }
+            .map_err(|e| runtime(e.to_string()))?;
             let mut app = crate::app::App::new(workspace);
             if let Some(trace) = trace {
                 app = app.with_trace(trace);

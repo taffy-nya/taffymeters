@@ -1,20 +1,29 @@
 use crate::{
     audio::SourceReader,
     dataflow::{
-        ChannelSelection, DataController, DataSpec, DataSubscription, FftConfig, Keep, NodeRef,
-        NodeSpec, OutputId, SOURCE,
+        ChannelSelection, DataController, DataSpec, DataSubscription, DataflowHandle, FftConfig,
+        Keep, NodeRef, NodeSpec, OutputId, SOURCE,
     },
     extensions::{Registry, RegistryError},
-    module::{Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices},
+    module::{
+        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
+        number_setting, spec_from_saved,
+    },
     plotting::SpectrumCoordinates,
-    render::{Color, ColoredRect, Point, Rect},
+    render::{ColoredRect, Point, Rect},
+    settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView, ViewFrame},
+    theme::ColorRole,
 };
 
-/// Source time the Spectrogram keeps; it shows up to this much.
+/// Source time the Spectrogram keeps by default; it shows up to its History.
 const HISTORY_SECONDS: f32 = 8.0;
+/// Shortest visible span.
+const MIN_VISIBLE_SECONDS: f32 = 0.5;
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
+
+const COLOR_ROLES: &[ColorRole] = &[ColorRole::Low, ColorRole::Mid, ColorRole::High];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(SpectrogramFactory)
@@ -35,17 +44,20 @@ impl ModuleFactory for SpectrogramFactory {
         &self,
         services: &ModuleServices,
         _registry: &Registry,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         let mut spec = DataSpec::new();
         let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
         let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
         let history = spec.output(fft, Keep::Seconds(HISTORY_SECONDS));
+        let spec = spec_from_saved(spec, data)?;
         let subscription = services
             .dataflow
             .subscribe(spec)
             .map_err(ModuleError::from)?;
         Ok(Box::new(SpectrogramModule {
             source: services.source.clone(),
+            dataflow: services.dataflow.clone(),
             controller: subscription.controller(),
             reader: subscription.reader(),
             _subscription: subscription,
@@ -61,6 +73,7 @@ impl ModuleFactory for SpectrogramFactory {
 
 struct SpectrogramModule {
     source: SourceReader,
+    dataflow: DataflowHandle,
     controller: DataController,
     reader: DataReader,
     _subscription: DataSubscription,
@@ -71,6 +84,23 @@ struct SpectrogramModule {
     cells: Vec<ColoredRect>,
     /// FFT bin range `[first, end)` of each band, rebuilt per draw.
     band_bins: Vec<(usize, usize)>,
+}
+
+impl SpectrogramModule {
+    /// History length of the output: the most the view can show.
+    fn history_seconds(&self) -> f32 {
+        self.controller
+            .with_spec(
+                |spec| match spec.outputs().get(self.history_output.index()) {
+                    Some(output) => match output.keep {
+                        Keep::Seconds(seconds) => seconds,
+                        Keep::Latest => HISTORY_SECONDS,
+                    },
+                    None => HISTORY_SECONDS,
+                },
+            )
+            .max(MIN_VISIBLE_SECONDS)
+    }
 }
 
 impl Module for SpectrogramModule {
@@ -84,9 +114,11 @@ impl Module for SpectrogramModule {
 
     fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
         channel.resolve(self.source.descriptor())?;
-        let node = self.channel_node;
-        self.controller
-            .update(|spec| spec.set_node(node, NodeSpec::Channel(channel)))?;
+        self.dataflow.edit_node(
+            &self.controller,
+            self.channel_node,
+            NodeSpec::Channel(channel),
+        )?;
         Ok(())
     }
 
@@ -98,14 +130,50 @@ impl Module for SpectrogramModule {
         self.cells.clear();
     }
 
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn output_label(&self, output: OutputId) -> Option<&'static str> {
+        (output == self.history_output).then_some("History")
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
+    }
+
+    fn view_settings(&self) -> Vec<ViewSetting> {
+        vec![ViewSetting {
+            key: "visible_seconds",
+            label: "Visible time",
+            section: "Display",
+            kind: SettingKind::Number {
+                min: MIN_VISIBLE_SECONDS,
+                max: self.history_seconds(),
+                unit: "s",
+                logarithmic: false,
+            },
+            value: SettingValue::Number(self.visible_seconds),
+        }]
+    }
+
+    fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        if key != "visible_seconds" {
+            return Err(ModuleError::UnknownSetting(key.to_owned()));
+        }
+        self.visible_seconds =
+            number_setting(key, value, (MIN_VISIBLE_SECONDS, self.history_seconds()))?;
+        Ok(())
+    }
+
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
             && (frame.zoom_delta - 1.0).abs() > 0.001
         {
-            self.visible_seconds =
-                (self.visible_seconds / frame.zoom_delta).clamp(0.5, HISTORY_SECONDS);
+            self.visible_seconds = (self.visible_seconds / frame.zoom_delta)
+                .clamp(MIN_VISIBLE_SECONDS, self.history_seconds());
         }
         self.reader
             .sync_history(self.history_output, &mut self.history);
@@ -181,7 +249,7 @@ impl Module for SpectrogramModule {
                         min: Point { x: x0, y: y0 },
                         max: Point { x: x1, y: y1 },
                     },
-                    color: heat_color(normalized),
+                    color: frame.palette.heat(normalized),
                 });
             }
         }
@@ -219,14 +287,6 @@ fn history_column(
 fn x_for_frontier(rect: Rect, window_end: u64, window_frames: u64, frontier: u64) -> f32 {
     let age = window_end.saturating_sub(frontier).min(window_frames) as f32;
     rect.max.x - age / window_frames.max(1) as f32 * rect.width()
-}
-
-fn heat_color(value: f32) -> Color {
-    let value = value.clamp(0.0, 1.0);
-    let red = ((value * 3.0 - 1.0).clamp(0.0, 1.0) * 255.0) as u8;
-    let green = ((value * 3.0 - 2.0).clamp(0.0, 1.0) * 255.0) as u8;
-    let blue = ((value * 3.0).clamp(0.0, 1.0) * 255.0) as u8;
-    Color::rgba(red, green, blue, (value * 255.0) as u8)
 }
 
 #[cfg(test)]
