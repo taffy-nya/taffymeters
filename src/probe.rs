@@ -75,8 +75,10 @@ impl WorkerProbe {
     /// Count allocations of the calling thread until the returned guard drops.
     pub(crate) fn count_this_thread(self: &Arc<Self>) -> CountGuard {
         let probe = Arc::clone(self);
-        COUNTER.with(|counter| counter.set(&probe.allocations));
-        CountGuard { _probe: probe }
+        CountGuard {
+            _restore: install(&probe.allocations),
+            _probe: probe,
+        }
     }
 
     pub(crate) fn attach(&self, thread: &JoinHandle<()>) {
@@ -94,23 +96,42 @@ impl WorkerProbe {
     }
 }
 
-pub(crate) struct CountGuard {
-    _probe: Arc<WorkerProbe>,
+/// Restores the calling thread's previous counter when dropped, including during
+/// unwinding. It holds a raw pointer, so it is neither `Send` nor `Sync` and must
+/// be dropped on the thread that installed it.
+struct Restore {
+    previous: *const AtomicU64,
 }
 
-impl Drop for CountGuard {
+impl Drop for Restore {
     fn drop(&mut self) {
-        COUNTER.with(|counter| counter.set(std::ptr::null()));
+        COUNTER.with(|counter| counter.set(self.previous));
     }
+}
+
+/// Point the calling thread's allocation counter at `counter` until the guard drops.
+/// The caller keeps `counter` alive for at least as long as the guard.
+fn install(counter: &AtomicU64) -> Restore {
+    Restore {
+        previous: COUNTER.with(|current| current.replace(counter)),
+    }
+}
+
+/// Counts the worker thread's allocations while alive; thread-affine through
+/// `Restore`. Field order matters: the counter pointer is removed before the probe
+/// that owns the counter is released.
+pub(crate) struct CountGuard {
+    _restore: Restore,
+    _probe: Arc<WorkerProbe>,
 }
 
 /// Allocations made by the calling thread while `action` runs.
 #[cfg(test)]
 pub(crate) fn allocations_during(action: impl FnOnce()) -> u64 {
     let counter = AtomicU64::new(0);
-    let previous = COUNTER.with(|current| current.replace(&counter));
+    let restore = install(&counter);
     action();
-    COUNTER.with(|current| current.set(previous));
+    drop(restore);
     counter.load(Ordering::Relaxed)
 }
 

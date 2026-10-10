@@ -21,13 +21,14 @@ use super::{
     channel::ResolvedChannel,
     fft::StreamingFft,
     kernels::{PeakState, SmoothState, add_with_floor, offset_with_floor, tilt_table},
-    spec::{DataSpec, Keep, NodeSpec, PeakConfig, SharedAnalysisId, SmoothConfig},
+    spec::{
+        DataSpec, Keep, NodeSpec, PeakConfig, SharedAnalysisId, SmoothConfig,
+        TIME_PUBLICATIONS_PER_SECOND,
+    },
     store::{Ring, Route, RouteOutput, SharedStore, lock},
     time::LevelAnalyzer,
 };
 
-/// Time-domain results (PCM chunks, Levels) are published at most this often.
-const TIME_PUBLICATIONS_PER_SECOND: usize = 30;
 /// Frames kept for reuse per output ring.
 const POOL_CAPACITY: usize = 8;
 
@@ -294,6 +295,8 @@ pub(super) struct Engine {
     index: HashMap<NodeKey, NodeId>,
     ring_owners: Vec<Option<NodeId>>,
     free_rings: Vec<usize>,
+    /// Detached ring slots still named by published routes until the next commit.
+    retired_rings: Vec<usize>,
     subscriptions: HashMap<u64, Subscription>,
     bindings: HashMap<SharedAnalysisId, BindingState>,
     plan: Plan,
@@ -331,6 +334,18 @@ fn parent_and_child(
             head[child].as_mut().expect("live child"),
         )
     }
+}
+
+/// A binding that two outputs of one spec resolve to different nodes.
+fn conflicting_binding(spec: &DataSpec, outputs: &[NodeId]) -> Option<SharedAnalysisId> {
+    let mut agreed: HashMap<SharedAnalysisId, NodeId> = HashMap::new();
+    spec.outputs()
+        .iter()
+        .zip(outputs)
+        .find_map(|(output, &node)| {
+            let binding = output.binding?;
+            (*agreed.entry(binding).or_insert(node) != node).then_some(binding)
+        })
 }
 
 /// A pooled frame no reader holds, or a new one.
@@ -374,6 +389,7 @@ impl Engine {
             index: HashMap::new(),
             ring_owners: Vec::new(),
             free_rings: Vec::new(),
+            retired_rings: Vec::new(),
             subscriptions: HashMap::new(),
             bindings: HashMap::new(),
             plan: Plan::default(),
@@ -595,10 +611,9 @@ impl Engine {
         let index = ring.index;
         self.node_mut(node).ring = None;
         self.ring_owners[index] = None;
-        self.free_rings.push(index);
-        // Readers may still hold frames; dropping the ring only releases our refs.
-        let old = lock(&self.store).rings[index].take();
-        drop(old);
+        // The slot is freed when routes no longer name it (`write_routes`), so a
+        // reader never sees a route pointing at a vanished or reused ring.
+        self.retired_rings.push(index);
     }
 
     // ---- subscription control ---------------------------------------------------
@@ -610,6 +625,10 @@ impl Engine {
         visible: bool,
     ) -> Result<Applied, ControlError> {
         let (nodes, outputs) = self.intern_spec(id, &spec);
+        if let Some(binding) = conflicting_binding(&spec, &outputs) {
+            self.release_all(&nodes);
+            return Err(ControlError::SharedBindingMismatch(binding));
+        }
         for (output, &node) in spec.outputs().iter().zip(&outputs) {
             if let Some(binding) = output.binding
                 && self
@@ -675,6 +694,10 @@ impl Engine {
         }
         let (nodes, outputs) = loop {
             let (nodes, outputs) = self.intern_spec(id, &spec);
+            if let Some(binding) = conflicting_binding(&spec, &outputs) {
+                self.release_all(&nodes);
+                return Err(ControlError::SharedBindingMismatch(binding));
+            }
             let forks: Vec<usize> = spec
                 .outputs()
                 .iter()
@@ -837,7 +860,7 @@ impl Engine {
             self.detach_ring(node);
         }
         self.release_all(&subscription.nodes);
-        lock(&self.store).routes.remove(&id);
+        // `reconcile` drops the route together with its retired rings.
         self.reconcile();
     }
 
@@ -869,7 +892,8 @@ impl Engine {
     }
 
     /// Reset the stateful nodes in this subscription's scope (shared ones for every
-    /// member) and restart reading for everyone affected.
+    /// member) and restart reading for this subscription and every other one that
+    /// reads a reset node. Pure shared outputs are never cleared for others.
     pub(super) fn reset_state(&mut self, id: u64) {
         let Some(subscription) = self.subscriptions.get(&id) else {
             return;
@@ -879,12 +903,6 @@ impl Engine {
             .outputs()
             .iter()
             .any(|output| matches!(output.keep, Keep::Seconds(_)));
-        let bindings: Vec<SharedAnalysisId> = subscription
-            .spec
-            .outputs()
-            .iter()
-            .filter_map(|output| output.binding)
-            .collect();
         let reset_nodes: HashSet<NodeId> = subscription
             .nodes
             .iter()
@@ -923,11 +941,6 @@ impl Engine {
                         .nodes
                         .iter()
                         .any(|node| reset_nodes.contains(node))
-                    || other_subscription.spec.outputs().iter().any(|output| {
-                        output
-                            .binding
-                            .is_some_and(|binding| bindings.contains(&binding))
-                    })
             })
             .map(|(other, _)| *other)
             .collect();
@@ -1066,12 +1079,18 @@ impl Engine {
         let window = node.fft.map_or(0, |fft| fft.window_size as u64);
         match &mut node.kernel {
             Kernel::Fft(fft) => fft.reset(),
-            Kernel::Smooth { state, .. } if reactivated => {
-                state.reset();
+            // A new or reactivated stateful node only accepts FFT windows that lie
+            // entirely after its activation, even when a shared FFT is already warm.
+            Kernel::Smooth { state, .. } => {
+                if reactivated {
+                    state.reset();
+                }
                 node.accept_from = frontier + window;
             }
-            Kernel::Peak { state, .. } if reactivated => {
-                state.reset();
+            Kernel::Peak { state, .. } => {
+                if reactivated {
+                    state.reset();
+                }
                 node.accept_from = frontier + window;
             }
             Kernel::Levels {
@@ -1165,32 +1184,64 @@ impl Engine {
         }
     }
 
+    /// Publish every subscription's route and free the ring slots no route names any
+    /// more, all under one lock, so readers switch from old to new outputs at once.
     fn write_routes(&mut self) {
-        let mut store = lock(&self.store);
-        for (&id, subscription) in &self.subscriptions {
-            let outputs = subscription
-                .spec
-                .outputs()
-                .iter()
-                .zip(&subscription.outputs)
-                .zip(&subscription.starts)
-                .map(|((output, &node), &start_frame)| RouteOutput {
-                    ring: self.node(node).ring.as_ref().expect("output ring").index,
-                    start_frame,
-                    keep_frames: self.keep_frames(output.keep),
-                    reset_epoch: subscription.reset_epoch,
-                    gap_epoch: subscription.gap_epoch,
-                })
-                .collect();
-            store.routes.insert(
-                id,
-                Route {
-                    revision: subscription.revision,
-                    paused: subscription.paused,
-                    outputs,
-                },
-            );
+        let mut stale = Vec::new();
+        {
+            let mut store = lock(&self.store);
+            store
+                .routes
+                .retain(|id, _| self.subscriptions.contains_key(id));
+            for (&id, subscription) in &self.subscriptions {
+                let outputs: Vec<RouteOutput> = subscription
+                    .spec
+                    .outputs()
+                    .iter()
+                    .zip(&subscription.outputs)
+                    .zip(&subscription.starts)
+                    .map(|((output, &node), &start_frame)| RouteOutput {
+                        ring: self.node(node).ring.as_ref().expect("output ring").index,
+                        start_frame,
+                        keep_frames: self.keep_frames(output.keep),
+                        reset_epoch: subscription.reset_epoch,
+                        gap_epoch: subscription.gap_epoch,
+                    })
+                    .collect();
+                // A paused subscription keeps showing what was visible when it paused.
+                let frozen = if !subscription.paused {
+                    Vec::new()
+                } else if let Some(previous) = store.routes.get(&id).filter(|route| route.paused) {
+                    previous.frozen.clone()
+                } else {
+                    outputs
+                        .iter()
+                        .map(|output| {
+                            store.rings[output.ring]
+                                .as_ref()
+                                .and_then(|ring| ring.frames.back())
+                                .filter(|frame| frame.processed_through_frame > output.start_frame)
+                                .cloned()
+                        })
+                        .collect()
+                };
+                store.routes.insert(
+                    id,
+                    Route {
+                        revision: subscription.revision,
+                        paused: subscription.paused,
+                        outputs,
+                        frozen,
+                    },
+                );
+            }
+            for index in self.retired_rings.drain(..) {
+                stale.push(store.rings[index].take());
+                self.free_rings.push(index);
+            }
         }
+        // Readers may still hold frames; this only releases our references.
+        drop(stale);
     }
 
     fn update_gauges(&self) {

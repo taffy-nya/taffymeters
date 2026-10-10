@@ -313,20 +313,25 @@ impl DataSpec {
             outputs: self.outputs.clone(),
         };
         for output in &validated.outputs {
-            if output
-                .node
-                .index()
-                .is_some_and(|index| index >= validated.nodes.len())
-            {
+            let Some(kind) = (match output.node.index() {
+                None => Some(SignalKind::Pcm),
+                Some(index) => validated
+                    .nodes
+                    .get(index)
+                    .map(|node| node.spec.output_kind()),
+            }) else {
                 return Err(SpecError::UnknownNode);
+            };
+            if kind == SignalKind::Mono {
+                return Err(SpecError::UnsupportedOutput);
             }
             if let Keep::Seconds(seconds) = output.keep {
                 if !seconds.is_finite() || seconds <= 0.0 {
                     return Err(SpecError::InvalidKeep);
                 }
-                let bytes =
-                    validated.bytes_per_second(output.node, descriptor) * f64::from(seconds);
-                if bytes > HISTORY_BUDGET_BYTES as f64 {
+                if validated.history_bytes(output.node, seconds, descriptor)
+                    > HISTORY_BUDGET_BYTES as f64
+                {
                     return Err(SpecError::HistoryTooLarge);
                 }
             }
@@ -360,9 +365,14 @@ impl DataSpec {
         Ok(scopes)
     }
 
-    /// Source-time data rate of one output, for the History budget.
-    fn bytes_per_second(&self, node: NodeRef, descriptor: &AudioDescriptor) -> f64 {
+    /// Upper estimate of the memory one History keeps: per retained result its
+    /// payload plus the frame allocation, metadata and ring entry, with one extra
+    /// result kept at the window boundary.
+    fn history_bytes(&self, node: NodeRef, seconds: f32, descriptor: &AudioDescriptor) -> f64 {
         let sample_rate = f64::from(descriptor.sample_rate_hz);
+        let channels = f64::from(descriptor.channel_count);
+        let float = std::mem::size_of::<f32>() as f64;
+        let time_rate = TIME_PUBLICATIONS_PER_SECOND as f64;
         let mut fft = None;
         let mut current = node.index();
         while let Some(index) = current {
@@ -372,23 +382,34 @@ impl DataSpec {
             }
             current = self.nodes[index].input.index();
         }
-        let float = std::mem::size_of::<f32>() as f64;
-        match (
-            node.index()
-                .map(|index| self.nodes[index].spec.output_kind()),
-            fft,
-        ) {
-            (Some(SignalKind::Spectrum), Some(fft)) => {
-                sample_rate / fft.hop_size as f64 * (fft.window_size / 2 + 1) as f64 * float
-            }
-            (Some(SignalKind::Levels), _) => {
-                30.0 * 2.0 * f64::from(descriptor.channel_count) * float
-            }
-            (Some(SignalKind::Mono), _) => sample_rate * float,
-            _ => sample_rate * f64::from(descriptor.channel_count) * float,
-        }
+        let kind = node.index().map_or(SignalKind::Pcm, |index| {
+            self.nodes[index].spec.output_kind()
+        });
+        let (results_per_second, payload) = match (kind, fft) {
+            (SignalKind::Spectrum, Some(fft)) => (
+                sample_rate / fft.hop_size as f64,
+                (fft.window_size / 2 + 1) as f64 * float,
+            ),
+            (SignalKind::Levels, _) => (time_rate, 2.0 * channels * float),
+            _ => (
+                time_rate,
+                (sample_rate / time_rate).ceil() * channels * float,
+            ),
+        };
+        let per_result = payload + FRAME_OVERHEAD_BYTES;
+        (results_per_second * f64::from(seconds) + 1.0) * per_result
     }
 }
+
+/// Time-domain results (PCM chunks, Levels) are published at most this often.
+pub(crate) const TIME_PUBLICATIONS_PER_SECOND: usize = 30;
+
+/// Storage of one retained result besides its payload: the frame and its
+/// metadata, the `Arc` counts, the ring entry and allocator bookkeeping.
+const FRAME_OVERHEAD_BYTES: f64 = (std::mem::size_of::<crate::snapshot::Frame>()
+    + 2 * std::mem::size_of::<usize>()
+    + std::mem::size_of::<std::sync::Arc<crate::snapshot::Frame>>()
+    + 32) as f64;
 
 /// Largest History a single output may keep.
 pub const HISTORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
@@ -401,7 +422,11 @@ pub(crate) fn canonical_zero(value: f32) -> f32 {
 pub enum SpecError {
     NoOutputs,
     UnknownNode,
-    KindMismatch { node: usize },
+    /// The output's data kind is not published (a Channel node's mono samples).
+    UnsupportedOutput,
+    KindMismatch {
+        node: usize,
+    },
     InvalidChannel(ChannelError),
     InvalidFft,
     InvalidTilt,
@@ -419,6 +444,9 @@ impl fmt::Display for SpecError {
         match self {
             Self::NoOutputs => f.write_str("a data spec needs at least one output"),
             Self::UnknownNode => f.write_str("an output refers to an unknown node"),
+            Self::UnsupportedOutput => {
+                f.write_str("an output must be the source, a spectrum or Levels node")
+            }
             Self::KindMismatch { node } => {
                 write!(f, "node {node} cannot read the data of its input")
             }

@@ -214,10 +214,14 @@ impl DataReader {
         true
     }
 
-    /// Latest visible result of one output.
+    /// Latest visible result of one output; while the subscription's analysis is
+    /// paused, the result that was visible when it paused.
     pub fn latest(&self, output: OutputId) -> Option<Arc<Frame>> {
         let store = crate::dataflow::store::lock(&self.store);
         let route = store.routes.get(&self.id)?;
+        if route.paused {
+            return route.frozen.get(output.index()).cloned().flatten();
+        }
         let output = route.outputs.get(output.index())?;
         store.rings[output.ring]
             .as_ref()?

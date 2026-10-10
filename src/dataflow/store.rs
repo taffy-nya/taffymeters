@@ -31,6 +31,8 @@ pub(crate) struct Route {
     pub(crate) paused: bool,
     /// Indexed by `OutputId`.
     pub(crate) outputs: Vec<RouteOutput>,
+    /// While paused: the latest visible result of each output at the pause point.
+    pub(crate) frozen: Vec<Option<Arc<Frame>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

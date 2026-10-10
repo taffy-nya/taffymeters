@@ -625,6 +625,81 @@ fn explicit_pause_freezes_reads_and_resume_marks_a_gap() {
 }
 
 #[test]
+fn a_new_stateful_node_on_a_warm_fft_ignores_windows_from_before_it_joined() {
+    let (mut capture, dataflow, _) = fixture(1, 8, 128);
+    let (mut warm, fft) = fft_spec(fft32());
+    warm.output(fft, Keep::Latest);
+    let _warm = dataflow.subscribe(warm);
+    // 3 kHz is bin 2 of a 32-point FFT at 48 kHz.
+    capture.write(&mono_tone(64, 3_000.0, 0.5));
+    settle(&dataflow, "warm FFT", |m| m.fft_evaluations == 3);
+    let (mut spec, fft) = fft_spec(fft32());
+    let peak_node = spec.add(fft, peak(1_000.0));
+    let output = spec.output(peak_node, Keep::Latest);
+    let joined = dataflow.subscribe(spec);
+    capture.write(&[0.0; 64]);
+    let held = latest_at(&joined.reader(), output, 128);
+    assert!(
+        bins(&held)[2] < -100.0,
+        "the new Peak held a tone from before it joined: {} dBFS",
+        bins(&held)[2]
+    );
+}
+
+#[test]
+fn a_paused_reader_of_a_shared_output_keeps_its_pause_point() {
+    let (mut capture, dataflow, _) = fixture(2, 128, 16);
+    let (spec, output) = pcm_spec(Keep::Latest);
+    let paused = dataflow.subscribe(spec.clone());
+    let running = dataflow.subscribe(spec);
+    feed(&mut capture, &dataflow, &stereo(0, 1_600));
+    let before = latest_at(&paused.reader(), output, 1_600);
+    paused.controller().set_analysis_paused(true).unwrap();
+    feed(&mut capture, &dataflow, &stereo(1_600, 1_600));
+    latest_at(&running.reader(), output, 3_200);
+    let frozen = paused
+        .reader()
+        .latest(output)
+        .expect("pause keeps a result");
+    assert!(
+        Arc::ptr_eq(&frozen, &before),
+        "a paused reader saw new data"
+    );
+    paused.controller().set_analysis_paused(false).unwrap();
+    feed(&mut capture, &dataflow, &stereo(3_200, 1_600));
+    let resumed = latest_at(&paused.reader(), output, 4_800);
+    assert_eq!(resumed.pcm().unwrap().start_frame, 3_200);
+}
+
+#[test]
+fn resetting_a_bound_pure_history_restarts_only_the_requesting_reader() {
+    let (mut capture, dataflow, _) = fixture(1, 8, 128);
+    let (mut spec, fft) = fft_spec(fft32());
+    let output = spec.output(fft, Keep::Seconds(1.0));
+    spec.bind(output, Some(SharedAnalysisId(8)));
+    let first = dataflow.subscribe(spec.clone());
+    let second = dataflow.subscribe(spec);
+    capture.write(&mono_tone(64, 3_000.0, 0.25));
+    let (mut first_view, mut second_view) = (HistoryView::new(), HistoryView::new());
+    history_at(&first.reader(), output, &mut first_view, 64);
+    history_at(&second.reader(), output, &mut second_view, 64);
+    first.controller().reset_state().unwrap();
+    capture.write(&mono_tone(32, 3_000.0, 0.25));
+    history_at(&first.reader(), output, &mut first_view, 96);
+    history_at(&second.reader(), output, &mut second_view, 96);
+    assert_eq!(
+        first_view.len(),
+        2,
+        "the requester restarts at the reset point"
+    );
+    assert_eq!(
+        second_view.len(),
+        5,
+        "the other member keeps the shared History"
+    );
+}
+
+#[test]
 fn dropped_blocks_mark_discontinuity_and_reset_continuous_state() {
     let (mut capture, dataflow, telemetry) = fixture(1, 1, 32);
     let (mut spec, fft) = fft_spec(FftConfig::new(32, 32, -160.0).unwrap());
@@ -966,6 +1041,36 @@ fn invalid_specs_fail_without_creating_demand() {
     assert!(matches!(
         dataflow.handle.subscribe(DataSpec::new()),
         Err(ControlError::InvalidSpec(SpecError::NoOutputs))
+    ));
+    let mut spec = DataSpec::new();
+    let mono = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
+    spec.output(mono, Keep::Latest);
+    assert!(
+        matches!(
+            dataflow.handle.subscribe(spec),
+            Err(ControlError::InvalidSpec(SpecError::UnsupportedOutput))
+        ),
+        "mono channel samples are never published, so they cannot be an output"
+    );
+    // 48 kHz, window 16 / hop 1: 1.8 M small results in 38 s. The payload alone
+    // would fit 64 MiB; per-result storage does not.
+    let (mut spec, fft) = fft_spec(FftConfig::new(16, 1, -160.0).unwrap());
+    spec.output(fft, Keep::Seconds(38.0));
+    assert!(matches!(
+        dataflow.handle.subscribe(spec),
+        Err(ControlError::InvalidSpec(SpecError::HistoryTooLarge))
+    ));
+    // One spec naming one binding for two different Peaks.
+    let (mut spec, fft) = fft_spec(fft32());
+    let short = spec.add(fft, peak(100.0));
+    let long = spec.add(fft, peak(900.0));
+    let short = spec.output(short, Keep::Latest);
+    let long = spec.output(long, Keep::Latest);
+    spec.bind(short, Some(SharedAnalysisId(3)));
+    spec.bind(long, Some(SharedAnalysisId(3)));
+    assert!(matches!(
+        dataflow.handle.subscribe(spec),
+        Err(ControlError::SharedBindingMismatch(SharedAnalysisId(3)))
     ));
     settle(&dataflow, "no demand", |m| {
         m.subscriptions == 0 && m.nodes == 0
