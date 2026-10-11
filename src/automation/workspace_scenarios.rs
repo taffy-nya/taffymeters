@@ -924,8 +924,10 @@ fn w09() -> Result<Value, String> {
         shown.active_spectrum_nodes == 4,
         &format!("visible Spectrum runs Tilt/Center/Gain/Peak: {shown:?}"),
     )?;
-    // The native adapter reports the viewport's minimized state every pass.
-    h.ws.set_window_minimized(FIRST_WINDOW, true);
+    // The viewport reports itself minimized: the pass draws nothing.
+    h.window_mut(FIRST_WINDOW)?.minimized = true;
+    let minimized = h.frame(vec![]);
+    check(minimized.shapes.is_empty(), "a minimized window was drawn")?;
     let hidden = wait_until(deadline(), "display-only work stopping", || {
         Some(handle.metrics()).filter(|metrics| metrics.active_spectrum_nodes == 1)
     })?;
@@ -938,7 +940,8 @@ fn w09() -> Result<Value, String> {
             && while_hidden.spectrum_evaluations > hidden.spectrum_evaluations,
         &format!("minimizing stopped continuous analysis: {hidden:?} -> {while_hidden:?}"),
     )?;
-    h.ws.set_window_minimized(FIRST_WINDOW, false);
+    h.window_mut(FIRST_WINDOW)?.minimized = false;
+    h.frame(vec![]);
     wait_until(deadline(), "display work restarting", || {
         (handle.metrics().active_spectrum_nodes == 4).then_some(())
     })?;

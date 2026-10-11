@@ -253,16 +253,26 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// Run one UI pass of `window_id` inside its own viewport.
+    /// Run one UI pass of `window_id` inside its own viewport. Returns whether the
+    /// window was drawn (a minimized window is not).
     pub(crate) fn window_ui(
         &mut self,
         window_id: WindowId,
         ui: &mut egui::Ui,
         display_time: Duration,
         probe: &dyn DesktopProbe,
-    ) {
+    ) -> bool {
         let pass_started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
+        // A minimized window is not drawn; its Modules' continuous analysis continues
+        // and work that only serves the display stops until it is shown again. Its
+        // native commands (e.g. from the settings window) are still sent.
+        let minimized = ctx.input(|input| input.viewport().minimized == Some(true));
+        self.set_window_minimized(window_id, minimized);
+        if minimized {
+            self.send_window_commands(window_id, &ctx);
+            return false;
+        }
         let rect = ui.max_rect();
         if ctx.global_style().visuals.dark_mode != self.chrome.dark {
             ctx.set_visuals(if self.chrome.dark {
@@ -309,6 +319,12 @@ impl Workspace {
         if pending_detach || self.source_status().state != SourceState::Running {
             ctx.request_repaint_after_for(STATE_POLL, egui::ViewportId::ROOT);
         }
+        self.send_window_commands(window_id, &ctx);
+        true
+    }
+
+    /// Send the viewport commands queued for `window_id` to its native window.
+    fn send_window_commands(&mut self, window_id: WindowId, ctx: &egui::Context) {
         if let Some(window) = self.windows.get_mut(&window_id) {
             for command in window.commands.drain(..) {
                 ctx.send_viewport_cmd(command);

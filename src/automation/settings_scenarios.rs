@@ -1,7 +1,7 @@
-//! S01–S07: settings, copies, explicit sharing, theme, saving and restoring,
-//! missing extensions, workspace switching and window rescue. They run the real
-//! Workspace, Module factories and manual source with temporary configuration
-//! directories; panel and menu operations use real egui events.
+//! S01–S08: settings window, copies, invisible sharing, theme, saving and
+//! restoring, missing extensions, workspace switching, window rescue and reset.
+//! They run the real Workspace, Module factories and manual source with temporary
+//! configuration directories; settings operations use real egui events.
 
 use std::{
     collections::BTreeSet,
@@ -16,7 +16,7 @@ use crate::{
     LiveAudio, LiveAudioConfig,
     audio::synthetic::{ManualInputDriver, SyntheticConfig},
     builtins::{
-        BAR_SPECTRUM_STYLE_ID, LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID,
+        BAR_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID,
         SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
     },
     dataflow::{ChannelSelection, DataSpec, FftConfig, NodeRef, NodeSpec, OutputId},
@@ -809,6 +809,9 @@ fn s05() -> Result<Value, String> {
     let unusable_view = json!({"type_id":OSCILLOSCOPE_MODULE_ID,
         "data":{"nodes":[],"outputs":[{"node":null,"keep":"latest"}]},
         "view":{"channel":{"channel":{"discrete":5}},"scale":{"number":2.0}}});
+    // Empty has no analysis to put saved analysis into.
+    let empty_with_data = json!({"type_id":EMPTY_MODULE_ID,
+        "data":{"nodes":[],"outputs":[{"node":null,"keep":"latest"}]}});
     let file = json!({"format_version":1,"name":"Imported","input":{"kind":"daw_bridge","pipe":"studio-a"},
         "theme":{"preset":"dark"},
         "windows":[{"outer_position":[120.0,140.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
@@ -819,7 +822,9 @@ fn s05() -> Result<Value, String> {
                 "second":{"node":"split","axis":"top_bottom","ratio":0.5,
                     "first":{"node":"leaf","module":{"type_id":OSCILLOSCOPE_MODULE_ID,"style":"vendor.glow",
                         "data":{"nodes":[],"outputs":[{"node":null,"keep":"latest"}]}}},
-                    "second":{"node":"leaf","module":unusable_view}}}}]});
+                    "second":{"node":"leaf","module":unusable_view}}}},
+            {"outer_position":[1100.0,140.0],"pixels_per_point":1.0,"inner_size":[300.0,200.0],
+            "layout":{"node":"leaf","module":empty_with_data}}]});
     fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
     fs::write(
         dir.file("Imported"),
@@ -840,6 +845,7 @@ fn s05() -> Result<Value, String> {
                 Some(SPECTRUM_MODULE_ID.to_owned()),
                 None,
                 Some(OSCILLOSCOPE_MODULE_ID.to_owned()),
+                Some(EMPTY_MODULE_ID.to_owned()),
             ],
         &format!("stand-ins not created for exactly the unusable modules: {missing:?}"),
     )?;
@@ -867,7 +873,8 @@ fn s05() -> Result<Value, String> {
     check(
         layout["first"]["first"]["module"] == plugin
             && layout["first"]["second"]["module"] == wrong_shape
-            && layout["second"]["second"]["module"] == unusable_view,
+            && layout["second"]["second"]["module"] == unusable_view
+            && saved["windows"][1]["layout"]["module"] == empty_with_data,
         "unusable modules were not saved verbatim",
     )?;
     check(
@@ -1132,11 +1139,16 @@ fn s08() -> Result<Value, String> {
             "outputs":[{"node":4,"keep":"latest"},extra]}})
     };
     let bound = json!({"node":5,"keep":"latest","binding":9});
+    // The second window is always on top, the first (whose place Reset keeps) is not.
     let file = json!({"format_version":1,"name":"Bound","theme":{"preset":"light"},
         "windows":[{"outer_position":[300.0,200.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
+            "always_on_top":false,
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
                 "first":{"node":"leaf","module":spectrum(bound.clone())},
-                "second":{"node":"leaf","module":spectrum(bound)}}}]});
+                "second":{"node":"leaf","module":spectrum(bound)}}},
+            {"outer_position":[1300.0,200.0],"pixels_per_point":1.0,"inner_size":[300.0,200.0],
+            "always_on_top":true,
+            "layout":{"node":"leaf","module":{"type_id":EMPTY_MODULE_ID}}}]});
     fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
     fs::write(
         dir.file("Bound"),
@@ -1176,9 +1188,10 @@ fn s08() -> Result<Value, String> {
     )?;
 
     // Reset: one default Spectrum, Dark theme, same name and place; saved.
+    let before = h.ws.observation().modules.len();
     h.in_settings(&[SettingsItem::Tab(Tab::Workspace), SettingsItem::Reset])?;
     check(
-        h.ws.observation().modules.len() == 2,
+        h.ws.observation().modules.len() == before,
         "Reset acted without confirmation",
     )?;
     h.in_settings(&[
@@ -1191,6 +1204,7 @@ fn s08() -> Result<Value, String> {
     check(
         o.name == "Bound"
             && o.windows.len() == 1
+            && !o.windows[0].always_on_top
             && o.modules.len() == 1
             && o.modules[0].type_id == SPECTRUM_MODULE_ID
             && o.theme.preset == "dark"
@@ -1209,8 +1223,32 @@ fn s08() -> Result<Value, String> {
         &format!("Reset was not saved or moved the window: {position:?}"),
     )?;
 
-    // An empty window's right click opens the Window tab, which can add a module.
+    // A window minimized while the settings window edits it still receives the
+    // native command.
     let only = o.modules[0].instance_id;
+    h.focus = new_window;
+    h.settings(
+        ControlKey::LeafBody(only),
+        &[SettingsItem::Tab(Tab::Window)],
+    )?;
+    h.window_mut(new_window)?.minimized = true;
+    h.frame_window(new_window, vec![])?;
+    h.take_commands(new_window);
+    h.in_settings(&[SettingsItem::AlwaysOnTop])?;
+    h.frame_window(new_window, vec![])?;
+    check(
+        h.take_commands(new_window).iter().any(|command| {
+            matches!(
+                command,
+                ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop)
+            )
+        }) && h.ws.observation().windows[0].always_on_top,
+        "a minimized window did not receive the settings window's command",
+    )?;
+    h.window_mut(new_window)?.minimized = false;
+    h.frame_window(new_window, vec![])?;
+
+    // An empty window's right click opens the Window tab, which can add a module.
     action(
         &mut h.ws,
         WorkspaceAction::CloseModule { instance_id: only },

@@ -25,6 +25,8 @@ pub(crate) struct Trace {
     /// Sampling times: state and control rects are captured at most every
     /// `SAMPLE_INTERVAL`, so tracing barely perturbs the CPU being measured.
     state_sampled: Option<Instant>,
+    /// Settings window state of the last recorded `state`.
+    state_settings_open: Option<bool>,
     targets_sampled: HashMap<WindowId, Instant>,
     /// UI passes per window since `rate_started`, plus analysis counters then.
     passes: HashMap<WindowId, u64>,
@@ -47,6 +49,7 @@ impl Trace {
             last_state: String::new(),
             last_targets: HashMap::new(),
             state_sampled: None,
+            state_settings_open: None,
             targets_sampled: HashMap::new(),
             passes: HashMap::new(),
             rate_started: None,
@@ -106,16 +109,20 @@ impl Trace {
         self.rate_started = Some((now, metrics, worker));
     }
 
-    /// Record ownership / demand when it changed.
+    /// Record ownership / demand when it changed. Sampled, except that a settings
+    /// window opening or closing is always recorded: it may be the last pass.
     pub(crate) fn state(&mut self, workspace: &Workspace) {
         let now = Instant::now();
-        if self
-            .state_sampled
-            .is_some_and(|at| now.duration_since(at) < SAMPLE_INTERVAL)
+        let settings_open = workspace.settings_open();
+        if self.state_settings_open == Some(settings_open)
+            && self
+                .state_sampled
+                .is_some_and(|at| now.duration_since(at) < SAMPLE_INTERVAL)
         {
             return;
         }
         self.state_sampled = Some(now);
+        self.state_settings_open = Some(settings_open);
         let observation = workspace.observation();
         let metrics = workspace.dataflow_handle_for_automation().metrics();
         let body = json!({
@@ -145,7 +152,7 @@ impl Trace {
             "workspace": observation.name,
             "theme": observation.theme.preset,
             "notices": observation.notices,
-            "settings_open": workspace.settings_open(),
+            "settings_open": settings_open,
         });
         let text = body.to_string();
         if text != self.last_state {

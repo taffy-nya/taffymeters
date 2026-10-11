@@ -46,6 +46,8 @@ pub(super) struct SimWindow {
     /// Outer top-left in physical desktop pixels.
     pub position: Pos2,
     pub maximized: bool,
+    /// Reported to the window's passes as the viewport's minimized state.
+    pub minimized: bool,
     /// Last `MinInnerSize` received; the simulated OS keeps the size above it.
     pub min_size: Vec2,
     /// Every viewport command emitted since the last `take_commands`.
@@ -63,6 +65,7 @@ impl SimWindow {
             ppp,
             position,
             maximized: false,
+            minimized: false,
             min_size: Vec2::ZERO,
             commands: Vec::new(),
             targets: HashMap::new(),
@@ -208,7 +211,7 @@ impl Harness {
             root.outer_rect = Some(outer);
             root.inner_rect = Some(outer);
             root.maximized = Some(window.maximized);
-            root.minimized = Some(false);
+            root.minimized = Some(window.minimized);
             root.focused = Some(true);
         }
         let context = window.context.clone();

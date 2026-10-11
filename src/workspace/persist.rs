@@ -287,16 +287,16 @@ impl Workspace {
     /// Always-on-top state and desktop position (logical points, scale) of the
     /// first window, for the default window that replaces the content.
     fn first_placement(&self) -> (bool, Option<(Pos2, f32)>) {
-        let always_on_top = self.windows.values().any(|window| window.always_on_top);
-        let position = self.windows.values().next().and_then(|window| {
-            let ppp = window.pixels_per_point;
-            window
-                .desktop
-                .outer
-                .map(|outer| (outer.min / ppp, ppp))
-                .or(window.initial_position.map(|position| (position, ppp)))
-        });
-        (always_on_top, position)
+        let Some(window) = self.windows.values().next() else {
+            return (false, None);
+        };
+        let ppp = window.pixels_per_point;
+        let position = window
+            .desktop
+            .outer
+            .map(|outer| (outer.min / ppp, ppp))
+            .or(window.initial_position.map(|position| (position, ppp)));
+        (window.always_on_top, position)
     }
 
     /// One default Spectrum window and the Dark theme.

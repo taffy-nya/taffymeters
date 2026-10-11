@@ -100,24 +100,17 @@ fn window_pass(
     {
         let _ = workspace.apply_action(WorkspaceAction::CloseWindow { window_id });
     }
-    // A minimized window is not drawn; its Modules' continuous analysis continues and
-    // work that only serves the display stops until it is shown again.
-    let minimized = ui
-        .ctx()
-        .input(|input| input.viewport().minimized == Some(true));
-    workspace.set_window_minimized(window_id, minimized);
-    if minimized {
-        return false;
-    }
-    workspace.window_ui(window_id, ui, started_at.elapsed(), &NativeDesktop);
+    let drawn = workspace.window_ui(window_id, ui, started_at.elapsed(), &NativeDesktop);
     #[cfg(feature = "automation")]
     if let Some(trace) = trace {
         let mut trace = lock(trace);
-        trace.pass(&workspace, window_id);
+        if drawn {
+            trace.pass(&workspace, window_id);
+            trace.targets(&workspace, window_id);
+        }
         trace.state(&workspace);
-        trace.targets(&workspace, window_id);
     }
-    true
+    drawn
 }
 
 impl eframe::App for App {
@@ -159,12 +152,18 @@ impl eframe::App for App {
                 let mut workspace = lock(&self.workspace);
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
                     let _ = workspace.apply_action(WorkspaceAction::CloseSettings);
-                    return;
+                } else {
+                    workspace.settings_ui(ui, self.started_at.elapsed(), &NativeDesktop);
                 }
-                workspace.settings_ui(ui, self.started_at.elapsed(), &NativeDesktop);
+                // Recorded here too: with every Workspace window minimized, no other
+                // pass would report the settings window opening or closing.
                 #[cfg(feature = "automation")]
                 if let Some(trace) = &self.trace {
-                    lock(trace).settings_targets(&workspace);
+                    let mut trace = lock(trace);
+                    if workspace.settings_open() {
+                        trace.settings_targets(&workspace);
+                    }
+                    trace.state(&workspace);
                 }
             });
         }

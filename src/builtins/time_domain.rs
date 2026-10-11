@@ -857,8 +857,11 @@ impl ModuleFactory for EmptyFactory {
         &self,
         _services: &ModuleServices,
         _registry: &Registry,
-        _data: Option<&DataSpec>,
+        data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
+        // Empty has no analysis: saved analysis it cannot hold makes the leaf a
+        // stand-in that keeps the original, instead of being dropped on save.
+        spec_from_saved(DataSpec::new(), data)?;
         Ok(Box::new(EmptyModule))
     }
 }
