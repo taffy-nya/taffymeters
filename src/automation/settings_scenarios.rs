@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
+use eframe::egui::{self, Event, ViewportCommand, pos2};
 use serde_json::{Value, json};
 
 use crate::{
@@ -21,11 +21,11 @@ use crate::{
     },
     dataflow::{ChannelSelection, DataSpec, FftConfig, NodeRef, NodeSpec, OutputId},
     persistence::WorkspaceStore,
-    settings::{DataScope, DataSettings, NodeParam, SettingValue},
+    settings::{NodeParam, SettingValue},
     theme::{ColorRole, Preset},
     workspace::{
-        ActionOutcome, ColorScope, ControlKey, FIRST_WINDOW, MenuItem, ModuleInstanceId,
-        PanelControl, SWATCHES, Side, WindowId, Workspace, WorkspaceAction,
+        ActionOutcome, ColorScope, ControlKey, FIRST_WINDOW, ModuleInstanceId, SWATCHES,
+        SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction,
     },
 };
 
@@ -38,7 +38,7 @@ use super::{
 
 type Scenario = fn() -> Result<Value, String>;
 
-pub(super) const CASES: [(&str, Scenario); 7] = [
+pub(super) const CASES: [(&str, Scenario); 8] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -46,6 +46,7 @@ pub(super) const CASES: [(&str, Scenario); 7] = [
     ("S05", s05),
     ("S06", s06),
     ("S07", s07),
+    ("S08", s08),
 ];
 
 /// A configuration directory removed when the scenario ends.
@@ -108,11 +109,6 @@ fn channel_of(spec: &DataSpec) -> Option<ChannelSelection> {
     })
 }
 
-/// The Spectrum's peak curve output.
-fn peak() -> OutputId {
-    OutputId::from_index(1)
-}
-
 fn new_window(outcome: ActionOutcome) -> Result<WindowId, String> {
     match outcome {
         ActionOutcome::WindowCreated(id) => Ok(id),
@@ -134,43 +130,33 @@ fn settle(ws: &Workspace, expected: u64) -> Result<(), String> {
     })
 }
 
-/// Run frames until a newly shown egui window passed its invisible sizing pass.
-fn settle_frames(h: &mut Harness) {
-    h.frame(vec![]);
-    h.frame(vec![]);
-}
-
-fn open_settings(h: &mut Harness, leaf: ModuleInstanceId) -> Result<(), String> {
+/// Right-click `leaf` (opening the settings window on it) and click `items` there;
+/// focus stays in the settings window.
+fn open_settings(
+    h: &mut Harness,
+    leaf: ModuleInstanceId,
+    items: &[SettingsItem],
+) -> Result<(), String> {
     // Instances created by direct actions get their controls in the next pass.
+    h.focus =
+        h.ws.observation()
+            .module(leaf)
+            .and_then(|module| module.window_id)
+            .ok_or_else(|| format!("instance {} is not placed", leaf.0))?;
     h.frame(vec![]);
-    h.menu(ControlKey::LeafBody(leaf), &[MenuItem::Settings])?;
-    settle_frames(h);
-    Ok(())
+    h.settings(ControlKey::LeafBody(leaf), &[])?;
+    h.in_settings(items)
 }
 
-fn panel(h: &mut Harness, control: PanelControl) -> Result<(), String> {
-    h.click(ControlKey::Panel(control))?;
-    h.frame(vec![]);
-    Ok(())
-}
-
-fn tall(h: &mut Harness) {
-    h.set_size(vec2(900.0, 1600.0));
-    h.frame(vec![]);
-}
-
-/// Copy, settings shown once per node, and edits that only reach the target.
+/// Copy, analysis settings shown once per node, edits that only reach the target.
 fn s01() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
-    tall(&mut h);
+    h.frame(vec![]);
     let a = first_leaf(&h.ws)?;
     let a_object = h.ws.observation().module(a).ok_or("a missing")?.object;
-    h.menu(
-        ControlKey::LeafBody(a),
-        &[MenuItem::LayoutOpen, MenuItem::Duplicate],
-    )?;
+    open_settings(&mut h, a, &[SettingsItem::Duplicate])?;
     let window = leaves(&h.ws, FIRST_WINDOW);
     check(
         window.len() == 2 && window[0] == a,
@@ -193,40 +179,32 @@ fn s01() -> Result<Value, String> {
         &format!("copy did not share the pure chain and keep private Peaks: {copied:?}"),
     )?;
 
-    open_settings(&mut h, b)?;
-    let channel = node(&spec_b, |n| matches!(n, NodeSpec::Channel(_)))?;
+    open_settings(&mut h, b, &[])?;
     let fft = node(&spec_b, |n| matches!(n, NodeSpec::Fft(_)))?;
     let tilt = node(&spec_b, |n| matches!(n, NodeSpec::Tilt { .. }))?;
-    let targets = h.ws.control_targets(FIRST_WINDOW);
-    let count = |matches: fn(&PanelControl) -> bool| {
+    let targets = h.ws.settings_targets();
+    let count = |matches: fn(&SettingsItem) -> bool| {
         targets
             .keys()
-            .filter(|key| matches!(key, ControlKey::Panel(control) if matches(control)))
+            .filter(|key| matches!(key, ControlKey::Settings(item) if matches(item)))
             .count()
     };
-    let channel_controls = count(|c| matches!(c, PanelControl::Channel { .. }));
-    let fft_controls = count(|c| matches!(c, PanelControl::FftWindow { .. }));
+    let channel_controls = count(|c| matches!(c, SettingsItem::Channel(_)));
+    let fft_controls = count(|c| matches!(c, SettingsItem::FftWindow { .. }));
     check(
         channel_controls == 3 && fft_controls == 6,
         &format!(
-            "Channel/FFT shared by both outputs must appear once: {channel_controls} channel, {fft_controls} FFT controls"
+            "Channel/FFT read by both outputs must appear once: {channel_controls} channel, {fft_controls} FFT controls"
         ),
     )?;
-    panel(
-        &mut h,
-        PanelControl::Channel {
-            node: channel,
-            channel: ChannelSelection::Right,
-        },
-    )?;
-    panel(
-        &mut h,
-        PanelControl::FftWindow {
+    h.in_settings(&[
+        SettingsItem::Channel(ChannelSelection::Right),
+        SettingsItem::FftWindow {
             node: fft,
             size: 4096,
         },
-    )?;
-    let key = ControlKey::Panel(PanelControl::Number {
+    ])?;
+    let key = ControlKey::Settings(SettingsItem::Number {
         node: tilt,
         param: NodeParam::Tilt,
     });
@@ -276,110 +254,66 @@ fn s01() -> Result<Value, String> {
     )
 }
 
-/// An explicit binding: copies keep it, shared edits reach every member (also by
-/// shortcut), unlinking forks only the instance that leaves.
+/// Sharing is invisible: identical analysis is shared by the dataflow on its own,
+/// an edit only changes its instance (forking what changed), and going back to the
+/// same parameters shares again. The settings offer nothing about sharing.
 fn s02() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
-    tall(&mut h);
+    h.frame(vec![]);
     let a = first_leaf(&h.ws)?;
-    open_settings(&mut h, a)?;
-    panel(&mut h, PanelControl::Share(peak()))?;
-    let binding = spec(&h.ws, a)?.outputs()[1].binding;
-    check(binding.is_some(), "Share did not bind the Peak output")?;
     let b = created(action(
         &mut h.ws,
         WorkspaceAction::DuplicateModule { instance_id: a },
     )?)?;
     settle(&h.ws, 2)?;
-    let spec_b = spec(&h.ws, b)?;
-    let shared = handle.metrics();
+    let fft_nodes = || handle.metrics().active_fft_nodes;
+    let shared = fft_nodes();
+    let fft = node(&spec(&h.ws, b)?, |n| matches!(n, NodeSpec::Fft(_)))?;
+    open_settings(&mut h, b, &[])?;
+    let labels: Vec<String> =
+        h.ws.settings_targets()
+            .keys()
+            .map(|key| format!("{key:?}"))
+            .collect();
     check(
-        spec_b.outputs()[1].binding == binding && shared.active_spectrum_nodes == 4,
-        &format!("the copy did not join the binding with one shared Peak: {shared:?}"),
+        !labels
+            .iter()
+            .any(|label| label.contains("Share") || label.contains("Bind")),
+        "the settings expose sharing controls",
     )?;
-    let described = DataSettings::describe(&spec_b);
-    let scopes: Vec<(String, bool)> = described
-        .nodes
-        .iter()
-        .map(|entry| {
-            (
-                crate::settings::node_label(&entry.spec).to_owned(),
-                matches!(entry.scope, DataScope::Shared(_)),
-            )
-        })
-        .collect();
+    h.in_settings(&[SettingsItem::FftWindow {
+        node: fft,
+        size: 8192,
+    }])?;
+    let forked = fft_nodes();
+    h.in_settings(&[SettingsItem::FftWindow {
+        node: fft,
+        size: 2048,
+    }])?;
+    let rejoined = fft_nodes();
     check(
-        scopes
-            == [
-                ("Channel".to_owned(), true),
-                ("FFT".to_owned(), true),
-                ("Tilt".to_owned(), false),
-                ("Center".to_owned(), false),
-                ("Gain".to_owned(), false),
-                ("Peak".to_owned(), true),
-            ],
-        &format!("shared group not shown as Peak with its ancestors: {scopes:?}"),
+        (shared, forked, rejoined) == (1, 2, 1),
+        &format!("FFT nodes identical → edited → identical again: {shared}, {forked}, {rejoined}"),
     )?;
-    panel(&mut h, PanelControl::Close)?;
-    open_settings(&mut h, b)?;
-    h.locate(&ControlKey::Panel(PanelControl::Unshare(peak())))?;
-    let channel = node(&spec_b, |n| matches!(n, NodeSpec::Channel(_)))?;
-    panel(
-        &mut h,
-        PanelControl::Channel {
-            node: channel,
-            channel: ChannelSelection::Right,
-        },
-    )?;
-    let both_right = [a, b]
-        .iter()
-        .map(|id| spec(&h.ws, *id).map(|s| channel_of(&s)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let after_shared_edit = handle.metrics();
-    check(
-        both_right == [Some(ChannelSelection::Right); 2]
-            && after_shared_edit.active_spectrum_nodes == 4
-            && spec(&h.ws, a)?.outputs()[1].binding == binding,
-        &format!("shared edit did not apply to every member: {both_right:?} {after_shared_edit:?}"),
-    )?;
+    // Shortcuts change only the selected instance as well.
+    h.focus = FIRST_WINDOW;
     action(&mut h.ws, WorkspaceAction::SelectModule { instance_id: a })?;
     h.key(egui::Key::Num1);
-    let both_left = [a, b]
-        .iter()
-        .map(|id| spec(&h.ws, *id).map(|s| channel_of(&s)))
-        .collect::<Result<Vec<_>, _>>()?;
-    check(
-        both_left == [Some(ChannelSelection::Left); 2],
-        &format!("channel shortcut did not follow the shared semantics: {both_left:?}"),
-    )?;
-    panel(&mut h, PanelControl::Unshare(peak()))?;
-    let (spec_a, spec_b) = (spec(&h.ws, a)?, spec(&h.ws, b)?);
-    let unlinked = handle.metrics();
-    check(
-        spec_b.outputs()[1].binding.is_none()
-            && spec_a.outputs()[1].binding == binding
-            && unlinked.active_spectrum_nodes == 5,
-        &format!("unlinking did not fork the copy to a private Peak: {unlinked:?}"),
-    )?;
-    panel(
-        &mut h,
-        PanelControl::Channel {
-            node: channel,
-            channel: ChannelSelection::Right,
-        },
-    )?;
     check(
         channel_of(&spec(&h.ws, a)?) == Some(ChannelSelection::Left)
-            && channel_of(&spec(&h.ws, b)?) == Some(ChannelSelection::Right),
-        "after unlinking an edit still reached the other instance",
+            && channel_of(&spec(&h.ws, b)?) == Some(ChannelSelection::MonoAverage),
+        "a channel shortcut reached the other instance",
+    )?;
+    let split = fft_nodes();
+    h.key(egui::Key::M);
+    check(
+        split == 2 && fft_nodes() == 1,
+        "returning to the same channel did not share the FFT again",
     )?;
     h.ws.check_ownership()?;
-    Ok(
-        json!({"scopes":scopes,"spectrum_nodes":{"shared":shared.active_spectrum_nodes,
-        "unlinked":unlinked.active_spectrum_nodes}}),
-    )
+    Ok(json!({"fft_nodes":{"shared":shared,"edited":forked,"rejoined":rejoined}}))
 }
 
 /// Stroke colors of the polylines drawn within the horizontal span of `rect`.
@@ -411,7 +345,7 @@ fn rgba(color: crate::render::Color) -> [u8; 4] {
 fn s03() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
     let mut h = Harness::new(ws);
-    tall(&mut h);
+    h.frame(vec![]);
     let a = first_leaf(&h.ws)?;
     let b = created(action(
         &mut h.ws,
@@ -431,24 +365,22 @@ fn s03() -> Result<Value, String> {
             type_id: WAVEFORM_MODULE_ID,
         },
     )?)?;
-    open_settings(&mut h, b)?;
     let swatch = SWATCHES[3];
-    panel(
+    open_settings(
         &mut h,
-        PanelControl::Override {
-            scope: ColorScope::Instance(b),
-            role: ColorRole::Primary,
-        },
+        b,
+        &[
+            SettingsItem::Override {
+                scope: ColorScope::Instance(b),
+                role: ColorRole::Primary,
+            },
+            SettingsItem::Swatch {
+                scope: ColorScope::Instance(b),
+                role: ColorRole::Primary,
+                index: 3,
+            },
+        ],
     )?;
-    panel(
-        &mut h,
-        PanelControl::Swatch {
-            scope: ColorScope::Instance(b),
-            role: ColorRole::Primary,
-            index: 3,
-        },
-    )?;
-    panel(&mut h, PanelControl::Close)?;
     let dark = Preset::Dark.palette();
     let light = Preset::Light.palette();
     let palette = |h: &Harness, id: ModuleInstanceId| {
@@ -466,6 +398,7 @@ fn s03() -> Result<Value, String> {
     driver
         .advance_frames(4_096, deadline())
         .map_err(|e| e.to_string())?;
+    h.focus = FIRST_WINDOW;
     let output = h.frame(vec![]);
     let rects =
         h.ws.observation()
@@ -481,35 +414,29 @@ fn s03() -> Result<Value, String> {
         &format!("drawn curve colors: original {drawn_a:?}, copy {drawn_b:?}"),
     )?;
 
-    h.menu(
-        ControlKey::LeafBody(a),
-        &[MenuItem::WorkspaceOpen, MenuItem::Theme],
-    )?;
-    settle_frames(&mut h);
-    panel(&mut h, PanelControl::Preset(Preset::Light))?;
+    let type_scope = ColorScope::Type(SPECTRUM_MODULE_ID);
+    h.in_settings(&[
+        SettingsItem::Tab(Tab::Theme),
+        SettingsItem::Preset(Preset::Light),
+    ])?;
     check(
         palette(&h, a)?.color(ColorRole::Primary) == light.color(ColorRole::Primary)
             && palette(&h, b)?.color(ColorRole::Primary) == swatch
             && palette(&h, b)?.color(ColorRole::Low) == light.color(ColorRole::Low),
         "after the global change unset roles must follow and overrides stay",
     )?;
-    panel(&mut h, PanelControl::TypeStyle(SPECTRUM_MODULE_ID))?;
-    let type_scope = ColorScope::Type(SPECTRUM_MODULE_ID);
-    panel(
-        &mut h,
-        PanelControl::Override {
+    h.in_settings(&[
+        SettingsItem::TypeStyle(SPECTRUM_MODULE_ID),
+        SettingsItem::Override {
             scope: type_scope,
             role: ColorRole::Secondary,
         },
-    )?;
-    panel(
-        &mut h,
-        PanelControl::Swatch {
+        SettingsItem::Swatch {
             scope: type_scope,
             role: ColorRole::Secondary,
             index: 6,
         },
-    )?;
+    ])?;
     let type_color = SWATCHES[6];
     check(
         palette(&h, a)?.color(ColorRole::Secondary) == type_color
@@ -518,21 +445,17 @@ fn s03() -> Result<Value, String> {
                 == light.color(ColorRole::Secondary),
         "type style did not apply to exactly the Spectrum instances",
     )?;
-    panel(
-        &mut h,
-        PanelControl::Override {
+    h.in_settings(&[
+        SettingsItem::Override {
             scope: ColorScope::Global,
             role: ColorRole::Primary,
         },
-    )?;
-    panel(
-        &mut h,
-        PanelControl::Swatch {
+        SettingsItem::Swatch {
             scope: ColorScope::Global,
             role: ColorRole::Primary,
             index: 4,
         },
-    )?;
+    ])?;
     let global = SWATCHES[4];
     check(
         palette(&h, a)?.color(ColorRole::Primary) == global
@@ -597,13 +520,8 @@ fn fingerprint(ws: &Workspace) -> Value {
 fn s04() -> Result<Value, String> {
     let dir = TempDir::new("s04")?;
     let (ws, _driver) = workspace()?;
-    let handle = ws.dataflow_handle_for_automation();
-    // Push runtime binding numbers away from the file's.
-    for _ in 0..5 {
-        handle.allocate_binding();
-    }
     let mut h = Harness::new(ws.with_store(dir.store(), "Round trip"));
-    tall(&mut h);
+    h.frame(vec![]);
     let a = first_leaf(&h.ws)?;
     let spec_a = spec(&h.ws, a)?;
     let channel = node(&spec_a, |n| matches!(n, NodeSpec::Channel(_)))?;
@@ -632,10 +550,6 @@ fn s04() -> Result<Value, String> {
             scope: ColorScope::Instance(a),
             role: ColorRole::Primary,
             color: Some(crate::render::Color::rgb(250, 230, 90)),
-        },
-        WorkspaceAction::ShareOutput {
-            instance_id: a,
-            output: peak(),
         },
     ] {
         action(&mut h.ws, step)?;
@@ -733,10 +647,10 @@ fn s04() -> Result<Value, String> {
     h.frame_window(second, vec![])?;
     h.frame_window(FIRST_WINDOW, vec![])?;
     h.focus = FIRST_WINDOW;
-    // Save through the menu.
-    h.menu(
+    // Save through the settings window.
+    h.settings(
         ControlKey::LeafBody(a),
-        &[MenuItem::WorkspaceOpen, MenuItem::SaveWorkspace],
+        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Save],
     )?;
     check(
         dir.file("Round trip").exists(),
@@ -760,9 +674,9 @@ fn s04() -> Result<Value, String> {
     let before = fingerprint(&h.ws);
     let modules_before = h.ws.observation().modules.len();
     h.frame(vec![]);
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(a),
-        &[MenuItem::WorkspaceOpen, MenuItem::Quit],
+        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Quit],
     )?;
     check(
         h.ws.windows().is_empty() && h.ws.observation().modules.is_empty(),
@@ -797,8 +711,8 @@ fn s04() -> Result<Value, String> {
     )?;
     let saved_text = serde_json::to_string(&saved).unwrap_or_default();
     check(
-        saved_text.contains("\"binding\":1") && !saved_text.contains("\"binding\":6"),
-        "bindings were not renumbered for the file",
+        !saved_text.contains("binding"),
+        "copies and edits created explicit sharing",
     )?;
     check(
         saved["windows"].as_array().map(Vec::len) == Some(2),
@@ -826,18 +740,8 @@ fn s04() -> Result<Value, String> {
     )?;
     let restored: Vec<ModuleInstanceId> = o.windows.iter().flat_map(|w| w.leaves.clone()).collect();
     settle(&h.ws, restored.len() as u64)?;
-    let shared: Vec<_> = o
-        .modules
-        .iter()
-        .filter_map(|m| m.data.as_ref())
-        .filter_map(|data| data.outputs().get(1).and_then(|output| output.binding))
-        .collect();
     let metrics = h.ws.dataflow_handle_for_automation().metrics();
-    check(
-        shared.len() == 2 && shared[0] == shared[1],
-        &format!("restored copies do not share one binding: {shared:?}"),
-    )?;
-    let positions: Vec<_> = h.windows.values().map(|w| w.position).collect();
+    let positions: Vec<_> = h.workspace_windows().map(|(_, w)| w.position).collect();
     check(
         positions.contains(&pos2(1200.0, 300.0)),
         &format!("detached window position not restored: {positions:?}"),
@@ -850,40 +754,6 @@ fn s04() -> Result<Value, String> {
         "saving the restored workspace changed the file",
     )?;
     h.ws.check_ownership()?;
-    // A binding nobody uses any more frees its number for the next one.
-    let members: Vec<ModuleInstanceId> =
-        h.ws.observation()
-            .modules
-            .iter()
-            .filter(|m| {
-                m.data
-                    .as_ref()
-                    .is_some_and(|d| d.outputs().get(1).is_some_and(|o| o.binding.is_some()))
-            })
-            .map(|m| m.instance_id)
-            .collect();
-    for instance_id in &members {
-        action(
-            &mut h.ws,
-            WorkspaceAction::UnshareOutput {
-                instance_id: *instance_id,
-                output: peak(),
-            },
-        )?;
-    }
-    action(
-        &mut h.ws,
-        WorkspaceAction::ShareOutput {
-            instance_id: *members.last().ok_or("no members")?,
-            output: peak(),
-        },
-    )?;
-    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
-    let reshared = serde_json::to_string(&read_json(&dir.file("Round trip"))?).unwrap_or_default();
-    check(
-        reshared.matches("\"binding\":1").count() == 1 && !reshared.contains("\"binding\":2"),
-        "a new binding did not take the freed number 1",
-    )?;
     // Closing the last window ends the session and saves first.
     let windows: Vec<WindowId> = h.ws.windows().iter().map(|w| w.id).collect();
     let (last, others) = windows.split_first().ok_or("no window")?;
@@ -1025,9 +895,11 @@ fn s05() -> Result<Value, String> {
     )?;
     // Choosing the shown fallback style in the settings panel is an explicit
     // choice and replaces the kept one.
-    h.set_size(vec2(900.0, 1400.0));
-    open_settings(&mut h, oscilloscope)?;
-    panel(&mut h, PanelControl::Style(LINE_OSCILLOSCOPE_STYLE_ID))?;
+    open_settings(
+        &mut h,
+        oscilloscope,
+        &[SettingsItem::Style(LINE_OSCILLOSCOPE_STYLE_ID)],
+    )?;
     action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
     check(
         read_json(&dir.file("Imported"))?["windows"][0]["layout"]["second"]["first"]["module"]["style"]
@@ -1099,7 +971,6 @@ fn s06() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws.with_store(dir.store(), "A"));
-    tall(&mut h);
     let a = first_leaf(&h.ws)?;
     for type_id in [WAVEFORM_MODULE_ID, OSCILLOSCOPE_MODULE_ID] {
         let new = created(action(
@@ -1118,15 +989,20 @@ fn s06() -> Result<Value, String> {
         )?;
     }
     settle(&h.ws, 3)?;
-    h.menu(
+    h.frame(vec![]);
+    h.settings(
         ControlKey::LeafBody(a),
-        &[MenuItem::WorkspaceOpen, MenuItem::NewWorkspace],
+        &[SettingsItem::Tab(Tab::Workspace)],
     )?;
-    settle_frames(&mut h);
-    h.click(ControlKey::Panel(PanelControl::Name))?;
+    h.in_settings(&[SettingsItem::Name])?;
+    // Typed text (a space included) is text, not the Space shortcut.
     h.frame(vec![Event::Text("B 2".to_owned())]);
     h.frame(vec![]);
-    h.click(ControlKey::Panel(PanelControl::Confirm))?;
+    check(
+        h.ws.observation().source_status.state == crate::audio::SourceState::Running,
+        "typing a name paused the source",
+    )?;
+    h.in_settings(&[SettingsItem::NewWorkspace])?;
     let o = h.ws.observation();
     check(
         o.name == "B 2" && o.windows.len() == 1 && o.modules.len() == 1,
@@ -1171,25 +1047,11 @@ fn s06() -> Result<Value, String> {
             ));
         }
     }
-    // Switching through the menu.
+    // Switching through the settings window.
     h.focus = h.ws.windows().first().map(|w| w.id).ok_or("no window")?;
     h.frame_all()?;
-    h.frame(vec![]);
-    let leaf =
-        h.ws.observation()
-            .windows
-            .first()
-            .and_then(|w| w.leaves.first().copied())
-            .ok_or("no leaf")?;
     let index = names.iter().position(|n| n == "A").ok_or("A not listed")? as u16;
-    h.menu(
-        ControlKey::LeafBody(leaf),
-        &[
-            MenuItem::WorkspaceOpen,
-            MenuItem::SwitchOpen,
-            MenuItem::Switch(index),
-        ],
-    )?;
+    h.in_settings(&[SettingsItem::Switch(index)])?;
     let o = h.ws.observation();
     check(o.name == "A" && o.modules.len() == 3, "menu switch failed")?;
     settle(&h.ws, 3)?;
@@ -1252,4 +1114,116 @@ fn s07() -> Result<Value, String> {
         &format!("restored off-screen window: opened {opened_at:?}, now {landed:?}"),
     )?;
     Ok(json!({"rescued":[rescued.x,rescued.y],"restored":[landed.x,landed.y]}))
+}
+
+/// Reset of the workspace (with confirmation), settings for an empty window, and a
+/// saved explicit binding (as a plugin or an older file may carry): kept on
+/// restore, but an edit through the settings still changes only its instance.
+fn s08() -> Result<Value, String> {
+    let dir = TempDir::new("s08")?;
+    let spectrum = |extra: Value| {
+        json!({"type_id":SPECTRUM_MODULE_ID,"data":{"nodes":[
+            {"input":null,"kind":"channel","params":"mono_average"},
+            {"input":0,"kind":"fft","params":{"window_size":2048,"hop_size":512,"floor_dbfs":-160.0}},
+            {"input":1,"kind":"tilt","params":{"db_per_octave":0.0}},
+            {"input":2,"kind":"center","params":{"db":0.0}},
+            {"input":3,"kind":"gain","params":{"db":0.0}},
+            {"input":1,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+            "outputs":[{"node":4,"keep":"latest"},extra]}})
+    };
+    let bound = json!({"node":5,"keep":"latest","binding":9});
+    let file = json!({"format_version":1,"name":"Bound","theme":{"preset":"light"},
+        "windows":[{"outer_position":[300.0,200.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
+            "layout":{"node":"split","axis":"left_right","ratio":0.5,
+                "first":{"node":"leaf","module":spectrum(bound.clone())},
+                "second":{"node":"leaf","module":spectrum(bound)}}}]});
+    fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.file("Bound"),
+        serde_json::to_vec(&file).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())?;
+    dir.store()
+        .set_last_used("Bound")
+        .map_err(|e| e.to_string())?;
+    let (live, _driver) = manual_live()?;
+    let ws = Workspace::open(live, dir.store(), false).map_err(|e| e.to_string())?;
+    let handle = ws.dataflow_handle_for_automation();
+    let mut h = Harness::new(ws);
+    h.frame_all()?;
+    settle(&h.ws, 2)?;
+    let restored = handle.metrics().active_spectrum_nodes;
+    check(
+        restored == 4,
+        &format!("the saved binding was not restored as one shared Peak: {restored}"),
+    )?;
+    let window = h.focus;
+    let leaves = leaves(&h.ws, window);
+    let (a, b) = (leaves[0], leaves[1]);
+    open_settings(&mut h, b, &[SettingsItem::Channel(ChannelSelection::Right)])?;
+    check(
+        channel_of(&spec(&h.ws, a)?) == Some(ChannelSelection::MonoAverage)
+            && channel_of(&spec(&h.ws, b)?) == Some(ChannelSelection::Right)
+            && spec(&h.ws, b)?.outputs()[1].binding.is_none()
+            && spec(&h.ws, a)?.outputs()[1].binding.is_some(),
+        "an edit of a bound instance did not stay on that instance",
+    )?;
+    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
+    let saved = serde_json::to_string(&read_json(&dir.file("Bound"))?).unwrap_or_default();
+    check(
+        saved.matches("\"binding\":9").count() == 1,
+        "the remaining binding did not keep its file number",
+    )?;
+
+    // Reset: one default Spectrum, Dark theme, same name and place; saved.
+    h.in_settings(&[SettingsItem::Tab(Tab::Workspace), SettingsItem::Reset])?;
+    check(
+        h.ws.observation().modules.len() == 2,
+        "Reset acted without confirmation",
+    )?;
+    h.in_settings(&[
+        SettingsItem::CancelReset,
+        SettingsItem::Reset,
+        SettingsItem::ConfirmReset,
+    ])?;
+    h.frame_all()?;
+    let o = h.ws.observation();
+    check(
+        o.name == "Bound"
+            && o.windows.len() == 1
+            && o.modules.len() == 1
+            && o.modules[0].type_id == SPECTRUM_MODULE_ID
+            && o.theme.preset == "dark"
+            && o.theme.colors.is_empty(),
+        &format!("Reset did not restore the defaults: {:?}", o.windows.len()),
+    )?;
+    settle(&h.ws, 1)?;
+    let reset_file = read_json(&dir.file("Bound"))?;
+    let new_window = o.windows[0].id;
+    let position = h.window(new_window)?.position;
+    check(
+        reset_file["theme"]["preset"] == "dark"
+            && reset_file["windows"].as_array().map(Vec::len) == Some(1)
+            && position == pos2(300.0, 200.0)
+            && h.ws.settings_open(),
+        &format!("Reset was not saved or moved the window: {position:?}"),
+    )?;
+
+    // An empty window's right click opens the Window tab, which can add a module.
+    let only = o.modules[0].instance_id;
+    action(
+        &mut h.ws,
+        WorkspaceAction::CloseModule { instance_id: only },
+    )?;
+    h.focus = new_window;
+    h.frame(vec![]);
+    h.settings(ControlKey::EmptyBody, &[])?;
+    h.in_settings(&[SettingsItem::AddModule(WAVEFORM_MODULE_ID)])?;
+    let o = h.ws.observation();
+    check(
+        o.modules.len() == 1 && o.modules[0].type_id == WAVEFORM_MODULE_ID,
+        "Add module in the settings window failed",
+    )?;
+    h.ws.check_ownership()?;
+    Ok(json!({"restored_spectrum_nodes":restored,"reset_position":[position.x,position.y]}))
 }

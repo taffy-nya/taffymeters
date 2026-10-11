@@ -1,8 +1,8 @@
 use crate::{
     audio::SourceReader,
     dataflow::{
-        ChannelSelection, DataController, DataSpec, DataSubscription, DataflowHandle, FftConfig,
-        Keep, NodeRef, NodeSpec, OutputId, SOURCE,
+        ChannelSelection, DataController, DataSpec, DataSubscription, FftConfig, Keep, NodeRef,
+        NodeSpec, OutputId, SOURCE,
     },
     extensions::{Registry, RegistryError},
     module::{
@@ -57,7 +57,6 @@ impl ModuleFactory for SpectrogramFactory {
             .map_err(ModuleError::from)?;
         Ok(Box::new(SpectrogramModule {
             source: services.source.clone(),
-            dataflow: services.dataflow.clone(),
             controller: subscription.controller(),
             reader: subscription.reader(),
             _subscription: subscription,
@@ -73,7 +72,6 @@ impl ModuleFactory for SpectrogramFactory {
 
 struct SpectrogramModule {
     source: SourceReader,
-    dataflow: DataflowHandle,
     controller: DataController,
     reader: DataReader,
     _subscription: DataSubscription,
@@ -114,11 +112,9 @@ impl Module for SpectrogramModule {
 
     fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
         channel.resolve(self.source.descriptor())?;
-        self.dataflow.edit_node(
-            &self.controller,
-            self.channel_node,
-            NodeSpec::Channel(channel),
-        )?;
+        let node = self.channel_node;
+        self.controller
+            .update(|spec| spec.set_node(node, NodeSpec::Channel(channel)))?;
         Ok(())
     }
 

@@ -12,7 +12,7 @@ use super::{
     ModuleInstanceId, MoveTarget, Side, SplitId, WindowId, Workspace, WorkspaceAction,
     desktop::DesktopProbe,
     layout::{Axis, DividerGeometry},
-    panel::{NamePurpose, Panel},
+    settings_window::SettingsItem,
 };
 use crate::{
     audio::{AudioDescriptor, ChannelLayout, SourceState, SourceStatus},
@@ -100,46 +100,6 @@ impl ResizeEdge {
     }
 }
 
-/// Entries of the per-leaf / empty-window context menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum MenuItem {
-    ModuleOpen,
-    ModuleType(&'static str),
-    ChannelOpen,
-    Channel(ChannelSelection),
-    StyleOpen,
-    Style(&'static str),
-    ClearVisual,
-    LayoutOpen,
-    SplitRight,
-    SplitDown,
-    Detach,
-    MoveTo,
-    CloseModule,
-    WindowOpen,
-    AlwaysOnTop,
-    Maximize,
-    Group,
-    LeaveGroup,
-    CloseWindow,
-    SourceOpen,
-    Pause,
-    AddModule(&'static str),
-    AddOpen,
-    Settings,
-    Duplicate,
-    WorkspaceOpen,
-    SaveWorkspace,
-    SaveWorkspaceAs,
-    NewWorkspace,
-    SwitchOpen,
-    /// Saved workspace by index in the sorted list.
-    Switch(u16),
-    Theme,
-    ClearNotices,
-    Quit,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ControlKey {
     LeafBody(ModuleInstanceId),
@@ -150,9 +110,11 @@ pub(crate) enum ControlKey {
     Divider(SplitId),
     Resize(ResizeEdge),
     EmptyBody,
-    Menu(MenuItem),
+    /// The empty window's "Add module" button and its entries.
+    AddOpen,
+    AddModule(&'static str),
     MoveTarget(MoveTarget),
-    Panel(super::panel::PanelControl),
+    Settings(SettingsItem),
 }
 
 #[cfg(any(test, feature = "automation"))]
@@ -179,10 +141,6 @@ pub(crate) struct WindowUiState {
     pub(crate) divider_drag: Option<DividerDrag>,
     pub(crate) display_time: Duration,
     min_size_sent: Option<Vec2>,
-    /// Settings, theme or naming panel shown in this window.
-    pub(crate) panel: Option<Panel>,
-    /// A panel text field has keyboard focus: keys are text, not shortcuts.
-    pub(crate) typing: bool,
     #[cfg(any(test, feature = "automation"))]
     targets: std::collections::HashMap<ControlKey, ControlTarget>,
     #[cfg(any(test, feature = "automation"))]
@@ -195,7 +153,7 @@ pub(crate) struct WindowUiState {
 #[derive(Default)]
 pub(crate) struct Controls {
     #[cfg(any(test, feature = "automation"))]
-    responses: Vec<(ControlKey, Response)>,
+    pub(super) responses: Vec<(ControlKey, Response)>,
 }
 
 impl Controls {
@@ -316,6 +274,7 @@ impl Workspace {
         ui.painter()
             .rect_filled(rect, 0.0, color32(self.chrome.color(ColorRole::Background)));
         let windows_before: Vec<WindowId> = self.windows.keys().copied().collect();
+        let settings_before = self.settings.is_some();
         self.tick(display_time);
         let repaint = self.window_pass(window_id, ui, rect, display_time, probe);
         if let Some(delay) = repaint {
@@ -336,7 +295,7 @@ impl Workspace {
             ctx.request_repaint_after_for(wait + predicted, egui::ViewportId::ROOT);
         }
         let windows_after: Vec<WindowId> = self.windows.keys().copied().collect();
-        if windows_before != windows_after {
+        if windows_before != windows_after || settings_before != self.settings.is_some() {
             // The host (root) pass owns native viewport creation and removal.
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
@@ -469,7 +428,6 @@ impl Workspace {
         if !maximized {
             Self::resize_edges(ui, rect, &mut controls);
         }
-        self.panel_ui(window_id, ui, rect, &mut controls, &mut actions);
         self.status_badge(window_id, ui, rect);
 
         #[cfg(any(test, feature = "automation"))]
@@ -490,18 +448,7 @@ impl Workspace {
         for action in actions {
             let _ = self.apply_action(action);
         }
-        if let Some((target, panel)) = self.panel_request.take()
-            && let Some(window) = self.windows.get_mut(&target)
-        {
-            window.ui.panel = Some(panel);
-        }
         repaint
-    }
-
-    /// Show `panel` in `window_id` once this pass ends (menus only read the
-    /// Workspace while they draw).
-    pub(super) fn request_panel(&self, window_id: WindowId, panel: Panel) {
-        self.panel_request.replace(Some((window_id, panel)));
     }
 
     fn handle_shortcuts(&mut self, window_id: WindowId, ui: &egui::Ui) {
@@ -516,18 +463,6 @@ impl Workspace {
                 input.key_pressed(egui::Key::Num2),
             )
         });
-        if escape
-            && !egui::Popup::is_any_open(ctx)
-            && let Some(window) = self.windows.get_mut(&window_id)
-            && window.ui.panel.is_some()
-        {
-            window.ui.panel = None;
-            return;
-        }
-        // Typing in a panel's text field is not a shortcut.
-        if self.windows[&window_id].ui.typing {
-            return;
-        }
         if escape && !egui::Popup::is_any_open(ctx) {
             let pending_detach = self
                 .windows
@@ -635,15 +570,12 @@ impl Workspace {
                 window.commands.push(ViewportCommand::StartDrag);
                 window.desktop.native_drag = true;
             }
-            if !picking {
-                body.context_menu(|ui| {
-                    // Small windows: keep every entry reachable.
-                    let height = (ui.ctx().content_rect().height() - 16.0).max(48.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(height)
-                        .show(ui, |ui| {
-                            self.leaf_menu(window_id, leaf, ui, controls, actions);
-                        });
+            if !picking && body.secondary_clicked() {
+                // Right click edits the module in the settings window.
+                actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
+                actions.push(WorkspaceAction::OpenSettings {
+                    window_id,
+                    instance_id: Some(leaf),
                 });
             }
             // The Module only sees the pointer over its own content, not over the
@@ -904,18 +836,23 @@ impl Workspace {
         if picking {
             return;
         }
-        body.context_menu(|ui| {
-            self.add_menu(ui, controls, actions, window_id);
-            ui.separator();
-            self.window_and_source_menus(window_id, ui, controls, actions);
-        });
         let button_rect = Rect::from_center_size(rect.center(), egui::vec2(140.0, 28.0));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
-            let response = ui.menu_button("Add module", |ui| {
-                self.add_menu(ui, controls, actions, window_id);
+        let button = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+                let response = ui.menu_button("Add module", |ui| {
+                    self.add_menu(ui, controls, actions, window_id);
+                });
+                controls.record(ControlKey::AddOpen, &response.response);
+                response.response.secondary_clicked()
+            })
+            .inner;
+        // A right click anywhere in the empty window opens its settings.
+        if body.secondary_clicked() || button {
+            actions.push(WorkspaceAction::OpenSettings {
+                window_id,
+                instance_id: None,
             });
-            controls.record(ControlKey::Menu(MenuItem::AddOpen), &response.response);
-        });
+        }
     }
 
     fn add_menu(
@@ -928,311 +865,10 @@ impl Workspace {
         ui.label("Add module");
         for (type_id, label) in self.registry.module_types() {
             let response = ui.button(label);
-            controls.record(ControlKey::Menu(MenuItem::AddModule(type_id)), &response);
+            controls.record(ControlKey::AddModule(type_id), &response);
             if response.clicked() {
                 actions.push(WorkspaceAction::AddModule { window_id, type_id });
             }
-        }
-    }
-
-    fn leaf_menu(
-        &self,
-        window_id: WindowId,
-        leaf: ModuleInstanceId,
-        ui: &mut egui::Ui,
-        controls: &mut Controls,
-        actions: &mut Vec<WorkspaceAction>,
-    ) {
-        let Some(entry) = self.modules.get(&leaf) else {
-            return;
-        };
-        ui.label(format!("{} #{}", entry.label, leaf.0));
-        let module_open = ui.menu_button("Module", |ui| {
-            for (type_id, label) in self.registry.module_types() {
-                let response = ui.selectable_label(type_id == entry.type_id, label);
-                controls.record(ControlKey::Menu(MenuItem::ModuleType(type_id)), &response);
-                if response.clicked() {
-                    actions.push(WorkspaceAction::ReplaceModule {
-                        instance_id: leaf,
-                        type_id,
-                    });
-                }
-            }
-        });
-        controls.record(
-            ControlKey::Menu(MenuItem::ModuleOpen),
-            &module_open.response,
-        );
-        if let Some(selected) = entry.module.channel() {
-            let descriptor = self.services.source.descriptor().clone();
-            let channel_open = ui.menu_button("Channel", |ui| {
-                for (index, channel) in channel_options(&descriptor) {
-                    let label = match channel {
-                        ChannelSelection::Left => "1: Left".to_owned(),
-                        ChannelSelection::Right => "2: Right".to_owned(),
-                        _ => format!("{}: Ch {}", index + 1, index + 1),
-                    };
-                    let response = ui.selectable_label(selected == channel, label);
-                    controls.record(ControlKey::Menu(MenuItem::Channel(channel)), &response);
-                    if response.clicked() {
-                        actions.push(WorkspaceAction::SetChannel {
-                            instance_id: leaf,
-                            channel,
-                        });
-                    }
-                }
-                let response =
-                    ui.selectable_label(selected == ChannelSelection::MonoAverage, "M: Mono mix");
-                controls.record(
-                    ControlKey::Menu(MenuItem::Channel(ChannelSelection::MonoAverage)),
-                    &response,
-                );
-                if response.clicked() {
-                    actions.push(WorkspaceAction::SetChannel {
-                        instance_id: leaf,
-                        channel: ChannelSelection::MonoAverage,
-                    });
-                }
-            });
-            controls.record(
-                ControlKey::Menu(MenuItem::ChannelOpen),
-                &channel_open.response,
-            );
-        }
-        let styles = entry.module.style_options();
-        if !styles.is_empty() {
-            let active = entry.module.active_style();
-            let style_open = ui.menu_button("Style", |ui| {
-                for option in styles {
-                    let response = ui.selectable_label(active == Some(option.id), option.label);
-                    controls.record(ControlKey::Menu(MenuItem::Style(option.id)), &response);
-                    if response.clicked() {
-                        actions.push(WorkspaceAction::SetStyle {
-                            instance_id: leaf,
-                            style_id: option.id,
-                        });
-                    }
-                }
-                ui.separator();
-                let response = ui.button("Clear visual state");
-                controls.record(ControlKey::Menu(MenuItem::ClearVisual), &response);
-                if response.clicked() {
-                    actions.push(WorkspaceAction::ClearVisualState { instance_id: leaf });
-                }
-            });
-            controls.record(ControlKey::Menu(MenuItem::StyleOpen), &style_open.response);
-        }
-        let layout_open = ui.menu_button("Layout", |ui| {
-            for (item, side, label) in [
-                (MenuItem::SplitRight, Side::Right, "Split right"),
-                (MenuItem::SplitDown, Side::Below, "Split down"),
-            ] {
-                let response = ui.add_enabled(self.can_split(leaf, side), egui::Button::new(label));
-                controls.record(ControlKey::Menu(item), &response);
-                if response.clicked() {
-                    actions.push(WorkspaceAction::SplitModule {
-                        instance_id: leaf,
-                        side,
-                    });
-                }
-            }
-            let leaves = self.windows[&window_id].layout.leaves().len();
-            let response = ui.add_enabled(leaves > 1, egui::Button::new("Detach to new window"));
-            controls.record(ControlKey::Menu(MenuItem::Detach), &response);
-            if response.clicked() {
-                actions.push(WorkspaceAction::DetachModule { instance_id: leaf });
-            }
-            let response = ui.button("Move to…");
-            controls.record(ControlKey::Menu(MenuItem::MoveTo), &response);
-            if response.clicked() {
-                actions.push(WorkspaceAction::BeginMove { instance_id: leaf });
-            }
-            let response = ui.add_enabled(
-                self.can_split(leaf, Side::Right) && entry.preserved.is_none(),
-                egui::Button::new("Duplicate"),
-            );
-            controls.record(ControlKey::Menu(MenuItem::Duplicate), &response);
-            if response.clicked() {
-                actions.push(WorkspaceAction::DuplicateModule { instance_id: leaf });
-            }
-        });
-        controls.record(
-            ControlKey::Menu(MenuItem::LayoutOpen),
-            &layout_open.response,
-        );
-        let response = ui.button("Settings…");
-        controls.record(ControlKey::Menu(MenuItem::Settings), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
-            self.request_panel(window_id, Panel::settings(leaf));
-        }
-        let response = ui.button("Close module");
-        controls.record(ControlKey::Menu(MenuItem::CloseModule), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::CloseModule { instance_id: leaf });
-        }
-        ui.separator();
-        self.window_and_source_menus(window_id, ui, controls, actions);
-    }
-
-    fn window_and_source_menus(
-        &self,
-        window_id: WindowId,
-        ui: &mut egui::Ui,
-        controls: &mut Controls,
-        actions: &mut Vec<WorkspaceAction>,
-    ) {
-        let window_open = ui.menu_button("Window", |ui| {
-            self.window_menu(window_id, ui, controls, actions);
-        });
-        controls.record(
-            ControlKey::Menu(MenuItem::WindowOpen),
-            &window_open.response,
-        );
-        let source_open = ui.menu_button("Source", |ui| {
-            self.source_menu(ui, controls, actions);
-        });
-        controls.record(
-            ControlKey::Menu(MenuItem::SourceOpen),
-            &source_open.response,
-        );
-        let workspace_open = ui.menu_button("Workspace", |ui| {
-            self.workspace_menu(window_id, ui, controls, actions);
-        });
-        controls.record(
-            ControlKey::Menu(MenuItem::WorkspaceOpen),
-            &workspace_open.response,
-        );
-    }
-
-    fn workspace_menu(
-        &self,
-        window_id: WindowId,
-        ui: &mut egui::Ui,
-        controls: &mut Controls,
-        actions: &mut Vec<WorkspaceAction>,
-    ) {
-        ui.label(format!("Workspace: {}", self.name()));
-        let response = ui.add_enabled(self.can_save(), egui::Button::new("Save"));
-        controls.record(ControlKey::Menu(MenuItem::SaveWorkspace), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::SaveWorkspace);
-        }
-        let has_store = self.store.is_some();
-        for (item, label, purpose) in [
-            (MenuItem::SaveWorkspaceAs, "Save as…", NamePurpose::SaveAs),
-            (MenuItem::NewWorkspace, "New…", NamePurpose::New),
-        ] {
-            let response = ui.add_enabled(has_store, egui::Button::new(label));
-            controls.record(ControlKey::Menu(item), &response);
-            if response.clicked() {
-                self.request_panel(window_id, Panel::name(purpose));
-            }
-        }
-        let saved = self.saved_workspaces();
-        let switch_open = ui.add_enabled_ui(has_store && !saved.is_empty(), |ui| {
-            ui.menu_button("Switch to", |ui| {
-                for (index, name) in saved.iter().enumerate() {
-                    let response = ui.selectable_label(*name == self.name, name);
-                    controls.record(ControlKey::Menu(MenuItem::Switch(index as u16)), &response);
-                    if response.clicked() && *name != self.name {
-                        actions.push(WorkspaceAction::SwitchWorkspace { name: name.clone() });
-                    }
-                }
-            })
-        });
-        controls.record(
-            ControlKey::Menu(MenuItem::SwitchOpen),
-            &switch_open.inner.response,
-        );
-        ui.separator();
-        let response = ui.button("Theme…");
-        controls.record(ControlKey::Menu(MenuItem::Theme), &response);
-        if response.clicked() {
-            self.request_panel(window_id, Panel::theme());
-        }
-        if !self.notices.is_empty() {
-            let response = ui.button("Clear notices");
-            controls.record(ControlKey::Menu(MenuItem::ClearNotices), &response);
-            if response.clicked() {
-                actions.push(WorkspaceAction::ClearNotices);
-            }
-        }
-        ui.separator();
-        let response = ui.button(if self.can_save() {
-            "Quit (save workspace)"
-        } else {
-            "Quit"
-        });
-        controls.record(ControlKey::Menu(MenuItem::Quit), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::Quit);
-        }
-    }
-
-    fn window_menu(
-        &self,
-        window_id: WindowId,
-        ui: &mut egui::Ui,
-        controls: &mut Controls,
-        actions: &mut Vec<WorkspaceAction>,
-    ) {
-        let window = &self.windows[&window_id];
-        let response = ui.selectable_label(window.always_on_top, "Always on top");
-        controls.record(ControlKey::Menu(MenuItem::AlwaysOnTop), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::SetAlwaysOnTop {
-                window_id,
-                enabled: !window.always_on_top,
-            });
-        }
-        let response = ui.button(if window.maximized {
-            "Restore"
-        } else {
-            "Maximize"
-        });
-        controls.record(ControlKey::Menu(MenuItem::Maximize), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::ToggleMaximized { window_id });
-        }
-        if window.group.is_some() {
-            let response = ui.button("Leave group");
-            controls.record(ControlKey::Menu(MenuItem::LeaveGroup), &response);
-            if response.clicked() {
-                actions.push(WorkspaceAction::LeaveGroup { window_id });
-            }
-        }
-        let response = ui.button("Group with touching windows");
-        controls.record(ControlKey::Menu(MenuItem::Group), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::GroupTouching { window_id });
-        }
-        let response = ui.button("Close window");
-        controls.record(ControlKey::Menu(MenuItem::CloseWindow), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::CloseWindow { window_id });
-        }
-    }
-
-    fn source_menu(
-        &self,
-        ui: &mut egui::Ui,
-        controls: &mut Controls,
-        actions: &mut Vec<WorkspaceAction>,
-    ) {
-        let status = self.source_status();
-        ui.label(source_status_text(&status));
-        let label = match status.state {
-            SourceState::Paused => "Resume source (Space)",
-            _ => "Pause source (Space)",
-        };
-        let response = ui.add_enabled(
-            matches!(status.state, SourceState::Running | SourceState::Paused),
-            egui::Button::new(label),
-        );
-        controls.record(ControlKey::Menu(MenuItem::Pause), &response);
-        if response.clicked() {
-            actions.push(WorkspaceAction::TogglePause);
         }
     }
 

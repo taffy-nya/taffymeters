@@ -1,14 +1,11 @@
 //! Settings descriptions. The analysis part of a Module's settings is generated
-//! from its `DataSpec` (each node listed once, explicit sharing shown as one group);
-//! the view part comes from the Module as descriptors whose values are also what
-//! persistence saves. The Workspace renders both; Modules never depend on the UI
-//! toolkit to describe their settings.
+//! from its `DataSpec` (each node listed once); the view part comes from the Module
+//! as descriptors whose values are also what persistence saves. The Workspace
+//! renders both; Modules never depend on the UI toolkit to describe their settings.
 
 use serde::{Deserialize, Serialize};
 
-use crate::dataflow::{
-    ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId, SharedAnalysisId,
-};
+use crate::dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId};
 
 /// Value of one view setting; also its saved form.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -210,20 +207,11 @@ pub fn with_fft_window(fft: FftConfig, window_size: usize) -> FftConfig {
     }
 }
 
-/// Where a data setting lives: this instance alone, or the shared group of one
-/// explicit binding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DataScope {
-    Private,
-    Shared(SharedAnalysisId),
-}
-
 /// One node as the settings show it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeEntry {
     pub node: NodeRef,
     pub spec: NodeSpec,
-    pub scope: DataScope,
 }
 
 /// One output as the settings show it.
@@ -231,12 +219,10 @@ pub struct NodeEntry {
 pub struct OutputEntry {
     pub output: OutputId,
     pub keep: Keep,
-    pub binding: Option<SharedAnalysisId>,
-    /// The output depends on stateful nodes, so sharing it shares that state.
-    pub shareable: bool,
 }
 
-/// The analysis settings of one `DataSpec`.
+/// The analysis settings of one `DataSpec`. Sharing is not part of them: every
+/// instance edits its own analysis and the dataflow shares what stays identical.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DataSettings {
     /// Every node with parameters, once, in declaration order.
@@ -249,15 +235,7 @@ impl DataSettings {
         let nodes = spec
             .nodes()
             .filter(|(_, _, node)| !NodeParam::of(node).is_empty())
-            .map(|(node, _, spec_node)| NodeEntry {
-                node,
-                spec: spec_node,
-                scope: spec
-                    .binding_covering(node)
-                    .map_or(DataScope::Private, |(binding, _)| {
-                        DataScope::Shared(binding)
-                    }),
-            })
+            .map(|(node, _, spec)| NodeEntry { node, spec })
             .collect();
         let outputs = spec
             .outputs()
@@ -266,22 +244,9 @@ impl DataSettings {
             .map(|(index, output)| OutputEntry {
                 output: OutputId::from_index(index),
                 keep: output.keep,
-                binding: output.binding,
-                shareable: spec.depends_on_state(output.node),
             })
             .collect();
         Self { nodes, outputs }
-    }
-
-    /// Bindings in first-appearance order.
-    pub fn bindings(&self) -> Vec<SharedAnalysisId> {
-        let mut bindings = Vec::new();
-        for binding in self.outputs.iter().filter_map(|output| output.binding) {
-            if !bindings.contains(&binding) {
-                bindings.push(binding);
-            }
-        }
-        bindings
     }
 }
 

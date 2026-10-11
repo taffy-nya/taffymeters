@@ -11,9 +11,15 @@ use std::{
 use eframe::egui::{self, Event, PointerButton, Pos2, Rect, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::workspace::{
-    ControlKey, ControlTarget, DesktopProbe, FIRST_WINDOW, INITIAL_WINDOW_SIZE, MenuItem, WindowId,
-    Workspace,
+    ControlKey, ControlTarget, DesktopProbe, FIRST_WINDOW, INITIAL_WINDOW_SIZE, SettingsItem,
+    WindowId, Workspace,
 };
+
+/// The settings window in the harness's window map. It is not a Workspace window;
+/// the ID only addresses its simulated viewport.
+pub(super) const SETTINGS: WindowId = WindowId(u64::MAX);
+/// Tall enough that every tab's controls are visible without scrolling.
+const SETTINGS_SIM_SIZE: Vec2 = vec2(460.0, 1600.0);
 
 /// Simulated desktop facts for the snapping logic.
 pub(super) struct FakeDesktop {
@@ -141,8 +147,10 @@ impl Harness {
     /// (unless blocked) and forget closed ones.
     fn sync_windows(&mut self) {
         let live: Vec<_> = self.ws.windows();
-        self.windows
-            .retain(|id, _| live.iter().any(|window| window.id == *id));
+        let settings_open = self.ws.settings_open();
+        self.windows.retain(|id, _| {
+            (*id == SETTINGS && settings_open) || live.iter().any(|window| window.id == *id)
+        });
         for summary in live {
             if self.windows.contains_key(&summary.id) || self.blocked.contains(&summary.id) {
                 continue;
@@ -156,6 +164,21 @@ impl Harness {
             self.windows
                 .insert(summary.id, SimWindow::new(size, ppp, position));
         }
+        if settings_open && !self.windows.contains_key(&SETTINGS) {
+            let ppp = self.new_window_ppp;
+            let position = self
+                .ws
+                .settings_builder()
+                .and_then(|builder| builder.position)
+                .map_or(pos2(1000.0, 100.0), |position| position * ppp);
+            self.windows
+                .insert(SETTINGS, SimWindow::new(SETTINGS_SIM_SIZE, ppp, position));
+        }
+    }
+
+    /// Workspace windows only (the settings window excluded).
+    pub fn workspace_windows(&self) -> impl Iterator<Item = (&WindowId, &SimWindow)> {
+        self.windows.iter().filter(|(id, _)| **id != SETTINGS)
     }
 
     /// Run one UI pass of `id` with `events`.
@@ -191,8 +214,18 @@ impl Harness {
         let context = window.context.clone();
         let ws = &mut self.ws;
         let desktop = &self.desktop;
-        let output = context.run_ui(input, |ui| ws.window_ui(id, ui, display_time, desktop));
-        let targets = self.ws.control_targets(id);
+        let output = context.run_ui(input, |ui| {
+            if id == SETTINGS {
+                ws.settings_ui(ui, display_time, desktop);
+            } else {
+                ws.window_ui(id, ui, display_time, desktop);
+            }
+        });
+        let targets = if id == SETTINGS {
+            self.ws.settings_targets()
+        } else {
+            self.ws.control_targets(id)
+        };
         if let Some(window) = self.windows.get_mut(&id) {
             window.targets = targets;
             for viewport in output.viewport_output.values() {
@@ -404,14 +437,34 @@ impl Harness {
         Ok(start)
     }
 
-    /// Open the context menu of `body` and click `items` in order (submenus open on
-    /// hover, then the entry is located in the current pass).
-    pub fn menu(&mut self, body: ControlKey, items: &[MenuItem]) -> Result<(), String> {
+    /// Right-click `body` in the focused window (opening the settings window on it),
+    /// then click `items` in the settings window in order. Focus returns to the
+    /// original window if it still exists; the settings window stays open.
+    pub fn settings(&mut self, body: ControlKey, items: &[SettingsItem]) -> Result<(), String> {
+        let origin = self.focus;
         self.right_click(body)?;
+        if !self.windows.contains_key(&SETTINGS) {
+            return Err(format!(
+                "right click on {body:?} did not open the settings window"
+            ));
+        }
+        let result = self.in_settings(items);
+        if self.windows.contains_key(&origin) {
+            self.focus = origin;
+            self.frame(vec![]);
+        }
+        result
+    }
+
+    /// Click `items` in the open settings window; focus stays there.
+    pub fn in_settings(&mut self, items: &[SettingsItem]) -> Result<(), String> {
+        self.focus = SETTINGS;
         self.frame(vec![]);
         for item in items {
-            self.click(ControlKey::Menu(*item))?;
-            self.frame(vec![]);
+            self.click(ControlKey::Settings(*item))?;
+            if !self.windows.contains_key(&SETTINGS) {
+                break;
+            }
         }
         Ok(())
     }

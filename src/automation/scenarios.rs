@@ -15,14 +15,14 @@ use crate::{
     builtins::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
     dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeSpec, OutputId, SOURCE},
     workspace::{
-        ActionOutcome, ControlKey, FIRST_WINDOW, MenuItem, ModuleInstanceId, Side, Workspace,
-        WorkspaceAction,
+        ActionOutcome, ControlKey, FIRST_WINDOW, ModuleInstanceId, SettingsItem, Side, Tab,
+        Workspace, WorkspaceAction,
     },
 };
 
 use super::{
     deadline,
-    harness::Harness,
+    harness::{Harness, SETTINGS},
     report::{Case, Report, Status},
     visual, wait_until,
 };
@@ -556,12 +556,9 @@ fn c05() -> Result<Value, String> {
         &format!("split entry did not add a right leaf: {leaves:?}"),
     )?;
     let b = leaves[1];
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(b),
-        &[
-            MenuItem::ChannelOpen,
-            MenuItem::Channel(ChannelSelection::Right),
-        ],
+        &[SettingsItem::Channel(ChannelSelection::Right)],
     )?;
     let o = h.ws.observation();
     check(
@@ -569,20 +566,19 @@ fn c05() -> Result<Value, String> {
             && o.module(a).and_then(|m| m.channel) == Some(ChannelSelection::MonoAverage),
         "Channel click wrong instance",
     )?;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(b),
-        &[
-            MenuItem::StyleOpen,
-            MenuItem::Style(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
-        ],
+        &[SettingsItem::Style(
+            crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
+        )],
     )?;
     check(
         h.ws.observation().module(b).and_then(|m| m.active_style)
             == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
         "style popup did not apply",
     )?;
-    h.menu(ControlKey::LeafBody(b), &[MenuItem::CloseModule])?;
-    h.menu(ControlKey::LeafBody(a), &[MenuItem::CloseModule])?;
+    h.settings(ControlKey::LeafBody(b), &[SettingsItem::CloseModule])?;
+    h.settings(ControlKey::LeafBody(a), &[SettingsItem::CloseModule])?;
     h.frame(vec![]);
     let remaining = h.ws.observation().modules.len();
     check(
@@ -594,60 +590,71 @@ fn c05() -> Result<Value, String> {
         "closed leaf still has a target",
     )?;
     h.dropdown(
-        ControlKey::Menu(MenuItem::AddOpen),
-        ControlKey::Menu(MenuItem::AddModule(SPECTRUM_MODULE_ID)),
+        ControlKey::AddOpen,
+        ControlKey::AddModule(SPECTRUM_MODULE_ID),
     )?;
     let c = first_leaf(&h.ws)?;
     check(c != a && c != b, "Add reused an instance")?;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(c),
-        &[MenuItem::SourceOpen, MenuItem::Pause],
+        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Pause],
     )?;
     check(
         h.ws.observation().source_status.state == SourceState::Paused
             && driver.advance_frames(160, deadline()).is_err(),
         "Pause entry failed",
     )?;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(c),
-        &[MenuItem::SourceOpen, MenuItem::Pause],
+        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Pause],
     )?;
     check(
         h.ws.observation().source_status.state == SourceState::Running,
         "Resume entry failed",
     )?;
     let old = h.locate(&ControlKey::LeafBody(c))?;
-    h.set_size(egui::vec2(480.0, 240.0));
+    // Shrinking the application window does not shrink the settings window.
+    h.set_size(egui::vec2(120.0, 60.0));
     h.frame(vec![]);
     check(
         h.click_target(ControlKey::LeafBody(c), old).is_err(),
         "stale control accepted after resize",
     )?;
-    check(
-        h.locate(&ControlKey::Menu(MenuItem::Style(
-            crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
-        )))
-        .is_err(),
-        "closed popup item incorrectly available",
-    )?;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(c),
-        &[MenuItem::SourceOpen, MenuItem::Pause],
+        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Pause],
     )?;
+    let settings_size =
+        h.ws.settings_builder()
+            .and_then(|builder| builder.inner_size);
     check(
-        h.ws.observation().source_status.state == SourceState::Paused,
-        "narrow-layout Pause target missed",
+        h.ws.observation().source_status.state == SourceState::Paused
+            && settings_size.is_some_and(|size| size.x >= 280.0 && size.y >= 220.0),
+        &format!(
+            "tiny-window settings Pause target missed or the settings window is tiny: {settings_size:?}"
+        ),
     )?;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(c),
-        &[MenuItem::SourceOpen, MenuItem::Pause],
+        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Pause],
     )?;
     check(
         h.ws.observation().source_status.state == SourceState::Running,
-        "narrow-layout Resume target missed",
+        "tiny-window settings Resume target missed",
+    )?;
+    // Escape in the settings window closes it; its controls are gone.
+    h.focus = SETTINGS;
+    h.key(egui::Key::Escape);
+    h.focus = FIRST_WINDOW;
+    h.frame(vec![]);
+    check(
+        !h.ws.settings_open()
+            && h.ws.has_window(FIRST_WINDOW)
+            && !h.windows.contains_key(&SETTINGS),
+        "Escape did not close only the settings window",
     )?;
     h.ws.check_ownership()?;
-    Ok(json!({"split":b.0,"added":c.0,"narrow_size":[480,240]}))
+    Ok(json!({"split":b.0,"added":c.0,"tiny_window":[120,60]}))
 }
 
 fn c06() -> Result<Value, String> {
@@ -705,20 +712,23 @@ fn c06() -> Result<Value, String> {
                     .is_some_and(|module| module.channel.is_none()),
             &format!("{type_id} not selected or reports a Channel capability"),
         )?;
-        h.right_click(ControlKey::LeafBody(id))?;
-        h.frame(vec![]);
+        h.settings(ControlKey::LeafBody(id), &[])?;
+        let settings = h.ws.settings_targets();
         check(
-            h.locate(&ControlKey::Menu(MenuItem::CloseModule)).is_ok()
-                && h.locate(&ControlKey::Menu(MenuItem::ChannelOpen)).is_err(),
-            &format!("{type_id} menu exposes Channel or misses its entries"),
+            settings.contains_key(&ControlKey::Settings(SettingsItem::CloseModule))
+                && !settings
+                    .keys()
+                    .any(|key| matches!(key, ControlKey::Settings(SettingsItem::Channel(_)))),
+            &format!("{type_id} settings expose Channel or miss their entries"),
         )?;
-        // Escape with the menu open closes only the menu.
+        // Escape in the settings window closes only the settings window.
+        h.focus = SETTINGS;
         h.key(egui::Key::Escape);
+        h.focus = FIRST_WINDOW;
         h.frame(vec![]);
         check(
-            h.ws.has_window(FIRST_WINDOW)
-                && h.locate(&ControlKey::Menu(MenuItem::CloseModule)).is_err(),
-            "Escape with an open menu closed the window or left the menu open",
+            h.ws.has_window(FIRST_WINDOW) && !h.ws.settings_open(),
+            "Escape in the settings window closed a Workspace window or left settings open",
         )?;
         for key in [egui::Key::Num1, egui::Key::Num2] {
             h.key(key);
@@ -756,21 +766,19 @@ fn c06() -> Result<Value, String> {
     let mut mono_h = Harness::new(Workspace::new(mono_live, false).map_err(|e| e.to_string())?);
     mono_h.frame(vec![]);
     let mono_leaf = first_leaf(&mono_h.ws)?;
-    mono_h.menu(ControlKey::LeafBody(mono_leaf), &[MenuItem::ChannelOpen])?;
+    mono_h.settings(ControlKey::LeafBody(mono_leaf), &[])?;
+    let mono_settings = mono_h.ws.settings_targets();
     check(
-        mono_h
-            .locate(&ControlKey::Menu(MenuItem::Channel(
-                ChannelSelection::Right,
-            )))
-            .is_err()
-            && mono_h
-                .locate(&ControlKey::Menu(MenuItem::Channel(
-                    ChannelSelection::Discrete(0),
-                )))
-                .is_ok(),
+        !mono_settings.contains_key(&ControlKey::Settings(SettingsItem::Channel(
+            ChannelSelection::Right,
+        ))) && mono_settings.contains_key(&ControlKey::Settings(SettingsItem::Channel(
+            ChannelSelection::Discrete(0),
+        ))),
         "mono descriptor exposed Right or missed its channel",
     )?;
+    mono_h.focus = SETTINGS;
     mono_h.key(egui::Key::Escape);
+    mono_h.focus = FIRST_WINDOW;
     mono_h.key(egui::Key::Num2);
     check(
         mono_h
@@ -787,7 +795,7 @@ fn c06() -> Result<Value, String> {
         "idle Escape did not close the window and its modules",
     )?;
     Ok(json!({"spectrum":a.0,"non_channel_modules":non_channel,
-        "escape":"menu first, then closes this Workspace window; native close is the adapter's"}))
+        "escape":"settings window closes itself; idle Escape closes this Workspace window; native close is the adapter's"}))
 }
 
 fn c07() -> Result<Value, String> {
@@ -831,10 +839,7 @@ fn c07() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let with_trace = h.frame(vec![]);
     let published = handle.metrics().publications;
-    h.menu(
-        ControlKey::LeafBody(osc),
-        &[MenuItem::StyleOpen, MenuItem::ClearVisual],
-    )?;
+    h.settings(ControlKey::LeafBody(osc), &[SettingsItem::ClearVisual])?;
     let after_clear = h.frame(vec![]);
     check(
         with_trace.shapes.len() > after_clear.shapes.len()
@@ -1050,15 +1055,22 @@ fn c09() -> Result<Value, String> {
     )?;
     let mut h = Harness::new(ws);
     h.frame(vec![]);
-    h.right_click(ControlKey::LeafBody(empty))?;
-    h.frame(vec![]);
+    h.settings(ControlKey::LeafBody(empty), &[])?;
+    let settings = h.ws.settings_targets();
     check(
-        h.locate(&ControlKey::Menu(MenuItem::StyleOpen)).is_err()
-            && h.locate(&ControlKey::Menu(MenuItem::ClearVisual)).is_err()
-            && h.locate(&ControlKey::Menu(MenuItem::ModuleOpen)).is_ok(),
-        "Empty menu shows style controls or misses Module",
+        !settings.keys().any(|key| {
+            matches!(
+                key,
+                ControlKey::Settings(SettingsItem::Style(_) | SettingsItem::ClearVisual)
+            )
+        }) && settings.contains_key(&ControlKey::Settings(SettingsItem::ModuleType(
+            EMPTY_MODULE_ID,
+        ))),
+        "Empty settings show style controls or miss the module type",
     )?;
+    h.focus = SETTINGS;
     h.key(egui::Key::Escape);
+    h.focus = FIRST_WINDOW;
     let old = h.locate(&ControlKey::LeafBody(empty))?;
     h.frame(vec![]);
     check(

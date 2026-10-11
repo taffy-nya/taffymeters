@@ -263,16 +263,56 @@ impl Workspace {
         if self.can_save() {
             self.save()?;
         }
-        let always_on_top = self.windows.values().any(|window| window.always_on_top);
+        let placement = self.first_placement();
         self.clear();
         self.name = name;
         self.protected = false;
+        self.default_content(placement)?;
+        self.save()?;
+        Ok(ActionOutcome::Applied)
+    }
+
+    /// Replace the workspace's content with the defaults, keeping its name and the
+    /// place of its first window; saved unless the file is protected.
+    pub(super) fn reset_workspace(&mut self) -> Result<ActionOutcome, WorkspaceError> {
+        let placement = self.first_placement();
+        self.clear();
+        self.default_content(placement)?;
+        if self.can_save() {
+            self.save()?;
+        }
+        Ok(ActionOutcome::Applied)
+    }
+
+    /// Always-on-top state and desktop position (logical points, scale) of the
+    /// first window, for the default window that replaces the content.
+    fn first_placement(&self) -> (bool, Option<(Pos2, f32)>) {
+        let always_on_top = self.windows.values().any(|window| window.always_on_top);
+        let position = self.windows.values().next().and_then(|window| {
+            let ppp = window.pixels_per_point;
+            window
+                .desktop
+                .outer
+                .map(|outer| (outer.min / ppp, ppp))
+                .or(window.initial_position.map(|position| (position, ppp)))
+        });
+        (always_on_top, position)
+    }
+
+    /// One default Spectrum window and the Dark theme.
+    fn default_content(
+        &mut self,
+        (always_on_top, position): (bool, Option<(Pos2, f32)>),
+    ) -> Result<(), WorkspaceError> {
         self.theme = ThemeSettings::dark();
         self.input = InputConfig::default();
         self.refresh_palettes();
-        self.add_default_window(always_on_top)?;
-        self.save()?;
-        Ok(ActionOutcome::Applied)
+        let id = self.add_default_window(always_on_top)?;
+        if let (Some((position, ppp)), Some(window)) = (position, self.windows.get_mut(&id)) {
+            window.initial_position = Some(position);
+            window.pixels_per_point = ppp;
+        }
+        Ok(())
     }
 
     /// Drop every window and instance (and with them their subscriptions).
@@ -282,6 +322,9 @@ impl Workspace {
         self.move_source = None;
         self.binding_numbers.clear();
         self.notices.clear();
+        if let Some(settings) = &mut self.settings {
+            settings.forget_targets();
+        }
     }
 
     /// Build windows and instances from a saved workspace.

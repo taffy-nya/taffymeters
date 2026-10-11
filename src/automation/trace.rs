@@ -145,6 +145,7 @@ impl Trace {
             "workspace": observation.name,
             "theme": observation.theme.preset,
             "notices": observation.notices,
+            "settings_open": workspace.settings_open(),
         });
         let text = body.to_string();
         if text != self.last_state {
@@ -155,17 +156,35 @@ impl Trace {
 
     /// Record the control rects of `window`'s last pass when they changed.
     pub(crate) fn targets(&mut self, workspace: &Workspace, window: WindowId) {
+        let targets = workspace.control_targets(window);
+        self.write_targets(window, json!(window.0), targets);
+    }
+
+    /// Record the settings window's control rects (`"window": "settings"`).
+    pub(crate) fn settings_targets(&mut self, workspace: &Workspace) {
+        let targets = workspace.settings_targets();
+        self.write_targets(WindowId(u64::MAX), json!("settings"), targets);
+    }
+
+    fn write_targets(
+        &mut self,
+        key: WindowId,
+        label: serde_json::Value,
+        targets: std::collections::HashMap<
+            crate::workspace::ControlKey,
+            crate::workspace::ControlTarget,
+        >,
+    ) {
         let now = Instant::now();
         if self
             .targets_sampled
-            .get(&window)
+            .get(&key)
             .is_some_and(|at| now.duration_since(*at) < SAMPLE_INTERVAL)
         {
             return;
         }
-        self.targets_sampled.insert(window, now);
-        let mut targets: Vec<(String, [f32; 4], bool)> = workspace
-            .control_targets(window)
+        self.targets_sampled.insert(key, now);
+        let mut targets: Vec<(String, [f32; 4], bool)> = targets
             .into_iter()
             .map(|(key, target)| {
                 let r = target.rect;
@@ -177,10 +196,10 @@ impl Trace {
             })
             .collect();
         targets.sort_by(|a, b| a.0.cmp(&b.0));
-        let body = json!({"window": window.0, "targets": targets.iter().map(|(k, r, e)| json!([k, r, e])).collect::<Vec<_>>()});
+        let body = json!({"window": label, "targets": targets.iter().map(|(k, r, e)| json!([k, r, e])).collect::<Vec<_>>()});
         let text = body.to_string();
-        if self.last_targets.get(&window) != Some(&text) {
-            self.last_targets.insert(window, text);
+        if self.last_targets.get(&key) != Some(&text) {
+            self.last_targets.insert(key, text);
             self.write("targets", body);
         }
     }

@@ -148,6 +148,26 @@ impl eframe::App for App {
                     )
                 });
         }
+        let settings = {
+            let workspace = lock(&self.workspace);
+            workspace
+                .settings_builder()
+                .zip(workspace.settings_viewport_id())
+        };
+        if let Some((builder, viewport_id)) = settings {
+            ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
+                let mut workspace = lock(&self.workspace);
+                if ui.ctx().input(|input| input.viewport().close_requested()) {
+                    let _ = workspace.apply_action(WorkspaceAction::CloseSettings);
+                    return;
+                }
+                workspace.settings_ui(ui, self.started_at.elapsed(), &NativeDesktop);
+                #[cfg(feature = "automation")]
+                if let Some(trace) = &self.trace {
+                    lock(trace).settings_targets(&workspace);
+                }
+            });
+        }
         self.any_window_shown.store(shown, Ordering::Release);
     }
 

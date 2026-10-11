@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     engine::{Applied, Engine, Metrics, RuntimeMetrics},
-    spec::{DataSpec, NodeRef, NodeSpec, SharedAnalysisId, SpecError},
+    spec::{DataSpec, SharedAnalysisId, SpecError},
     store::{SharedStore, Store},
 };
 
@@ -69,9 +69,6 @@ pub enum ControlError {
     Stopped,
     SubscriptionClosed,
     SharedBindingMismatch(SharedAnalysisId),
-    /// A node belongs to the shared groups of two different bindings, so an edit
-    /// has no single set of members.
-    AmbiguousBinding,
     InvalidSpec(SpecError),
 }
 
@@ -84,7 +81,6 @@ impl fmt::Display for ControlError {
             Self::SharedBindingMismatch(id) => {
                 write!(f, "shared analysis {} resolves to a different output", id.0)
             }
-            Self::AmbiguousBinding => f.write_str("the node belongs to two shared analysis groups"),
             Self::InvalidSpec(error) => write!(f, "invalid data spec: {error}"),
         }
     }
@@ -462,41 +458,6 @@ impl DataflowHandle {
     /// A binding no subscription of this process uses yet.
     pub fn allocate_binding(&self) -> SharedAnalysisId {
         SharedAnalysisId(self.next_binding_id.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Give `node` of `controller`'s spec the parameters `spec` (same node kind).
-    /// A node inside the shared group of an explicit binding (the bound output and
-    /// its ancestors) is edited for every member of that binding at once; any other
-    /// node only for this subscription.
-    pub fn edit_node(
-        &self,
-        controller: &DataController,
-        node: NodeRef,
-        spec: NodeSpec,
-    ) -> Result<(), ControlError> {
-        let (current, binding, ambiguous) = controller.with_spec(|applied| {
-            (
-                applied.node(node),
-                applied.binding_covering(node),
-                applied.covered_by_several_bindings(node),
-            )
-        });
-        let index = node.index().ok_or(SpecError::UnknownNode)?;
-        let current = current.ok_or(SpecError::UnknownNode)?;
-        if std::mem::discriminant(&current) != std::mem::discriminant(&spec) {
-            return Err(SpecError::KindMismatch { node: index }.into());
-        }
-        if ambiguous {
-            return Err(ControlError::AmbiguousBinding);
-        }
-        match binding {
-            None => controller.update(|applied| applied.set_node(node, spec)),
-            Some((binding, depth)) => self.update_shared(binding, |member| {
-                if let Some(node) = member.binding_ancestor(binding, depth) {
-                    member.set_node(node, spec);
-                }
-            }),
-        }
     }
 
     pub fn metrics(&self) -> RuntimeMetrics {

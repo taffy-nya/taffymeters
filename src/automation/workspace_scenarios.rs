@@ -11,8 +11,8 @@ use crate::{
     builtins::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     dataflow::ChannelSelection,
     workspace::{
-        ActionOutcome, ControlKey, FIRST_WINDOW, MenuItem, ModuleInstanceId, MoveTarget,
-        ResizeEdge, Side, SplitId, WindowId, Workspace, WorkspaceAction,
+        ActionOutcome, ControlKey, FIRST_WINDOW, ModuleInstanceId, MoveTarget, ResizeEdge,
+        SettingsItem, Side, SplitId, Tab, WindowId, Workspace, WorkspaceAction,
     },
 };
 
@@ -404,10 +404,7 @@ fn w04() -> Result<Value, String> {
     subscriptions_settle(&h.ws, 2)?;
     let b_object = object(&h.ws, b)?;
     let created_before = h.ws.observation().modules_created;
-    h.menu(
-        ControlKey::LeafBody(b),
-        &[MenuItem::LayoutOpen, MenuItem::Detach],
-    )?;
+    h.settings(ControlKey::LeafBody(b), &[SettingsItem::Detach])?;
     let o = h.ws.observation();
     let pending = o
         .windows
@@ -506,10 +503,7 @@ fn w05() -> Result<Value, String> {
     let b_object = object(&h.ws, b)?;
     let created_before = h.ws.observation().modules_created;
     h.focus = window;
-    h.menu(
-        ControlKey::LeafBody(b),
-        &[MenuItem::LayoutOpen, MenuItem::MoveTo],
-    )?;
+    h.settings(ControlKey::LeafBody(b), &[SettingsItem::MoveTo])?;
     check(
         h.ws.observation().move_source == Some(b),
         "Move to… not armed",
@@ -652,9 +646,9 @@ fn w06() -> Result<Value, String> {
     let both = handle.metrics();
     check(both.pcm_frames > 0, "waveform window not recording")?;
     h.focus = second;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(w),
-        &[MenuItem::WindowOpen, MenuItem::CloseWindow],
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::CloseWindow],
     )?;
     check(
         !h.ws.has_window(second) && h.ws.observation().module(w).is_none(),
@@ -750,9 +744,9 @@ fn w07() -> Result<Value, String> {
         &format!("2x window did not snap to the 1x neighbor in physical pixels: {snapped:?}"),
     )?;
     h.focus = second;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(b),
-        &[MenuItem::WindowOpen, MenuItem::Group],
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Group],
     )?;
     let o = h.ws.observation();
     let group = o.window(second).and_then(|w| w.group);
@@ -777,9 +771,9 @@ fn w07() -> Result<Value, String> {
             h.window(second)?.position
         ),
     )?;
-    h.menu(
+    h.settings(
         ControlKey::LeafBody(b),
-        &[MenuItem::WindowOpen, MenuItem::LeaveGroup],
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::LeaveGroup],
     )?;
     check(
         h.ws.observation().windows.iter().all(|w| w.group.is_none()),
@@ -893,7 +887,7 @@ fn w08() -> Result<Value, String> {
     let o = h.ws.observation();
     check(
         o.windows.len() == 1
-            && h.windows.len() == 1
+            && h.workspace_windows().count() == 1
             && o.modules.len() == 1
             && o.move_source.is_none()
             && o.windows

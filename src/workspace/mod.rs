@@ -5,8 +5,8 @@
 
 mod desktop;
 mod layout;
-mod panel;
 mod persist;
+mod settings_window;
 mod window;
 
 use std::{
@@ -36,12 +36,12 @@ pub(crate) use desktop::{DesktopProbe, NativeDesktop};
 pub(crate) use layout::Axis;
 use layout::{Layout, LayoutError, fits};
 pub(crate) use layout::{Side, SplitId};
-use panel::Panel;
+use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
-pub(crate) use panel::{PanelControl, SWATCHES};
+pub(crate) use settings_window::{SWATCHES, SettingsItem, Tab};
 use window::WindowUiState;
 #[cfg(feature = "automation")]
-pub(crate) use window::{ControlKey, ControlTarget, MenuItem, ResizeEdge};
+pub(crate) use window::{ControlKey, ControlTarget, ResizeEdge};
 
 /// Initial logical size of the first window.
 pub(crate) const INITIAL_WINDOW_SIZE: Vec2 = vec2(900.0, 420.0);
@@ -182,16 +182,12 @@ pub(crate) enum WorkspaceAction {
         output: OutputId,
         seconds: f32,
     },
-    /// Start an explicit binding for an output (and its stateful ancestors).
-    ShareOutput {
-        instance_id: ModuleInstanceId,
-        output: OutputId,
+    /// Show the settings window on an instance, or on a window without one.
+    OpenSettings {
+        window_id: WindowId,
+        instance_id: Option<ModuleInstanceId>,
     },
-    /// Leave the binding: this instance continues with private state.
-    UnshareOutput {
-        instance_id: ModuleInstanceId,
-        output: OutputId,
-    },
+    CloseSettings,
     SetViewSetting {
         instance_id: ModuleInstanceId,
         key: &'static str,
@@ -222,6 +218,9 @@ pub(crate) enum WorkspaceAction {
         name: String,
     },
     ClearNotices,
+    /// Replace the current workspace with one default Spectrum window and the Dark
+    /// theme, keeping its name, and save it.
+    ResetWorkspace,
     /// Save the workspace and close every window (the application exits).
     Quit,
 }
@@ -523,8 +522,10 @@ pub struct Workspace {
     notices: Vec<String>,
     /// File number of each binding of this workspace (restored or saved).
     binding_numbers: HashMap<SharedAnalysisId, u64>,
-    /// Panel a menu asked to show (menus only borrow the Workspace).
-    panel_request: std::cell::RefCell<Option<(WindowId, Panel)>>,
+    /// The settings window, while open.
+    settings: Option<SettingsWindow>,
+    /// Openings of the settings window so far.
+    settings_openings: u64,
     /// Declared last: the source and worker stop only after every Module dropped.
     live: Option<LiveAudio>,
 }
@@ -559,7 +560,8 @@ impl Workspace {
             input: InputConfig::default(),
             notices: Vec::new(),
             binding_numbers: HashMap::new(),
-            panel_request: std::cell::RefCell::new(None),
+            settings: None,
+            settings_openings: 0,
             live: Some(live),
         })
     }
@@ -586,6 +588,7 @@ impl Workspace {
 
     /// Drop every Module before stopping capture and the worker.
     pub(crate) fn shutdown(&mut self) {
+        self.settings = None;
         self.windows.clear();
         self.modules.clear();
         self.live.take();
@@ -872,6 +875,9 @@ impl Workspace {
                     self.move_source = None;
                 }
                 self.modules.remove(&instance_id);
+                if let Some(settings) = &mut self.settings {
+                    settings.follow_replacement(instance_id, new);
+                }
                 Ok(ActionOutcome::Created(new))
             }
             WorkspaceAction::CloseModule { instance_id } => {
@@ -1055,8 +1061,18 @@ impl Workspace {
                 node,
                 spec,
             } => {
+                // Each instance owns its analysis: an edit changes only this instance.
+                // The dataflow keeps sharing whatever stays identical.
                 let controller = self.controller(instance_id)?;
-                self.services.dataflow.edit_node(&controller, node, spec)?;
+                let same_kind = controller.with_spec(|applied| {
+                    applied.node(node).is_some_and(|current| {
+                        std::mem::discriminant(&current) == std::mem::discriminant(&spec)
+                    })
+                });
+                if !same_kind {
+                    return Err(WorkspaceError::Unsupported("changing a node's kind"));
+                }
+                controller.update(|applied| applied.set_node(node, spec))?;
                 self.reconcile_views();
                 Ok(ActionOutcome::Applied)
             }
@@ -1075,37 +1091,19 @@ impl Workspace {
                 self.reconcile_views();
                 Ok(ActionOutcome::Applied)
             }
-            WorkspaceAction::ShareOutput {
+            WorkspaceAction::OpenSettings {
+                window_id,
                 instance_id,
-                output,
             } => {
-                let controller = self.controller(instance_id)?;
-                let shareable = controller.with_spec(|spec| {
-                    spec.outputs().get(output.index()).is_some_and(|entry| {
-                        entry.binding.is_none() && spec.depends_on_state(entry.node)
-                    })
-                });
-                if !shareable {
-                    return Err(WorkspaceError::Unsupported("sharing this output"));
-                }
-                let binding = self.services.dataflow.allocate_binding();
-                controller.update(|spec| spec.bind(output, Some(binding)))?;
+                self.open_settings(window_id, instance_id)?;
                 Ok(ActionOutcome::Applied)
             }
-            WorkspaceAction::UnshareOutput {
-                instance_id,
-                output,
-            } => {
-                let controller = self.controller(instance_id)?;
-                let bound = controller.with_spec(|spec| {
-                    spec.outputs()
-                        .get(output.index())
-                        .is_some_and(|entry| entry.binding.is_some())
-                });
-                if !bound {
-                    return Err(WorkspaceError::Unsupported("unsharing a private output"));
+            WorkspaceAction::CloseSettings => {
+                if self.settings.take().is_none() {
+                    return Err(WorkspaceError::Unsupported(
+                        "closing settings that are not open",
+                    ));
                 }
-                controller.update(|spec| spec.bind(output, None))?;
                 Ok(ActionOutcome::Applied)
             }
             WorkspaceAction::SetViewSetting {
@@ -1188,8 +1186,10 @@ impl Workspace {
                 self.notices.clear();
                 Ok(ActionOutcome::Applied)
             }
+            WorkspaceAction::ResetWorkspace => self.reset_workspace(),
             WorkspaceAction::Quit => {
                 self.autosave();
+                self.settings = None;
                 self.windows.clear();
                 self.modules.clear();
                 self.move_source = None;
