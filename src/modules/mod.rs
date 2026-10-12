@@ -6,7 +6,7 @@ mod spectrogram;
 pub mod spectrum;
 mod stereometer;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod waveform;
 
 use crate::extensions::{Registry, RegistryError};

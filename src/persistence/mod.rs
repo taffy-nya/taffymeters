@@ -362,7 +362,8 @@ mod tests {
         assert!(same_name("Mix", "mix"));
         assert!(same_name("MIX", "mIx"));
         assert!(same_name("Ärger", "ärger"));
-        assert!(same_name("混音", "混音"));
+        assert!(same_name("ΣΑΣ", "σας"));
+        assert!(!same_name("混音", "混音2"));
         assert!(!same_name("Mix", "Mix 2"));
         assert!(!same_name("Mix", "Mi"));
         assert!(!same_name("Mix", ""));

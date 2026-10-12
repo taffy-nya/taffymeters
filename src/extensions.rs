@@ -142,12 +142,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        audio::{
-            AudioDescriptor, ChannelLayout, Generation, SourceId, SourceReader, SourceTelemetry,
-            create_block_transport,
-        },
-        dataflow::{Dataflow, DataflowHandle},
         module::{ModuleFrame, ModuleResponse},
+        modules::test_support::PcmFixture,
         modules::{
             oscilloscope::style::OscilloscopeStyleContext, spectrum::style::SpectrumStyleContext,
         },
@@ -289,36 +285,9 @@ mod tests {
         }
     }
 
-    struct RuntimeFixture {
-        _capture: crate::audio::CaptureEndpoint,
-        _dataflow: Dataflow,
-        services: ModuleServices,
-    }
-
-    fn runtime_fixture() -> RuntimeFixture {
-        let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                .unwrap(),
-        );
-        let telemetry = Arc::new(SourceTelemetry::new());
-        let (mut capture, endpoint) =
-            create_block_transport(2, 8, 4096, Arc::clone(&telemetry)).unwrap();
-        let (dataflow, handle): (Dataflow, DataflowHandle) =
-            Dataflow::spawn(Arc::clone(&descriptor), endpoint, Arc::clone(&telemetry));
-        capture.set_worker(dataflow.worker_thread());
-        RuntimeFixture {
-            _capture: capture,
-            _dataflow: dataflow,
-            services: ModuleServices {
-                source: SourceReader::new(descriptor, telemetry),
-                dataflow: handle,
-            },
-        }
-    }
-
     #[test]
     fn duplicate_module_registration_is_rejected_and_keeps_the_first_factory() {
-        let fixture = runtime_fixture();
+        let fixture = PcmFixture::new(2);
         let mut registry = Registry::default();
         registry
             .register_module(module_factory("test.module", "First", "first"))
@@ -343,7 +312,7 @@ mod tests {
 
     #[test]
     fn unknown_module_type_is_an_error_not_a_fallback() {
-        let fixture = runtime_fixture();
+        let fixture = PcmFixture::new(2);
         let mut registry = Registry::default();
         registry
             .register_module(module_factory("test.module", "First", "first"))
