@@ -238,6 +238,50 @@ fn changing_one_fft_forks_without_disturbing_the_other_consumer() {
 }
 
 #[test]
+fn readers_keep_the_previous_results_until_a_changed_node_produces() {
+    let (mut capture, dataflow, _) = fixture(1, 8, 128);
+    let (mut spec, fft) = fft_spec(fft32());
+    let output = spec.output(fft, Keep::Seconds(1.0));
+    let subscription = dataflow.subscribe(spec);
+    let reader = subscription.reader();
+    let (mut snapshot, mut history) = (Snapshot::default(), HistoryView::new());
+    capture.write(&mono_tone(64, 3_000.0, 0.25));
+    let before = latest_at(&reader, output, 64);
+    reader.read(&mut snapshot);
+    reader.sync_history(output, &mut history);
+    let kept = history.len();
+    assert!(kept > 0);
+
+    // A new FFT size restarts the FFT: until its first full window, both readers
+    // keep what they showed instead of going empty.
+    subscription
+        .controller()
+        .update(|spec| spec.set_node(fft, NodeSpec::Fft(FftConfig::new(64, 32, -100.0).unwrap())))
+        .unwrap();
+    assert!(
+        reader.latest(output).is_none(),
+        "the new FFT has no result yet"
+    );
+    reader.read(&mut snapshot);
+    reader.sync_history(output, &mut history);
+    assert!(Arc::ptr_eq(snapshot.get(output).expect("kept"), &before));
+    assert_eq!((history.len(), history.newest_frontier()), (kept, Some(64)));
+
+    // The new results replace the latest one and follow the earlier History, each
+    // frame with the FFT that produced it.
+    capture.write(&mono_tone(64, 3_000.0, 0.25));
+    latest_at(&reader, output, 128);
+    reader.read(&mut snapshot);
+    reader.sync_history(output, &mut history);
+    let window = |frame: &Frame| frame.spectrum().unwrap().fft.window_size;
+    assert_eq!(window(snapshot.get(output).unwrap()), 64);
+    let windows: Vec<usize> = history.iter().map(|entry| window(&entry.frame)).collect();
+    assert_eq!(windows.first(), Some(&32));
+    assert_eq!(windows.last(), Some(&64));
+    assert_eq!(history.newest_frontier(), Some(128));
+}
+
+#[test]
 fn shared_state_advances_once_and_private_reset_is_isolated() {
     let (mut capture, dataflow, _) = fixture(1, 8, 128);
     let (mut spec, fft) = fft_spec(fft32());
@@ -393,7 +437,7 @@ fn shared_updates_change_every_member_at_once_and_local_updates_fork() {
 }
 
 #[test]
-fn gain_change_keeps_upstream_smooth_and_peak_but_restarts_history() {
+fn gain_change_keeps_upstream_smooth_and_peak_but_restarts_the_changed_output() {
     let (mut capture, dataflow, _) = fixture(1, 8, 128);
     let (mut spec, fft) = fft_spec(fft32());
     let smooth = spec.add(
@@ -428,10 +472,17 @@ fn gain_change_keeps_upstream_smooth_and_peak_but_restarts_history() {
         (newest(&changed_view)[2] - newest(&control_view)[2] - 6.0).abs() < 1e-4,
         "Smooth kept its state; only the gain differs"
     );
+    // The changed output starts over at the change; the view keeps the frames it
+    // showed before and appends the new one after them.
+    let after_change = |view: &HistoryView| {
+        view.iter()
+            .filter(|entry| entry.frame.processed_through_frame > 64)
+            .count()
+    };
     assert_eq!(
-        changed_view.len(),
-        1,
-        "History of the changed output restarts"
+        (changed_view.len(), after_change(&changed_view)),
+        (4, 1),
+        "the changed output restarts behind the kept frames"
     );
     assert_eq!(control_view.len(), 4);
 }
@@ -760,7 +811,7 @@ fn outputs_of_one_block_are_read_together() {
     assert_eq!(telemetry.snapshot().dropped_blocks, 0);
     assert_eq!(main.processed_through_frame, 800);
     assert_eq!(peak.processed_through_frame, 800);
-    assert_eq!(snapshot.config_revision(), 1);
+    assert_eq!(reader.config_revision(), Some(1));
 }
 
 // ---- time-domain demand (A3–A7) -------------------------------------------------

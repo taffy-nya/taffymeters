@@ -84,21 +84,18 @@ impl Frame {
 }
 
 /// The latest result of every output of one subscription, read under one lock so
-/// the outputs of one processed block are seen together.
+/// the outputs of one processed block are seen together. A slot is only ever
+/// replaced by a newer result: after a spec change it keeps showing the previous
+/// result until the new nodes produce one. Code that must wait for a result of
+/// the new spec uses [`DataReader::latest`] and [`DataReader::config_revision`].
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
-    config_revision: u64,
     frames: Vec<Option<Arc<Frame>>>,
 }
 
 impl Snapshot {
     pub fn get(&self, output: OutputId) -> Option<&Arc<Frame>> {
         self.frames.get(output.index()).and_then(Option::as_ref)
-    }
-
-    /// Revision of the spec these results belong to.
-    pub fn config_revision(&self) -> u64 {
-        self.config_revision
     }
 }
 
@@ -110,12 +107,13 @@ pub struct ViewFrame {
 }
 
 /// A Module-held History: the frames of one output within its kept duration,
-/// updated incrementally.
+/// updated incrementally. A spec change keeps the frames already seen (each
+/// carries its own metadata) and appends the new nodes' frames after them; only
+/// a reset clears it.
 #[derive(Clone, Debug, Default)]
 pub struct HistoryView {
     frames: VecDeque<ViewFrame>,
     last_version: u64,
-    revision: u64,
     reset_epoch: u64,
     gap_epoch: u64,
     gap_pending: bool,
@@ -198,17 +196,16 @@ impl DataReader {
         if route.paused {
             return false;
         }
-        snapshot.config_revision = route.revision;
         snapshot.frames.resize(route.outputs.len(), None);
         for (slot, output) in snapshot.frames.iter_mut().zip(&route.outputs) {
-            let latest = store.rings[output.ring]
+            // No result yet (e.g. right after a spec change): keep the last one.
+            if let Some(frame) = store.rings[output.ring]
                 .as_ref()
                 .and_then(|ring| ring.frames.back())
-                .filter(|frame| frame.processed_through_frame > output.start_frame);
-            match latest {
-                Some(frame) if slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, frame)) => {}
-                Some(frame) => *slot = Some(Arc::clone(frame)),
-                None => *slot = None,
+                .filter(|frame| frame.processed_through_frame > output.start_frame)
+                && !slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, frame))
+            {
+                *slot = Some(Arc::clone(frame));
             }
         }
         true
@@ -244,10 +241,9 @@ impl DataReader {
         let Some(output) = route.outputs.get(output.index()) else {
             return false;
         };
-        if view.revision != route.revision || view.reset_epoch != output.reset_epoch {
+        if view.reset_epoch != output.reset_epoch {
             view.clear();
             view.last_version = 0;
-            view.revision = route.revision;
             view.reset_epoch = output.reset_epoch;
             view.gap_epoch = output.gap_epoch;
         }

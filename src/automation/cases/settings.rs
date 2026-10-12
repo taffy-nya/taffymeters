@@ -146,9 +146,103 @@ fn open_settings(
     h.in_settings(items)
 }
 
+/// Whether `instance` (in the window `h` draws) shows something, judged from the
+/// shapes drawn within its leaf.
+type Shown = fn(&egui::FullOutput, egui::Rect) -> bool;
+
+/// Feed enough audio for settled results, then drag `key`'s slider in the open
+/// settings window three 6-point steps to the right without releasing, feeding
+/// about one display frame of audio per step, and check that the parameter
+/// follows the drag and that `instance` keeps showing `what` before and at every
+/// step: a changed node fills its first window while the view keeps the previous
+/// result.
+fn drag_keeps_showing(
+    h: &mut Harness,
+    driver: &mut ManualInputDriver,
+    key: SettingsItem,
+    instance: ModuleInstanceId,
+    what: &str,
+    shown: Shown,
+) -> Result<(), String> {
+    let window =
+        h.ws.observation()
+            .module(instance)
+            .and_then(|module| module.window_id)
+            .ok_or("instance not placed")?;
+    let showing = |h: &mut Harness| -> Result<bool, String> {
+        let settings = std::mem::replace(&mut h.focus, window);
+        let output = h.frame(vec![]);
+        h.focus = settings;
+        let rect =
+            h.ws.observation()
+                .window(window)
+                .and_then(|w| {
+                    w.leaf_rects
+                        .iter()
+                        .find(|(id, _)| *id == instance)
+                        .map(|(_, rect)| *rect)
+                })
+                .ok_or("instance has no leaf")?;
+        Ok(shown(&output, rect))
+    };
+    driver
+        .advance_frames(8_192, deadline())
+        .map_err(|e| e.to_string())?;
+    check(showing(h)?, &format!("no {what} before the drag"))?;
+    let before = spec(&h.ws, instance)?;
+    let slider = h.locate(&ControlKey::Settings(key))?.rect;
+    let y = slider.center().y;
+    let mut x = slider.center().x;
+    let button = |x, pressed| Event::PointerButton {
+        pos: pos2(x, y),
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.frame(vec![Event::PointerMoved(pos2(x, y))]);
+    h.frame(vec![button(x, true)]);
+    for step in 1..=3 {
+        x += 6.0;
+        h.frame(vec![Event::PointerMoved(pos2(x, y))]);
+        driver
+            .advance_frames(800, deadline())
+            .map_err(|e| e.to_string())?;
+        check(
+            showing(h)?,
+            &format!("{what} went blank at drag step {step} of {key:?}"),
+        )?;
+    }
+    let dragged = spec(&h.ws, instance)?;
+    h.frame(vec![button(x, false)]);
+    h.frame(vec![]);
+    check(
+        dragged != before,
+        &format!("{key:?} did not apply during the drag"),
+    )
+}
+
+fn main_curve_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
+    stroke_colors(output, rect).contains(&rgba(Preset::Dark.palette().color(ColorRole::Primary)))
+}
+
+fn peak_curve_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
+    // Translucent: compare the color as egui stores it.
+    let peak = Preset::Dark.palette().color(ColorRole::Secondary);
+    let drawn = egui::Color32::from_rgba_unmultiplied(peak.red, peak.green, peak.blue, peak.alpha)
+        .to_srgba_unmultiplied();
+    stroke_colors(output, rect).contains(&drawn)
+}
+
+fn heat_map_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
+    output.shapes.iter().any(|clipped| match &clipped.shape {
+        egui::Shape::Mesh(mesh) => mesh.vertices.iter().any(|vertex| rect.contains(vertex.pos)),
+        _ => false,
+    })
+}
+
 /// Copy, analysis settings shown once per node, edits that only reach the target.
 fn s01() -> Result<Value, String> {
-    let (ws, _driver) = workspace()?;
+    let (ws, mut driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
     h.frame(vec![]);
@@ -228,6 +322,30 @@ fn s01() -> Result<Value, String> {
         live > 6.0,
         &format!("Tilt did not follow the slider during the drag: {live}"),
     )?;
+    // While a slider is dragged the view keeps the previous result until the
+    // changed nodes produce: the copy's 4096-point FFT restarts at every Floor step
+    // and its Peak at every hold step, and a step brings less audio than a window.
+    let peak_node = node(&spec(&h.ws, b)?, |n| matches!(n, NodeSpec::Peak(_)))?;
+    for (key, what, shown) in [
+        (
+            SettingsItem::Number {
+                node: fft,
+                param: NodeParam::FftFloor,
+            },
+            "the main curve",
+            main_curve_shown as Shown,
+        ),
+        (
+            SettingsItem::Number {
+                node: peak_node,
+                param: NodeParam::PeakHold,
+            },
+            "the peak curve",
+            peak_curve_shown,
+        ),
+    ] {
+        drag_keeps_showing(&mut h, &mut driver, key, b, what, shown)?;
+    }
     let (spec_a, spec_b) = (spec(&h.ws, a)?, spec(&h.ws, b)?);
     let tilt_of = |spec: &DataSpec| match spec.node(tilt) {
         Some(NodeSpec::Tilt { db_per_octave }) => db_per_octave,
@@ -316,6 +434,29 @@ fn s01() -> Result<Value, String> {
     check(
         short_view == Some(SettingValue::Number(0.1)),
         &format!("the view outgrew a short History: {short_view:?}"),
+    )?;
+    // A Spectrogram keeps its earlier columns while its FFT restarts.
+    let spectrogram = created(action(
+        &mut h.ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: waveform,
+            type_id: crate::modules::SPECTROGRAM_MODULE_ID,
+        },
+    )?)?;
+    open_settings(&mut h, spectrogram, &[])?;
+    let spectrogram_fft = node(&spec(&h.ws, spectrogram)?, |n| {
+        matches!(n, NodeSpec::Fft(_))
+    })?;
+    drag_keeps_showing(
+        &mut h,
+        &mut driver,
+        SettingsItem::Number {
+            node: spectrogram_fft,
+            param: NodeParam::FftFloor,
+        },
+        spectrogram,
+        "the Spectrogram heat map",
+        heat_map_shown,
     )?;
     h.ws.check_ownership()?;
     Ok(

@@ -80,7 +80,8 @@ struct SpectrogramModule {
     history: HistoryView,
     visible_seconds: f32,
     cells: Vec<ColoredRect>,
-    /// FFT bin range `[first, end)` of each band, rebuilt per draw.
+    /// FFT bin range `[first, end)` of each band for one bin width, rebuilt per
+    /// draw and again where the columns' FFT changes.
     band_bins: Vec<(usize, usize)>,
 }
 
@@ -176,21 +177,16 @@ impl Module for SpectrogramModule {
         let Some(window_end) = self.history.newest_frontier() else {
             return ModuleResponse::default();
         };
-        let Some(fft) = self
-            .history
-            .iter()
-            .find_map(|entry| entry.frame.spectrum())
-            .map(|data| data.fft)
-        else {
-            return ModuleResponse::default();
-        };
 
         let bands = (frame.rect.height() / 5.0).floor().clamp(16.0, 96.0) as usize;
         let sample_rate = self.reader.descriptor().sample_rate_hz as f32;
-        let coordinates = SpectrumCoordinates {
+        // The frequency axis is fixed; each column maps it with its own FFT. After
+        // an analysis change the earlier columns stay, with their FFT size, hop and
+        // floor, until they scroll out.
+        let axis = SpectrumCoordinates {
             min_frequency_hz: 20.0,
             max_frequency_hz: (sample_rate * 0.5).min(20_000.0),
-            min_dbfs: fft.floor_dbfs,
+            min_dbfs: -160.0,
             max_dbfs: 0.0,
         };
         let window_frames = (self.visible_seconds * sample_rate).round().max(1.0) as u64;
@@ -203,27 +199,34 @@ impl Module for SpectrogramModule {
         let column_step = visible.len().div_ceil(max_columns).max(1);
         let band_height = frame.rect.height() / bands as f32;
         // Each band shows the loudest bin it covers (sampling one bin per band missed
-        // narrow tones on the log axis). The ranges are the same for every column.
-        let edge = |fraction: f32| {
+        // narrow tones on the log axis).
+        let edge = |fraction: f32, bin_hz: f32| {
             let x = frame.rect.min.x + fraction * frame.rect.width();
-            coordinates.frequency_at_x(x, frame.rect) / fft.bin_hz
+            axis.frequency_at_x(x, frame.rect) / bin_hz
         };
-        self.band_bins.clear();
-        self.band_bins.extend((0..bands).map(|band| {
-            let first = edge(band as f32 / bands as f32).floor() as usize;
-            let end = (edge((band + 1) as f32 / bands as f32).ceil() as usize).max(first + 1);
-            (first, end)
-        }));
+        let mut mapped_bin_hz = None;
         self.cells.clear();
         for group in visible.chunks(column_step) {
-            let Some((x0, x1, entry)) =
+            let Some(data) = group.last().and_then(|entry| entry.frame.spectrum()) else {
+                continue;
+            };
+            let fft = data.fft;
+            let Some((x0, x1, _)) =
                 history_column(group, frame.rect, window_end, window_frames, fft.hop_size)
             else {
                 continue;
             };
-            let Some(bins) = entry.frame.spectrum().map(|data| &data.bins_dbfs) else {
-                continue;
-            };
+            if mapped_bin_hz != Some(fft.bin_hz) {
+                mapped_bin_hz = Some(fft.bin_hz);
+                self.band_bins.clear();
+                self.band_bins.extend((0..bands).map(|band| {
+                    let first = edge(band as f32 / bands as f32, fft.bin_hz).floor() as usize;
+                    let end = (edge((band + 1) as f32 / bands as f32, fft.bin_hz).ceil() as usize)
+                        .max(first + 1);
+                    (first, end)
+                }));
+            }
+            let bins = &data.bins_dbfs;
             for (band, &(first_bin, end_bin)) in self.band_bins.iter().enumerate() {
                 let y0 = frame.rect.max.y - (band + 1) as f32 * band_height;
                 let y1 = y0 + band_height + 0.5;
@@ -234,9 +237,7 @@ impl Module for SpectrogramModule {
                 else {
                     continue;
                 };
-                let normalized = ((dbfs - coordinates.min_dbfs)
-                    / (coordinates.max_dbfs - coordinates.min_dbfs))
-                    .clamp(0.0, 1.0);
+                let normalized = ((dbfs - fft.floor_dbfs) / -fft.floor_dbfs).clamp(0.0, 1.0);
                 if normalized <= 0.015 {
                     continue;
                 }

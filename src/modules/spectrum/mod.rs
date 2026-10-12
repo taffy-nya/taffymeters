@@ -321,11 +321,11 @@ impl Module for SpectrumModule {
         let Some(spectrum) = main.spectrum() else {
             return ModuleResponse::default();
         };
-        // The peak curve is drawn only when it belongs to the same analysis hop.
+        // One read sees the outputs of a block together, so main and peak share a
+        // hop except right after a change, when either may still be the previous one.
         let peak = self
             .snapshot
             .get(self.peak)
-            .filter(|peak| peak.processed_through_frame == main.processed_through_frame)
             .and_then(|peak| peak.spectrum());
         let data = SpectrumPlot {
             fft: spectrum.fft,
@@ -440,14 +440,12 @@ mod tests {
     /// The module's main curve once it reached `frontier` under `revision`.
     fn main_at(module: &SpectrumModule, revision: u64, frontier: u64) -> Arc<Frame> {
         let deadline = Instant::now() + Duration::from_secs(2);
-        let mut snapshot = Snapshot::default();
         loop {
-            module.reader.read(&mut snapshot);
-            if snapshot.config_revision() == revision
-                && let Some(frame) = snapshot.get(module.main)
+            if module.reader.config_revision() == Some(revision)
+                && let Some(frame) = module.reader.latest(module.main)
                 && frame.processed_through_frame >= frontier
             {
-                return Arc::clone(frame);
+                return frame;
             }
             assert!(Instant::now() < deadline, "no result at {frontier}");
             std::thread::yield_now();
