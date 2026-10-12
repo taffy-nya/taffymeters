@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::{
     LiveAudio, LiveAudioConfig,
     audio::synthetic::SyntheticConfig,
-    builtins::{
+    modules::{
         EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, OSCILLOSCOPE_MODULE_ID, SPECTROGRAM_MODULE_ID,
         STEREOMETER_MODULE_ID, WAVEFORM_MODULE_ID,
     },
@@ -59,7 +59,7 @@ pub(super) fn suite(report: &mut Report) {
         ("P04", "all seven Module types, four times", |ws| {
             for round in 0..4 {
                 if round > 0 {
-                    add_module(ws, crate::builtins::SPECTRUM_MODULE_ID)?;
+                    add_module(ws, crate::modules::SPECTRUM_MODULE_ID)?;
                 }
                 for type_id in ALL_SEVEN {
                     add_module(ws, type_id)?;

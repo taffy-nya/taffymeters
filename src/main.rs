@@ -6,10 +6,10 @@
 use eframe::{egui_wgpu, wgpu};
 
 pub mod audio;
-pub mod builtins;
 pub mod dataflow;
 pub mod extensions;
 pub mod module;
+pub mod modules;
 pub mod plotting;
 pub mod render;
 pub mod settings;

@@ -18,10 +18,11 @@ use crate::{
     theme::ColorRole,
 };
 
-use super::spectrum_style::{
-    self, BAR_SPECTRUM_STYLE_ID, DEFAULT_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID, SpectrumPlot,
-    SpectrumStyle, SpectrumStyleContext,
-};
+pub mod style;
+mod styles;
+
+use self::style::{SpectrumPlot, SpectrumStyle, SpectrumStyleContext};
+pub use self::styles::{BAR_SPECTRUM_STYLE_ID, DEFAULT_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID};
 
 pub const SPECTRUM_MODULE_ID: &str = "taffymeters.spectrum";
 
@@ -41,7 +42,7 @@ const STYLE_OPTIONS: &[StyleOption] = &[
 ];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
-    spectrum_style::register(registry)?;
+    styles::register(registry)?;
     registry.register_module(SpectrumModuleFactory)
 }
 

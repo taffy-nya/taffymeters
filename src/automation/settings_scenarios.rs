@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 use crate::{
     LiveAudio, LiveAudioConfig,
     audio::synthetic::{ManualInputDriver, SyntheticConfig},
-    builtins::{
+    dataflow::{ChannelSelection, DataSpec, FftConfig, NodeRef, NodeSpec, OutputId},
+    modules::{
         BAR_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID,
         SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
     },
-    dataflow::{ChannelSelection, DataSpec, FftConfig, NodeRef, NodeSpec, OutputId},
     persistence::WorkspaceStore,
     settings::{NodeParam, SettingValue},
     theme::{ColorRole, Preset},

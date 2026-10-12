@@ -1,92 +1,16 @@
 use std::{collections::VecDeque, time::Duration};
 
+use super::{PERSISTENCE_OSCILLOSCOPE_STYLE_ID, build_latest_trace};
 use crate::{
-    audio::AudioDescriptor,
-    dataflow::ChannelSelection,
-    extensions::{Registry, RegistryError},
     module::ModuleResponse,
-    render::{Point, Rect, RenderTarget, Stroke},
-    snapshot::Frame,
-    theme::{ColorRole, Palette},
+    modules::oscilloscope::style::{
+        OscilloscopeStyle, OscilloscopeStyleContext, OscilloscopeStyleFactory,
+    },
+    render::{Point, RenderTarget, Stroke},
+    theme::ColorRole,
 };
 
-pub const LINE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.line";
-pub const PERSISTENCE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.persistence";
-
-pub struct OscilloscopeStyleContext<'a> {
-    pub descriptor: &'a AudioDescriptor,
-    /// The latest merged PCM chunk.
-    pub frame: &'a Frame,
-    pub channel: ChannelSelection,
-    pub rect: Rect,
-    pub y_scale: f32,
-    pub monotonic_time: Duration,
-    pub palette: &'a Palette,
-}
-
-pub trait OscilloscopeStyle: Send {
-    fn draw(
-        &mut self,
-        context: OscilloscopeStyleContext<'_>,
-        renderer: &mut dyn RenderTarget,
-    ) -> ModuleResponse;
-    fn clear(&mut self) {}
-}
-
-pub trait OscilloscopeStyleFactory: Send + Sync {
-    fn style_id(&self) -> &'static str;
-    fn display_name(&self) -> &'static str;
-    fn create(&self) -> Box<dyn OscilloscopeStyle>;
-}
-
-pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
-    registry.register_oscilloscope_style(LineOscilloscopeStyleFactory)?;
-    registry.register_oscilloscope_style(PersistenceOscilloscopeStyleFactory)
-}
-
-struct LineOscilloscopeStyleFactory;
-
-impl OscilloscopeStyleFactory for LineOscilloscopeStyleFactory {
-    fn style_id(&self) -> &'static str {
-        LINE_OSCILLOSCOPE_STYLE_ID
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Line"
-    }
-
-    fn create(&self) -> Box<dyn OscilloscopeStyle> {
-        Box::new(LineOscilloscopeStyle {
-            points: Vec::with_capacity(2048),
-        })
-    }
-}
-
-struct LineOscilloscopeStyle {
-    points: Vec<Point>,
-}
-
-impl OscilloscopeStyle for LineOscilloscopeStyle {
-    fn draw(
-        &mut self,
-        context: OscilloscopeStyleContext<'_>,
-        renderer: &mut dyn RenderTarget,
-    ) -> ModuleResponse {
-        build_latest_trace(&context, &mut self.points);
-        renderer.polyline(
-            context.rect,
-            &self.points,
-            Stroke {
-                width: 1.4,
-                color: context.palette.color(ColorRole::Primary),
-            },
-        );
-        // Redrawn when new PCM is published; nothing changes with display time.
-        ModuleResponse::default()
-    }
-}
-
-struct PersistenceOscilloscopeStyleFactory;
+pub(super) struct PersistenceOscilloscopeStyleFactory;
 
 impl OscilloscopeStyleFactory for PersistenceOscilloscopeStyleFactory {
     fn style_id(&self) -> &'static str {
@@ -174,34 +98,6 @@ impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
     }
 }
 
-fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<Point>) {
-    output.clear();
-    let Some(chunk) = context.frame.pcm() else {
-        return;
-    };
-    let channels = context.descriptor.channel_count as usize;
-    let Ok(channel) = context.channel.resolve(context.descriptor) else {
-        return;
-    };
-    let width = context.rect.width().max(1.0) as usize;
-    let step = chunk.frame_count.div_ceil(width).max(1);
-    let count = chunk.frame_count.div_ceil(step);
-    let denominator = count.saturating_sub(1).max(1) as f32;
-    for (index, frame) in chunk
-        .interleaved
-        .chunks_exact(channels)
-        .step_by(step)
-        .enumerate()
-    {
-        let fraction = index as f32 / denominator;
-        let sample = channel.sample(frame).clamp(-1.0, 1.0) * context.y_scale;
-        output.push(Point {
-            x: context.rect.min.x + fraction * context.rect.width(),
-            y: context.rect.center().y - sample * context.rect.height() * 0.5,
-        });
-    }
-}
-
 fn animate() -> ModuleResponse {
     ModuleResponse {
         repaint_after: Some(crate::module::FRAME_INTERVAL),
@@ -212,9 +108,11 @@ fn animate() -> ModuleResponse {
 mod tests {
     use super::*;
     use crate::{
-        audio::{ChannelLayout, Generation, SourceId},
-        render::{Circle, ColoredRect, TextStyle},
-        snapshot::{AudioChunk, FrameData},
+        audio::{AudioDescriptor, ChannelLayout, Generation, SourceId},
+        dataflow::ChannelSelection,
+        render::{Circle, ColoredRect, Rect, TextStyle},
+        snapshot::{AudioChunk, Frame, FrameData},
+        theme::Palette,
     };
 
     #[derive(Default)]

@@ -8,8 +8,8 @@ use eframe::egui::{self, Event, PointerButton, ViewportCommand, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::{
-    builtins::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     dataflow::ChannelSelection,
+    modules::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     workspace::{
         ActionOutcome, ControlKey, FIRST_WINDOW, ModuleInstanceId, MoveTarget, ResizeEdge,
         SettingsItem, Side, SplitId, Tab, WindowId, Workspace, WorkspaceAction,
@@ -114,8 +114,8 @@ fn w01() -> Result<Value, String> {
         let module = o.module(id).ok_or("new instance missing")?;
         check(
             module.channel == Some(ChannelSelection::MonoAverage)
-                && module.active_style == Some(crate::builtins::DEFAULT_SPECTRUM_STYLE_ID)
-                && module.type_id == crate::builtins::SPECTRUM_MODULE_ID,
+                && module.active_style == Some(crate::modules::DEFAULT_SPECTRUM_STYLE_ID)
+                && module.type_id == crate::modules::SPECTRUM_MODULE_ID,
             "split did not create a default instance of the same type",
         )?;
     }

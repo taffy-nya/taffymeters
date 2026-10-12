@@ -53,7 +53,7 @@ cargo build --release
 taffymeters/
   src/audio/       输入描述、系统采集和有界块传输
   src/dataflow/    Channel、FFT、按需时域、连续分析和 worker
-  src/builtins/    内置 Module 及其类型化风格
+  src/modules/     内置 Module，每种一个目录（含风格契约与风格实现）
   src/module.rs    通用 Module／风格入口契约
   src/extensions.rs 注册表与工厂创建
   src/live.rs      采集和 worker 生命周期

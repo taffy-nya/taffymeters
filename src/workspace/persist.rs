@@ -14,9 +14,9 @@ use super::{
 };
 use crate::{
     LiveAudio,
-    builtins::SPECTRUM_MODULE_ID,
     dataflow::{DataSpec, SharedAnalysisId},
     module::{Module, ModuleFrame, ModuleResponse},
+    modules::SPECTRUM_MODULE_ID,
     persistence::{
         FORMAT_VERSION, InputConfig, LayoutFile, ModuleFile, SYSTEM_INPUT, SplitAxis, WindowFile,
         WorkspaceFile, WorkspaceStore, same_name, valid_name,

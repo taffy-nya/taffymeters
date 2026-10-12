@@ -19,12 +19,12 @@ use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2, vec2};
 use crate::{
     LiveAudio,
     audio::{SourceState, SourceStatus},
-    builtins::{self, SPECTRUM_MODULE_ID},
     dataflow::{
         ChannelSelection, ControlError, Keep, NodeRef, NodeSpec, OutputId, SharedAnalysisId,
     },
     extensions::{Registry, RegistryError},
     module::{Module, ModuleServices},
+    modules::{self, SPECTRUM_MODULE_ID},
     persistence::{InputConfig, ModuleFile, PersistError, WorkspaceStore},
     render::Color,
     settings::SettingValue,
@@ -538,7 +538,7 @@ pub struct Workspace {
 impl Workspace {
     fn empty(live: LiveAudio) -> Result<Self, WorkspaceError> {
         let mut registry = Registry::default();
-        builtins::register(&mut registry)?;
+        modules::register(&mut registry)?;
         let services = ModuleServices {
             source: live.reader(),
             dataflow: live.dataflow_handle(),

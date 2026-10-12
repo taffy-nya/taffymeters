@@ -1,12 +1,12 @@
 use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use crate::{
-    builtins::{
-        oscilloscope_style::{OscilloscopeStyle, OscilloscopeStyleFactory},
-        spectrum_style::{SpectrumStyle, SpectrumStyleFactory},
-    },
     dataflow::DataSpec,
     module::{Module, ModuleError, ModuleFactory, ModuleServices},
+    modules::{
+        oscilloscope::style::{OscilloscopeStyle, OscilloscopeStyleFactory},
+        spectrum::style::{SpectrumStyle, SpectrumStyleFactory},
+    },
 };
 
 #[derive(Default)]

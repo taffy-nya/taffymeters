@@ -12,8 +12,8 @@ use crate::{
         ChannelLayout, SourceState,
         synthetic::{ManualInputDriver, SignalSpec, SyntheticConfig},
     },
-    builtins::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
     dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeSpec, OutputId, SOURCE},
+    modules::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
     workspace::{
         ActionOutcome, ControlKey, FIRST_WINDOW, ModuleInstanceId, SettingsItem, Side, Tab,
         Workspace, WorkspaceAction,
@@ -451,7 +451,7 @@ fn c04() -> Result<Value, String> {
         &mut ws,
         WorkspaceAction::SetStyle {
             instance_id: b,
-            style_id: crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
+            style_id: crate::modules::PIXEL_SPECTRUM_STYLE_ID,
         },
     )?;
     let o = ws.observation();
@@ -464,8 +464,8 @@ fn c04() -> Result<Value, String> {
             && a != b
             && ma.channel == Some(ChannelSelection::MonoAverage)
             && mb.channel == Some(ChannelSelection::Right)
-            && mb.active_style == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID)
-            && ma.active_style == Some(crate::builtins::DEFAULT_SPECTRUM_STYLE_ID),
+            && mb.active_style == Some(crate::modules::PIXEL_SPECTRUM_STYLE_ID)
+            && ma.active_style == Some(crate::modules::DEFAULT_SPECTRUM_STYLE_ID),
         "instances not independent",
     )?;
     action(&mut ws, WorkspaceAction::SelectModule { instance_id: a })?;
@@ -568,13 +568,11 @@ fn c05() -> Result<Value, String> {
     )?;
     h.settings(
         ControlKey::LeafBody(b),
-        &[SettingsItem::Style(
-            crate::builtins::PIXEL_SPECTRUM_STYLE_ID,
-        )],
+        &[SettingsItem::Style(crate::modules::PIXEL_SPECTRUM_STYLE_ID)],
     )?;
     check(
         h.ws.observation().module(b).and_then(|m| m.active_style)
-            == Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
+            == Some(crate::modules::PIXEL_SPECTRUM_STYLE_ID),
         "style popup did not apply",
     )?;
     h.settings(ControlKey::LeafBody(b), &[SettingsItem::CloseModule])?;
@@ -697,7 +695,7 @@ fn c06() -> Result<Value, String> {
     )?;
     let mut non_channel = Vec::new();
     for type_id in [
-        crate::builtins::STEREOMETER_MODULE_ID,
+        crate::modules::STEREOMETER_MODULE_ID,
         LEVEL_METER_MODULE_ID,
         EMPTY_MODULE_ID,
     ] {
@@ -800,12 +798,12 @@ fn c06() -> Result<Value, String> {
 
 fn c07() -> Result<Value, String> {
     let (mut ws, mut driver) = workspace()?;
-    let osc = replace_first(&mut ws, crate::builtins::OSCILLOSCOPE_MODULE_ID)?;
+    let osc = replace_first(&mut ws, crate::modules::OSCILLOSCOPE_MODULE_ID)?;
     action(
         &mut ws,
         WorkspaceAction::SetStyle {
             instance_id: osc,
-            style_id: crate::builtins::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
+            style_id: crate::modules::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
         },
     )?;
     let handle = ws.dataflow_handle_for_automation();
@@ -1462,12 +1460,12 @@ fn persistence_visual(
     baseline: Option<&Path>,
 ) -> Result<Case, String> {
     let (mut ws, mut driver) = workspace()?;
-    let osc = replace_first(&mut ws, crate::builtins::OSCILLOSCOPE_MODULE_ID)?;
+    let osc = replace_first(&mut ws, crate::modules::OSCILLOSCOPE_MODULE_ID)?;
     action(
         &mut ws,
         WorkspaceAction::SetStyle {
             instance_id: osc,
-            style_id: crate::builtins::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
+            style_id: crate::modules::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
         },
     )?;
     let handle = ws.dataflow_handle_for_automation();
@@ -1619,26 +1617,26 @@ pub(super) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>
         (
             "spectrum-bars",
             SPECTRUM_MODULE_ID,
-            Some(crate::builtins::BAR_SPECTRUM_STYLE_ID),
+            Some(crate::modules::BAR_SPECTRUM_STYLE_ID),
         ),
         (
             "spectrum-pixel",
             SPECTRUM_MODULE_ID,
-            Some(crate::builtins::PIXEL_SPECTRUM_STYLE_ID),
+            Some(crate::modules::PIXEL_SPECTRUM_STYLE_ID),
         ),
         (
             "oscilloscope-line",
-            crate::builtins::OSCILLOSCOPE_MODULE_ID,
+            crate::modules::OSCILLOSCOPE_MODULE_ID,
             None,
         ),
         (
             "oscilloscope-persistence",
-            crate::builtins::OSCILLOSCOPE_MODULE_ID,
-            Some(crate::builtins::PERSISTENCE_OSCILLOSCOPE_STYLE_ID),
+            crate::modules::OSCILLOSCOPE_MODULE_ID,
+            Some(crate::modules::PERSISTENCE_OSCILLOSCOPE_STYLE_ID),
         ),
-        ("spectrogram", crate::builtins::SPECTROGRAM_MODULE_ID, None),
+        ("spectrogram", crate::modules::SPECTROGRAM_MODULE_ID, None),
         ("waveform", WAVEFORM_MODULE_ID, None),
-        ("stereometer", crate::builtins::STEREOMETER_MODULE_ID, None),
+        ("stereometer", crate::modules::STEREOMETER_MODULE_ID, None),
         ("level-meter", LEVEL_METER_MODULE_ID, None),
         ("empty", EMPTY_MODULE_ID, None),
     ];
