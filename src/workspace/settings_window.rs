@@ -15,7 +15,7 @@ use super::{
 use crate::{
     audio::SourceState,
     dataflow::{ChannelSelection, FftConfig, Keep, NodeRef, NodeSpec, OutputId},
-    persistence::valid_name,
+    persistence::{same_name, valid_name},
     render::Color,
     settings::{
         DataSettings, FFT_HOP_DIVISORS, FFT_WINDOWS, NodeEntry, NodeParam, SettingKind,
@@ -451,9 +451,12 @@ impl Workspace {
     pub(crate) fn settings_ui(
         &mut self,
         ui: &mut egui::Ui,
-        _display_time: Duration,
+        display_time: Duration,
         probe: &dyn DesktopProbe,
     ) {
+        // Actions taken here (e.g. detach) are timed on the app clock, which this
+        // pass keeps moving even when every Workspace window is minimized.
+        self.tick(display_time);
         let ctx = ui.ctx().clone();
         if ctx.global_style().visuals.dark_mode != self.chrome.dark {
             ctx.set_visuals(if self.chrome.dark {
@@ -1061,11 +1064,19 @@ impl Workspace {
         });
         let name = settings.name.trim().to_owned();
         let valid = valid_name(&name);
-        let exists = self.saved_workspaces().contains(&name);
+        // Windows names files case-insensitively.
+        let exists = self
+            .saved_workspaces()
+            .iter()
+            .any(|saved| same_name(saved, &name));
+        // New saves the current workspace first: its own name cannot be the new one.
+        let current = same_name(&name, &self.name);
         if !name.is_empty() && !valid {
             ui.label("Not a valid name");
         } else if exists {
             ui.label("A workspace with this name exists");
+        } else if current {
+            ui.label("This is the current workspace's name");
         }
         ui.horizontal(|ui| {
             let allowed = has_store && valid && !exists;
@@ -1073,7 +1084,13 @@ impl Workspace {
                 actions.push(WorkspaceAction::SaveWorkspaceAs { name: name.clone() });
                 settings.name.clear();
             }
-            if button(ui, allowed, "New", SettingsItem::NewWorkspace, controls) {
+            if button(
+                ui,
+                allowed && !current,
+                "New",
+                SettingsItem::NewWorkspace,
+                controls,
+            ) {
                 actions.push(WorkspaceAction::NewWorkspace { name: name.clone() });
                 settings.name.clear();
             }

@@ -175,6 +175,12 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
+/// Whether two workspace names denote the same file (Windows file names are
+/// case-insensitive).
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct StoreState {
     #[serde(default)]
@@ -282,6 +288,8 @@ impl WorkspaceStore {
         state.last_workspace.filter(|name| valid_name(name))
     }
 
+    /// Record the workspace to open next time: a temporary file, then a rename, so
+    /// a failed or interrupted write keeps the previous selection.
     pub(crate) fn set_last_used(&self, name: &str) -> Result<(), PersistError> {
         let io = |error| PersistError::Io(self.root.display().to_string(), error);
         fs::create_dir_all(&self.root).map_err(io)?;
@@ -289,7 +297,9 @@ impl WorkspaceStore {
             last_workspace: Some(name.to_owned()),
         };
         let bytes = serde_json::to_vec_pretty(&state).expect("state serializes");
-        fs::write(self.root.join("state.json"), bytes).map_err(io)
+        let temporary = self.root.join(".state.json.tmp");
+        fs::write(&temporary, bytes).map_err(io)?;
+        fs::rename(&temporary, self.root.join("state.json")).map_err(io)
     }
 }
 

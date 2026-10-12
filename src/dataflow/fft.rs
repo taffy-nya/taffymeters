@@ -14,6 +14,11 @@ pub struct FftConfig {
     pub floor_dbfs: f32,
 }
 
+/// Largest accepted FFT window: four times the largest the settings offer. Saved
+/// or hand-written configurations beyond it are rejected before anything is
+/// planned or allocated.
+pub const MAX_WINDOW_SIZE: usize = 65_536;
+
 impl FftConfig {
     pub fn new(
         window_size: usize,
@@ -22,6 +27,9 @@ impl FftConfig {
     ) -> Result<Self, FftConfigError> {
         if window_size < 16 {
             return Err(FftConfigError::WindowTooSmall);
+        }
+        if window_size > MAX_WINDOW_SIZE {
+            return Err(FftConfigError::WindowTooLarge);
         }
         if hop_size == 0 || hop_size > window_size {
             return Err(FftConfigError::InvalidHop);
@@ -71,6 +79,7 @@ impl FftMetadata {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FftConfigError {
     WindowTooSmall,
+    WindowTooLarge,
     InvalidHop,
     InvalidFloor,
 }
@@ -79,6 +88,9 @@ impl fmt::Display for FftConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WindowTooSmall => f.write_str("FFT window must contain at least 16 samples"),
+            Self::WindowTooLarge => {
+                write!(f, "FFT window must not exceed {MAX_WINDOW_SIZE} samples")
+            }
             Self::InvalidHop => f.write_str("FFT hop must be in 1..=window_size"),
             Self::InvalidFloor => f.write_str("FFT floor must be finite and below 0 dBFS"),
         }

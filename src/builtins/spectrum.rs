@@ -92,8 +92,10 @@ const COLOR_ROLES: &[ColorRole] = &[
     ColorRole::Text,
 ];
 
-/// Highest frequency shown, and the shown dB range below 0 dBFS.
-const MAX_FREQUENCY_RANGE: (f32, f32) = (1_000.0, 96_000.0);
+/// Highest frequency shown (the zoom gesture and the setting share these bounds;
+/// the source's Nyquist frequency caps it when drawing), and the shown dB range
+/// below 0 dBFS.
+const MAX_FREQUENCY_RANGE: (f32, f32) = (80.0, 96_000.0);
 const DB_RANGE: (f32, f32) = (24.0, 180.0);
 
 struct SpectrumModuleFactory;
@@ -177,7 +179,7 @@ impl SpectrumModule {
         if frame.pointer.is_some_and(|point| plot.contains(point)) {
             if (frame.zoom_delta - 1.0).abs() > 0.001 {
                 coordinates.max_frequency_hz = (coordinates.max_frequency_hz / frame.zoom_delta)
-                    .clamp(coordinates.min_frequency_hz * 4.0, nyquist);
+                    .clamp(MAX_FREQUENCY_RANGE.0, nyquist.max(MAX_FREQUENCY_RANGE.0));
             }
             if frame.scroll_delta_y.abs() > 0.01 {
                 let span = coordinates.max_dbfs - coordinates.min_dbfs;

@@ -305,17 +305,19 @@ struct WaveformModule {
 }
 
 impl WaveformModule {
-    /// History length of the output: the most the view can show.
-    fn history_seconds(&self) -> f32 {
-        self.controller
-            .with_spec(|spec| match spec.outputs().get(self.output.index()) {
-                Some(output) => match output.keep {
-                    Keep::Seconds(seconds) => seconds,
-                    Keep::Latest => WAVEFORM_HISTORY_SECONDS,
-                },
-                None => WAVEFORM_HISTORY_SECONDS,
-            })
-            .max(WAVEFORM_MIN_SECONDS)
+    /// Shortest and longest visible span: the view never shows more than the
+    /// output's History, even a History shorter than the usual shortest span.
+    fn visible_range(&self) -> (f32, f32) {
+        let history =
+            self.controller
+                .with_spec(|spec| match spec.outputs().get(self.output.index()) {
+                    Some(output) => match output.keep {
+                        Keep::Seconds(seconds) => seconds,
+                        Keep::Latest => WAVEFORM_HISTORY_SECONDS,
+                    },
+                    None => WAVEFORM_HISTORY_SECONDS,
+                });
+        (WAVEFORM_MIN_SECONDS.min(history), history)
     }
 }
 
@@ -363,6 +365,7 @@ impl Module for WaveformModule {
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
+        let (min, max) = self.visible_range();
         vec![
             channel_setting(self.channel),
             ViewSetting {
@@ -370,8 +373,8 @@ impl Module for WaveformModule {
                 label: "Visible time",
                 section: "Display",
                 kind: SettingKind::Number {
-                    min: WAVEFORM_MIN_SECONDS,
-                    max: self.history_seconds(),
+                    min,
+                    max,
                     unit: "s",
                     logarithmic: false,
                 },
@@ -385,8 +388,7 @@ impl Module for WaveformModule {
         match key {
             "channel" => return self.set_channel(channel_value(key, value)?),
             "visible_seconds" => {
-                self.seconds =
-                    number_setting(key, value, (WAVEFORM_MIN_SECONDS, self.history_seconds()))?;
+                self.seconds = number_setting(key, value, self.visible_range())?;
             }
             "scale" => self.y_scale = number_setting(key, value, WAVEFORM_SCALE)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
@@ -400,8 +402,8 @@ impl Module for WaveformModule {
             .is_some_and(|point| frame.rect.contains(point))
         {
             if (frame.zoom_delta - 1.0).abs() > 0.001 {
-                self.seconds = (self.seconds / frame.zoom_delta)
-                    .clamp(WAVEFORM_MIN_SECONDS, self.history_seconds());
+                let (min, max) = self.visible_range();
+                self.seconds = (self.seconds / frame.zoom_delta).clamp(min, max);
             }
             if frame.scroll_delta_y.abs() > 0.01 {
                 self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp())

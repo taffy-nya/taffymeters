@@ -359,6 +359,8 @@ pub(crate) struct WindowState {
     pixels_per_point: f32,
     initial_position: Option<Pos2>,
     initial_size: Vec2,
+    /// Minimum inner size at creation (the layout's, later kept by `MinInnerSize`).
+    initial_min_size: Vec2,
     /// Builder inputs stay fixed after creation; later changes are commands, so egui
     /// never sees a changed builder and recreates the native window.
     initial_always_on_top: bool,
@@ -387,6 +389,7 @@ impl WindowState {
             pixels_per_point: 1.0,
             initial_position: None,
             initial_size: size,
+            initial_min_size: EMPTY_WINDOW_MIN_SIZE,
             initial_always_on_top: always_on_top,
             pending_detach: None,
             opened: false,
@@ -404,7 +407,7 @@ impl WindowState {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("Taffymeters #{}", id.0))
             .with_inner_size(self.initial_size)
-            .with_min_inner_size(EMPTY_WINDOW_MIN_SIZE)
+            .with_min_inner_size(self.initial_min_size)
             .with_decorations(false);
         if let Some(position) = self.initial_position {
             builder = builder.with_position(position);
@@ -526,6 +529,8 @@ pub struct Workspace {
     settings: Option<SettingsWindow>,
     /// Openings of the settings window so far.
     settings_openings: u64,
+    /// Latest display time of any pass (see `tick`).
+    display_time: Duration,
     /// Declared last: the source and worker stop only after every Module dropped.
     live: Option<LiveAudio>,
 }
@@ -562,6 +567,7 @@ impl Workspace {
             binding_numbers: HashMap::new(),
             settings: None,
             settings_openings: 0,
+            display_time: Duration::ZERO,
             live: Some(live),
         })
     }
@@ -1291,10 +1297,15 @@ impl Workspace {
             let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
             pos2(physical.x / ppp, physical.y / ppp)
         });
-        let requested_at = source.ui.display_time;
+        // The app-wide clock: the source window's own pass time stops while it is
+        // minimized (detach can be requested from the settings window then).
+        let requested_at = self.display_time;
         let always_on_top = source.always_on_top;
+        let min_size = self.module_min_size(instance_id);
         let window_id = WindowId(Self::allocate(&mut self.next_window_id)?);
         let mut window = WindowState::new(Layout::default(), size, always_on_top);
+        // The window will hold this module: its minimum, not an empty window's.
+        window.initial_min_size = min_size;
         window.initial_position = position;
         window.pixels_per_point = ppp;
         window.pending_detach = Some(PendingDetach {
@@ -1483,15 +1494,19 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// Advance time-based state shared by all windows (detach timeouts).
+    /// Advance time-based state shared by all windows (detach timeouts). Every pass
+    /// that runs (the host's logic, each drawn window, the settings window) ticks,
+    /// so the clock also moves while the windows involved are minimized.
     pub(crate) fn tick(&mut self, display_time: Duration) {
+        self.display_time = self.display_time.max(display_time);
+        let now = self.display_time;
         let expired: Vec<WindowId> = self
             .windows
             .iter()
             .filter(|(_, window)| {
                 window.pending_detach.is_some_and(|pending| {
                     !window.opened
-                        && (display_time.saturating_sub(pending.requested_at) >= DETACH_TIMEOUT
+                        && (now.saturating_sub(pending.requested_at) >= DETACH_TIMEOUT
                             || !self.modules.contains_key(&pending.instance_id)
                             || !self.windows.contains_key(&pending.source))
                 })

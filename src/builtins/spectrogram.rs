@@ -85,19 +85,19 @@ struct SpectrogramModule {
 }
 
 impl SpectrogramModule {
-    /// History length of the output: the most the view can show.
-    fn history_seconds(&self) -> f32 {
-        self.controller
-            .with_spec(
-                |spec| match spec.outputs().get(self.history_output.index()) {
-                    Some(output) => match output.keep {
-                        Keep::Seconds(seconds) => seconds,
-                        Keep::Latest => HISTORY_SECONDS,
-                    },
-                    None => HISTORY_SECONDS,
+    /// Shortest and longest visible span: the view never shows more than the
+    /// output's History, even a History shorter than the usual shortest span.
+    fn visible_range(&self) -> (f32, f32) {
+        let history = self.controller.with_spec(|spec| {
+            match spec.outputs().get(self.history_output.index()) {
+                Some(output) => match output.keep {
+                    Keep::Seconds(seconds) => seconds,
+                    Keep::Latest => HISTORY_SECONDS,
                 },
-            )
-            .max(MIN_VISIBLE_SECONDS)
+                None => HISTORY_SECONDS,
+            }
+        });
+        (MIN_VISIBLE_SECONDS.min(history), history)
     }
 }
 
@@ -139,13 +139,14 @@ impl Module for SpectrogramModule {
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
+        let (min, max) = self.visible_range();
         vec![ViewSetting {
             key: "visible_seconds",
             label: "Visible time",
             section: "Display",
             kind: SettingKind::Number {
-                min: MIN_VISIBLE_SECONDS,
-                max: self.history_seconds(),
+                min,
+                max,
                 unit: "s",
                 logarithmic: false,
             },
@@ -157,8 +158,7 @@ impl Module for SpectrogramModule {
         if key != "visible_seconds" {
             return Err(ModuleError::UnknownSetting(key.to_owned()));
         }
-        self.visible_seconds =
-            number_setting(key, value, (MIN_VISIBLE_SECONDS, self.history_seconds()))?;
+        self.visible_seconds = number_setting(key, value, self.visible_range())?;
         Ok(())
     }
 
@@ -168,8 +168,8 @@ impl Module for SpectrogramModule {
             .is_some_and(|point| frame.rect.contains(point))
             && (frame.zoom_delta - 1.0).abs() > 0.001
         {
-            self.visible_seconds = (self.visible_seconds / frame.zoom_delta)
-                .clamp(MIN_VISIBLE_SECONDS, self.history_seconds());
+            let (min, max) = self.visible_range();
+            self.visible_seconds = (self.visible_seconds / frame.zoom_delta).clamp(min, max);
         }
         self.reader
             .sync_history(self.history_output, &mut self.history);

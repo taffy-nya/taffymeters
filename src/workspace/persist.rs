@@ -14,11 +14,12 @@ use super::{
 };
 use crate::{
     LiveAudio,
+    builtins::SPECTRUM_MODULE_ID,
     dataflow::{DataSpec, SharedAnalysisId},
     module::{Module, ModuleFrame, ModuleResponse},
     persistence::{
         FORMAT_VERSION, InputConfig, LayoutFile, ModuleFile, SYSTEM_INPUT, SplitAxis, WindowFile,
-        WorkspaceFile, WorkspaceStore, valid_name,
+        WorkspaceFile, WorkspaceStore, same_name, valid_name,
     },
     render::{Point, TextStyle},
     settings::SettingValue,
@@ -200,7 +201,13 @@ impl Workspace {
         let file = self.saved_file();
         let store = self.store.as_ref().ok_or(WorkspaceError::NoStore)?;
         store.save(&file)?;
-        store.set_last_used(&self.name)?;
+        // The workspace file is committed; failing to record it as the one to open
+        // next time does not undo that (Save As keeps the new name).
+        if let Err(error) = store.set_last_used(&self.name) {
+            self.push_notice(format!(
+                "saved, but could not record it as the workspace to open next time: {error}"
+            ));
+        }
         Ok(())
     }
 
@@ -246,8 +253,12 @@ impl Workspace {
         self.name = name;
         self.protected = false;
         self.restore(file)?;
-        if let Some(store) = &self.store {
-            store.set_last_used(&self.name)?;
+        if let Some(store) = &self.store
+            && let Err(error) = store.set_last_used(&self.name)
+        {
+            self.push_notice(format!(
+                "could not record the workspace to open next time: {error}"
+            ));
         }
         Ok(ActionOutcome::Applied)
     }
@@ -257,17 +268,19 @@ impl Workspace {
         if !valid_name(&name) {
             return Err(crate::persistence::PersistError::InvalidName(name).into());
         }
-        if store.path_of(&name).exists() {
+        // The current name (even unsaved, in any letter case: Windows names files
+        // case-insensitively) would make the outgoing save the new file's target.
+        if same_name(&name, &self.name) || store.path_of(&name).exists() {
             return Err(WorkspaceError::WorkspaceExists(name));
         }
         if self.can_save() {
             self.save()?;
         }
         let placement = self.first_placement();
-        self.clear();
+        // Only once the replacement exists is the current content dropped.
+        self.replace_with_default(placement)?;
         self.name = name;
         self.protected = false;
-        self.default_content(placement)?;
         self.save()?;
         Ok(ActionOutcome::Applied)
     }
@@ -276,8 +289,8 @@ impl Workspace {
     /// place of its first window; saved unless the file is protected.
     pub(super) fn reset_workspace(&mut self) -> Result<ActionOutcome, WorkspaceError> {
         let placement = self.first_placement();
-        self.clear();
-        self.default_content(placement)?;
+        // Only once the replacement exists is the current content dropped.
+        self.replace_with_default(placement)?;
         if self.can_save() {
             self.save()?;
         }
@@ -299,19 +312,40 @@ impl Workspace {
         (window.always_on_top, position)
     }
 
-    /// One default Spectrum window and the Dark theme.
-    fn default_content(
+    /// Replace everything with one default Spectrum window and the Dark theme. The
+    /// new instance is created first: when that fails (e.g. a busy control queue),
+    /// the current content stays as it was.
+    fn replace_with_default(
         &mut self,
         (always_on_top, position): (bool, Option<(Pos2, f32)>),
     ) -> Result<(), WorkspaceError> {
+        let first = self.create_module(SPECTRUM_MODULE_ID)?;
+        let window_id = match Self::allocate(&mut self.next_window_id) {
+            Ok(id) => WindowId(id),
+            Err(error) => {
+                self.modules.remove(&first);
+                return Err(error);
+            }
+        };
+        let entry = self.modules.remove(&first);
+        self.clear();
+        if let Some(entry) = entry {
+            self.modules.insert(first, entry);
+        }
         self.theme = ThemeSettings::dark();
         self.input = InputConfig::default();
         self.refresh_palettes();
-        let id = self.add_default_window(always_on_top)?;
-        if let (Some((position, ppp)), Some(window)) = (position, self.windows.get_mut(&id)) {
+        let mut window = WindowState::new(
+            Layout::with_leaf(first),
+            super::INITIAL_WINDOW_SIZE,
+            always_on_top,
+        );
+        window.active = Some(first);
+        if let Some((position, ppp)) = position {
             window.initial_position = Some(position);
             window.pixels_per_point = ppp;
         }
+        self.windows.insert(window_id, window);
         Ok(())
     }
 
@@ -381,13 +415,19 @@ impl Workspace {
             None => None,
         };
         let layout = Layout::from_root(root);
+        // A populated window may be smaller than an empty one: its minimum is its
+        // layout's.
+        let min_size = layout
+            .min_size(&|id| self.module_min_size(id))
+            .unwrap_or(EMPTY_WINDOW_MIN_SIZE);
         let size = vec2(file.inner_size[0], file.inner_size[1]);
         let size = if size.is_finite() {
-            size.max(EMPTY_WINDOW_MIN_SIZE)
+            size.max(min_size)
         } else {
-            super::INITIAL_WINDOW_SIZE
+            super::INITIAL_WINDOW_SIZE.max(min_size)
         };
         let mut window = WindowState::new(layout, size, file.always_on_top);
+        window.initial_min_size = min_size;
         let ppp = if file.pixels_per_point.is_finite() {
             file.pixels_per_point.clamp(0.25, 8.0)
         } else {

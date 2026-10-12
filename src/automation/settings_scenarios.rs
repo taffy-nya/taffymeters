@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use eframe::egui::{self, Event, ViewportCommand, pos2};
+use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::{
@@ -246,6 +246,60 @@ fn s01() -> Result<Value, String> {
     check(
         edited.active_fft_nodes == 2,
         &format!("the copy's FFT did not fork: {edited:?}"),
+    )?;
+    let view_of = |h: &Harness, id: ModuleInstanceId, key: &str| {
+        h.ws.observation().module(id).and_then(|m| {
+            m.view
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+        })
+    };
+    // A range the zoom gesture reaches (down to 80 Hz) is a valid setting: copies
+    // and restores keep it.
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetViewSetting {
+            instance_id: a,
+            key: "max_frequency_hz",
+            value: SettingValue::Number(400.0),
+        },
+    )?;
+    let zoomed = created(action(
+        &mut h.ws,
+        WorkspaceAction::DuplicateModule { instance_id: a },
+    )?)?;
+    let copied_range = view_of(&h, zoomed, "max_frequency_hz");
+    check(
+        copied_range == Some(SettingValue::Number(400.0)),
+        &format!("a zoomed frequency range did not survive a copy: {copied_range:?}"),
+    )?;
+    // A History shorter than the usual shortest span bounds the view to itself.
+    let waveform = created(action(
+        &mut h.ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: zoomed,
+            type_id: WAVEFORM_MODULE_ID,
+        },
+    )?)?;
+    for step in [
+        WorkspaceAction::SetKeep {
+            instance_id: waveform,
+            output: OutputId::from_index(0),
+            seconds: 0.1,
+        },
+        WorkspaceAction::SetViewSetting {
+            instance_id: waveform,
+            key: "visible_seconds",
+            value: SettingValue::Number(0.1),
+        },
+    ] {
+        action(&mut h.ws, step)?;
+    }
+    let short_view = view_of(&h, waveform, "visible_seconds");
+    check(
+        short_view == Some(SettingValue::Number(0.1)),
+        &format!("the view outgrew a short History: {short_view:?}"),
     )?;
     h.ws.check_ownership()?;
     Ok(
@@ -812,6 +866,15 @@ fn s05() -> Result<Value, String> {
     // Empty has no analysis to put saved analysis into.
     let empty_with_data = json!({"type_id":EMPTY_MODULE_ID,
         "data":{"nodes":[],"outputs":[{"node":null,"keep":"latest"}]}});
+    // Right shape, but an FFT far too large to plan or allocate.
+    let huge_fft = json!({"type_id":SPECTRUM_MODULE_ID,"data":{"nodes":[
+        {"input":null,"kind":"channel","params":"mono_average"},
+        {"input":0,"kind":"fft","params":{"window_size":4_611_686_018_427_387_904_u64,"hop_size":1,"floor_dbfs":-160.0}},
+        {"input":1,"kind":"tilt","params":{"db_per_octave":0.0}},
+        {"input":2,"kind":"center","params":{"db":0.0}},
+        {"input":3,"kind":"gain","params":{"db":0.0}},
+        {"input":1,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+        "outputs":[{"node":4,"keep":"latest"},{"node":5,"keep":"latest"}]}});
     let file = json!({"format_version":1,"name":"Imported","input":{"kind":"daw_bridge","pipe":"studio-a"},
         "theme":{"preset":"dark"},
         "windows":[{"outer_position":[120.0,140.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
@@ -824,7 +887,9 @@ fn s05() -> Result<Value, String> {
                         "data":{"nodes":[],"outputs":[{"node":null,"keep":"latest"}]}}},
                     "second":{"node":"leaf","module":unusable_view}}}},
             {"outer_position":[1100.0,140.0],"pixels_per_point":1.0,"inner_size":[300.0,200.0],
-            "layout":{"node":"leaf","module":empty_with_data}}]});
+            "layout":{"node":"split","axis":"left_right","ratio":0.5,
+                "first":{"node":"leaf","module":empty_with_data},
+                "second":{"node":"leaf","module":huge_fft}}}]});
     fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
     fs::write(
         dir.file("Imported"),
@@ -846,6 +911,7 @@ fn s05() -> Result<Value, String> {
                 None,
                 Some(OSCILLOSCOPE_MODULE_ID.to_owned()),
                 Some(EMPTY_MODULE_ID.to_owned()),
+                Some(SPECTRUM_MODULE_ID.to_owned()),
             ],
         &format!("stand-ins not created for exactly the unusable modules: {missing:?}"),
     )?;
@@ -874,7 +940,8 @@ fn s05() -> Result<Value, String> {
         layout["first"]["first"]["module"] == plugin
             && layout["first"]["second"]["module"] == wrong_shape
             && layout["second"]["second"]["module"] == unusable_view
-            && saved["windows"][1]["layout"]["module"] == empty_with_data,
+            && saved["windows"][1]["layout"]["first"]["module"] == empty_with_data
+            && saved["windows"][1]["layout"]["second"]["module"] == huge_fft,
         "unusable modules were not saved verbatim",
     )?;
     check(
@@ -1001,7 +1068,31 @@ fn s06() -> Result<Value, String> {
         ControlKey::LeafBody(a),
         &[SettingsItem::Tab(Tab::Workspace)],
     )?;
+    // New first saves the current workspace, so its own name (unsaved here, and in
+    // any letter case: Windows file names) cannot become the new one's.
+    check(
+        action(
+            &mut h.ws,
+            WorkspaceAction::NewWorkspace {
+                name: "a".to_owned(),
+            },
+        )
+        .is_err()
+            && h.ws.observation().modules.len() == 3
+            && !dir.file("A").exists(),
+        "New accepted the current workspace's name",
+    )?;
     h.in_settings(&[SettingsItem::Name])?;
+    h.frame(vec![Event::Text("a".to_owned())]);
+    h.frame(vec![]);
+    let offered = h.in_settings(&[SettingsItem::NewWorkspace]);
+    check(
+        offered
+            .as_ref()
+            .is_err_and(|error| error.starts_with("Disabled control")),
+        &format!("New was offered under the current name: {offered:?}"),
+    )?;
+    h.key(egui::Key::Backspace);
     // Typed text (a space included) is text, not the Space shortcut.
     h.frame(vec![Event::Text("B 2".to_owned())]);
     h.frame(vec![]);
@@ -1062,6 +1153,28 @@ fn s06() -> Result<Value, String> {
     let o = h.ws.observation();
     check(o.name == "A" && o.modules.len() == 3, "menu switch failed")?;
     settle(&h.ws, 3)?;
+    // The record of the workspace to open next time cannot be written (a directory
+    // stands where the file belongs): Save As still commits to the new name and
+    // reports the record separately.
+    let state = dir.0.join("state.json");
+    fs::remove_file(&state).map_err(|e| e.to_string())?;
+    fs::create_dir(&state).map_err(|e| e.to_string())?;
+    action(
+        &mut h.ws,
+        WorkspaceAction::SaveWorkspaceAs {
+            name: "C".to_owned(),
+        },
+    )?;
+    let o = h.ws.observation();
+    check(
+        o.name == "C"
+            && dir.file("C").exists()
+            && o.notices.iter().any(|n| n.contains("open next time")),
+        &format!(
+            "Save As did not keep its committed name: {} {:?}",
+            o.name, o.notices
+        ),
+    )?;
     let metrics = handle.metrics();
     Ok(
         json!({"saved":names,"final_nodes":metrics.nodes,"final_rings":metrics.rings,
@@ -1139,16 +1252,18 @@ fn s08() -> Result<Value, String> {
             "outputs":[{"node":4,"keep":"latest"},extra]}})
     };
     let bound = json!({"node":5,"keep":"latest","binding":9});
-    // The second window is always on top, the first (whose place Reset keeps) is not.
+    // The second window is always on top, the first (whose place Reset keeps) is
+    // not. The second is smaller than an empty window may be, which its Module
+    // allows.
     let file = json!({"format_version":1,"name":"Bound","theme":{"preset":"light"},
         "windows":[{"outer_position":[300.0,200.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
             "always_on_top":false,
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
                 "first":{"node":"leaf","module":spectrum(bound.clone())},
                 "second":{"node":"leaf","module":spectrum(bound)}}},
-            {"outer_position":[1300.0,200.0],"pixels_per_point":1.0,"inner_size":[300.0,200.0],
+            {"outer_position":[1300.0,200.0],"pixels_per_point":1.0,"inner_size":[120.0,40.0],
             "always_on_top":true,
-            "layout":{"node":"leaf","module":{"type_id":EMPTY_MODULE_ID}}}]});
+            "layout":{"node":"leaf","module":{"type_id":WAVEFORM_MODULE_ID}}}]});
     fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
     fs::write(
         dir.file("Bound"),
@@ -1163,11 +1278,24 @@ fn s08() -> Result<Value, String> {
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
     h.frame_all()?;
-    settle(&h.ws, 2)?;
+    settle(&h.ws, 3)?;
     let restored = handle.metrics().active_spectrum_nodes;
     check(
         restored == 4,
         &format!("the saved binding was not restored as one shared Peak: {restored}"),
+    )?;
+    let small = h.ws.observation().windows[1].id;
+    let small_min =
+        h.ws.windows()
+            .into_iter()
+            .find(|window| window.id == small)
+            .and_then(|window| window.builder.min_inner_size);
+    check(
+        h.window(small)?.size == vec2(120.0, 40.0) && small_min == Some(vec2(40.0, 32.0)),
+        &format!(
+            "a small window was not restored at its size: {:?}, minimum {small_min:?}",
+            h.window(small)?.size
+        ),
     )?;
     let window = h.focus;
     let leaves = leaves(&h.ws, window);
@@ -1185,6 +1313,28 @@ fn s08() -> Result<Value, String> {
     check(
         saved.matches("\"binding\":9").count() == 1,
         "the remaining binding did not keep its file number",
+    )?;
+
+    // Detach from the settings window while the source window has been minimized
+    // for longer than the detach timeout: timed on the app clock, it still opens.
+    h.window_mut(window)?.minimized = true;
+    h.frame_window(window, vec![])?;
+    h.display_time += std::time::Duration::from_secs(10);
+    h.in_settings(&[SettingsItem::Detach])?;
+    h.window_mut(window)?.minimized = false;
+    h.frame_all()?;
+    let o = h.ws.observation();
+    let detached_to = o
+        .modules
+        .iter()
+        .find(|module| module.instance_id == b)
+        .and_then(|module| module.window_id);
+    check(
+        detached_to.is_some_and(|id| id != window) && o.control_error.is_none(),
+        &format!(
+            "detach from a minimized window timed out: {detached_to:?} {:?}",
+            o.control_error
+        ),
     )?;
 
     // Reset: one default Spectrum, Dark theme, same name and place; saved.
