@@ -96,5 +96,31 @@ mod tests {
             let y = coordinates.y_for_dbfs(dbfs, rect);
             assert!((coordinates.dbfs_at_y(y, rect) - dbfs).abs() < 0.000_1);
         }
+
+        // Low frequencies sit at the left edge, high ones at the right, on a log scale.
+        assert_eq!(coordinates.x_for_frequency(20.0, rect), rect.min.x);
+        assert_eq!(coordinates.x_for_frequency(20_000.0, rect), rect.max.x);
+        let (x_100, x_1k, x_10k) = (
+            coordinates.x_for_frequency(100.0, rect),
+            coordinates.x_for_frequency(1_000.0, rect),
+            coordinates.x_for_frequency(10_000.0, rect),
+        );
+        assert!(rect.min.x < x_100 && x_100 < x_1k && x_1k < x_10k && x_10k < rect.max.x);
+        let geometric_mean = (20.0_f32 * 20_000.0).sqrt();
+        let middle = coordinates.x_for_frequency(geometric_mean, rect);
+        assert!((middle - rect.center().x).abs() < 0.01, "log axis midpoint");
+        // Out-of-range frequencies are pinned to the edges.
+        assert_eq!(coordinates.x_for_frequency(1.0, rect), rect.min.x);
+        assert_eq!(coordinates.x_for_frequency(96_000.0, rect), rect.max.x);
+
+        // Quiet levels sit at the bottom (larger y), loud ones at the top.
+        assert_eq!(coordinates.y_for_dbfs(-120.0, rect), rect.max.y);
+        assert_eq!(coordinates.y_for_dbfs(6.0, rect), rect.min.y);
+        assert!(
+            coordinates.y_for_dbfs(-60.0, rect) > coordinates.y_for_dbfs(-12.0, rect),
+            "louder must be higher on screen"
+        );
+        assert_eq!(coordinates.y_for_dbfs(-200.0, rect), rect.max.y);
+        assert_eq!(coordinates.y_for_dbfs(20.0, rect), rect.min.y);
     }
 }

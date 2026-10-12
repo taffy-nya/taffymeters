@@ -288,4 +288,46 @@ mod tests {
         }
         assert_eq!(due_whole, due_sliced);
     }
+
+    #[test]
+    fn window_size_is_accepted_up_to_the_maximum_and_rejected_beyond() {
+        let config = FftConfig::new(MAX_WINDOW_SIZE, 512, -160.0).unwrap();
+        assert_eq!(config.window_size, MAX_WINDOW_SIZE);
+        assert_eq!(
+            FftConfig::new(MAX_WINDOW_SIZE + 1, 512, -160.0),
+            Err(FftConfigError::WindowTooLarge)
+        );
+        assert!(FftConfig::new(16, 16, -160.0).is_ok());
+        assert_eq!(
+            FftConfig::new(15, 8, -160.0),
+            Err(FftConfigError::WindowTooSmall)
+        );
+    }
+
+    #[test]
+    fn hop_must_be_between_one_and_the_window_size() {
+        assert_eq!(
+            FftConfig::new(1024, 0, -160.0),
+            Err(FftConfigError::InvalidHop)
+        );
+        assert_eq!(
+            FftConfig::new(1024, 1025, -160.0),
+            Err(FftConfigError::InvalidHop)
+        );
+        assert!(FftConfig::new(1024, 1, -160.0).is_ok());
+        assert!(FftConfig::new(1024, 1024, -160.0).is_ok());
+    }
+
+    #[test]
+    fn floor_must_be_finite_and_below_zero_dbfs() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0, 0.5] {
+            assert_eq!(
+                FftConfig::new(1024, 256, bad),
+                Err(FftConfigError::InvalidFloor),
+                "floor {bad} accepted"
+            );
+        }
+        assert!(FftConfig::new(1024, 256, -0.001).is_ok());
+        assert!(FftConfig::new(1024, 256, -160.0).is_ok());
+    }
 }

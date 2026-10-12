@@ -156,8 +156,20 @@ fn retry_busy(mut operation: impl FnMut() -> Result<(), ControlError>) {
 /// Write interleaved stereo in pieces the transport can hold, waiting for each piece
 /// to be processed, so no block is dropped.
 fn feed(capture: &mut CaptureEndpoint, dataflow: &TestDataflow, samples: &[f32]) {
-    for piece in samples.chunks(2 * 512) {
-        let target = dataflow.handle.processed_through_frame().unwrap() + (piece.len() / 2) as u64;
+    write_processed(capture, dataflow, 2, samples);
+}
+
+/// Write interleaved `channels`-wide samples and wait until the worker has processed
+/// them, so "no work happened" assertions observe a block the worker really saw.
+fn write_processed(
+    capture: &mut CaptureEndpoint,
+    dataflow: &TestDataflow,
+    channels: usize,
+    samples: &[f32],
+) {
+    for piece in samples.chunks(channels * 512) {
+        let target =
+            dataflow.handle.processed_through_frame().unwrap() + (piece.len() / channels) as u64;
         capture.write(piece);
         wait("piece processed", || {
             (dataflow.handle.processed_through_frame().unwrap() >= target).then_some(())
@@ -442,8 +454,7 @@ fn closing_consumers_keeps_shared_work_and_the_last_close_releases_everything() 
     let released = settle(&dataflow, "release", |m| m.subscriptions == 0);
     assert_eq!((released.nodes, released.rings), (0, 0));
     let evaluations = released.fft_evaluations;
-    capture.write(&mono_tone(64, 3_000.0, 0.25));
-    thread::sleep(Duration::from_millis(20));
+    write_processed(&mut capture, &dataflow, 1, &mono_tone(64, 3_000.0, 0.25));
     assert_eq!(
         dataflow.metrics().fft_evaluations,
         evaluations,
@@ -544,8 +555,7 @@ fn hidden_latest_without_state_stops_while_history_continues() {
     settle(&dataflow, "hidden pure chain stops", |m| {
         m.active_fft_nodes == 0
     });
-    capture.write(&mono_tone(64, 3_000.0, 0.25));
-    thread::sleep(Duration::from_millis(10));
+    write_processed(&mut capture, &dataflow, 1, &mono_tone(64, 3_000.0, 0.25));
     assert_eq!(dataflow.metrics().fft_evaluations, 0);
     assert!(latest.reader().latest(latest_output).is_none());
     latest.controller().set_visible(true).unwrap();
@@ -599,8 +609,7 @@ fn explicit_pause_freezes_reads_and_resume_marks_a_gap() {
     settle(&dataflow, "paused analysis stops", |m| {
         m.active_spectrum_nodes == 0
     });
-    capture.write(&mono_tone(64, 3_000.0, 0.25));
-    thread::sleep(Duration::from_millis(10));
+    write_processed(&mut capture, &dataflow, 1, &mono_tone(64, 3_000.0, 0.25));
     assert!(
         !subscription.reader().read(&mut snapshot),
         "paused reads keep the last results"
@@ -717,7 +726,9 @@ fn dropped_blocks_mark_discontinuity_and_reset_continuous_state() {
 
 #[test]
 fn outputs_of_one_block_are_read_together() {
-    let (mut capture, dataflow, _) = fixture(1, 8, 4096);
+    // 32 blocks hold all 20 unthrottled writes, so none is dropped and the last hop
+    // ends at frame 800 while reads race the worker.
+    let (mut capture, dataflow, telemetry) = fixture(1, 32, 4096);
     let (mut spec, fft) = fft_spec(fft32());
     let tilt = spec.add(fft, NodeSpec::Tilt { db_per_octave: 3.0 });
     let peak_node = spec.add(fft, peak(100.0));
@@ -736,6 +747,19 @@ fn outputs_of_one_block_are_read_together() {
             );
         }
     }
+    // Once the worker has drained everything, both outputs must be present and agree,
+    // so the loop above cannot pass by never seeing them together.
+    latest_at(&reader, main, 800);
+    reader.read(&mut snapshot);
+    let (main, peak) = (
+        snapshot.get(main).expect("main curve published"),
+        snapshot
+            .get(peak_output)
+            .expect("peak published with the main curve"),
+    );
+    assert_eq!(telemetry.snapshot().dropped_blocks, 0);
+    assert_eq!(main.processed_through_frame, 800);
+    assert_eq!(peak.processed_through_frame, 800);
     assert_eq!(snapshot.config_revision(), 1);
 }
 
@@ -758,7 +782,6 @@ fn levels_spec() -> (DataSpec, OutputId) {
 fn time_demand_matrix_only_does_requested_work() {
     let (mut capture, dataflow, _) = fixture(2, 128, 16);
     feed(&mut capture, &dataflow, &stereo(0, 1_600));
-    thread::sleep(Duration::from_millis(10));
     let idle = dataflow.metrics();
     assert_eq!(
         (idle.pcm_frames, idle.level_frames, idle.publications),
@@ -926,7 +949,6 @@ fn partial_time_closes_keep_the_other_work_and_rejoins_start_fresh() {
     let closed = settle(&dataflow, "all closed", |m| m.subscriptions == 0);
     assert_eq!((closed.nodes, closed.rings), (0, 0));
     feed(&mut capture, &dataflow, &stereo(6_400, 1_600));
-    thread::sleep(Duration::from_millis(10));
     let idle = dataflow.metrics();
     assert_eq!(
         (idle.pcm_frames, idle.level_frames, idle.publications),

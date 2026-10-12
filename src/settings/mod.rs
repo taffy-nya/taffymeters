@@ -263,3 +263,237 @@ pub fn node_label(node: &NodeSpec) -> &'static str {
         NodeSpec::Levels => "Levels",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataflow::{PeakConfig, SmoothConfig};
+
+    const CHOICES: &[Choice] = &[
+        Choice {
+            id: "line",
+            label: "Line",
+        },
+        Choice {
+            id: "bars",
+            label: "Bars",
+        },
+    ];
+
+    fn setting(kind: SettingKind, value: SettingValue) -> ViewSetting {
+        ViewSetting {
+            key: "test",
+            label: "Test",
+            section: "Test",
+            kind,
+            value,
+        }
+    }
+
+    fn number_setting(min: f32, max: f32) -> ViewSetting {
+        setting(
+            SettingKind::Number {
+                min,
+                max,
+                unit: "",
+                logarithmic: false,
+            },
+            SettingValue::Number(min),
+        )
+    }
+
+    #[test]
+    fn number_setting_accept_clamps_into_the_range() {
+        let setting = number_setting(-10.0, 20.0);
+
+        assert_eq!(
+            setting.accept(&SettingValue::Number(5.0)),
+            Some(SettingValue::Number(5.0))
+        );
+        assert_eq!(
+            setting.accept(&SettingValue::Number(50.0)),
+            Some(SettingValue::Number(20.0))
+        );
+        assert_eq!(
+            setting.accept(&SettingValue::Number(-50.0)),
+            Some(SettingValue::Number(-10.0))
+        );
+    }
+
+    #[test]
+    fn number_setting_accept_rejects_non_finite_values() {
+        let setting = number_setting(-10.0, 20.0);
+
+        assert_eq!(setting.accept(&SettingValue::Number(f32::NAN)), None);
+        assert_eq!(setting.accept(&SettingValue::Number(f32::INFINITY)), None);
+        assert_eq!(
+            setting.accept(&SettingValue::Number(f32::NEG_INFINITY)),
+            None
+        );
+    }
+
+    #[test]
+    fn number_setting_accept_rejects_other_value_types() {
+        let setting = number_setting(0.0, 1.0);
+
+        assert_eq!(
+            setting.accept(&SettingValue::Choice("line".to_owned())),
+            None
+        );
+        assert_eq!(
+            setting.accept(&SettingValue::Channel(ChannelSelection::Left)),
+            None
+        );
+    }
+
+    #[test]
+    fn choice_setting_accepts_only_declared_ids() {
+        let setting = setting(
+            SettingKind::Choice(CHOICES),
+            SettingValue::Choice("line".to_owned()),
+        );
+
+        assert_eq!(
+            setting.accept(&SettingValue::Choice("bars".to_owned())),
+            Some(SettingValue::Choice("bars".to_owned()))
+        );
+        assert_eq!(
+            setting.accept(&SettingValue::Choice("pixels".to_owned())),
+            None
+        );
+        // Ids match exactly: the label of a choice is not its id.
+        assert_eq!(
+            setting.accept(&SettingValue::Choice("Bars".to_owned())),
+            None
+        );
+        assert_eq!(setting.accept(&SettingValue::Number(0.0)), None);
+    }
+
+    #[test]
+    fn channel_setting_accepts_channels_only() {
+        let setting = setting(
+            SettingKind::Channel,
+            SettingValue::Channel(ChannelSelection::Left),
+        );
+
+        assert_eq!(
+            setting.accept(&SettingValue::Channel(ChannelSelection::Discrete(3))),
+            Some(SettingValue::Channel(ChannelSelection::Discrete(3)))
+        );
+        assert_eq!(setting.accept(&SettingValue::Number(1.0)), None);
+        assert_eq!(
+            setting.accept(&SettingValue::Choice("left".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn node_param_reads_nothing_from_a_node_of_another_kind() {
+        let gain = NodeSpec::Gain { db: 6.0 };
+        let center = NodeSpec::Center { db: 3.0 };
+        let tilt = NodeSpec::Tilt { db_per_octave: 2.0 };
+
+        assert_eq!(NodeParam::Gain.number(&gain), Some(6.0));
+        assert_eq!(NodeParam::Center.number(&center), Some(3.0));
+        assert_eq!(NodeParam::Gain.number(&center), None);
+        assert_eq!(NodeParam::Center.number(&gain), None);
+        assert_eq!(NodeParam::FftFloor.number(&tilt), None);
+        assert_eq!(NodeParam::Tilt.number(&gain), None);
+        assert_eq!(NodeParam::PeakHold.number(&NodeSpec::Levels), None);
+        // Choices have no number even on the node kind they belong to.
+        let fft = NodeSpec::Fft(FftConfig::default());
+        assert_eq!(NodeParam::FftWindow.number(&fft), None);
+    }
+
+    #[test]
+    fn node_param_with_number_leaves_a_node_of_another_kind_unchanged() {
+        let center = NodeSpec::Center { db: 3.0 };
+
+        assert_eq!(NodeParam::Gain.with_number(center, 1.0), None);
+        assert_eq!(NodeParam::Tilt.with_number(center, 1.0), None);
+        assert_eq!(
+            NodeParam::Channel.with_number(NodeSpec::Channel(ChannelSelection::Left), 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn node_param_with_number_clamps_and_rejects_non_finite_values() {
+        let gain = NodeSpec::Gain { db: 0.0 };
+
+        assert_eq!(
+            NodeParam::Gain.with_number(gain, 1_000.0),
+            Some(NodeSpec::Gain { db: 60.0 })
+        );
+        assert_eq!(
+            NodeParam::Gain.with_number(gain, -1_000.0),
+            Some(NodeSpec::Gain { db: -60.0 })
+        );
+        assert_eq!(NodeParam::Gain.with_number(gain, f32::NAN), None);
+        assert_eq!(NodeParam::Gain.with_number(gain, f32::INFINITY), None);
+    }
+
+    #[test]
+    fn node_param_edits_only_the_named_parameter_of_a_multi_parameter_node() {
+        let smooth = NodeSpec::Smooth(SmoothConfig::new(10.0, 200.0).unwrap());
+        let peak = NodeSpec::Peak(PeakConfig::new(500.0, 20.0).unwrap());
+
+        assert_eq!(NodeParam::SmoothAttack.number(&smooth), Some(10.0));
+        assert_eq!(NodeParam::SmoothRelease.number(&smooth), Some(200.0));
+        assert_eq!(
+            NodeParam::SmoothRelease.with_number(smooth, 99_999.0),
+            Some(NodeSpec::Smooth(SmoothConfig::new(10.0, 2_000.0).unwrap()))
+        );
+        assert_eq!(NodeParam::PeakHold.number(&peak), Some(500.0));
+        assert_eq!(NodeParam::PeakDecay.number(&peak), Some(20.0));
+        assert_eq!(
+            NodeParam::PeakDecay.with_number(peak, 30.0),
+            Some(NodeSpec::Peak(PeakConfig::new(500.0, 30.0).unwrap()))
+        );
+        let fft = NodeSpec::Fft(FftConfig::default());
+        assert_eq!(
+            NodeParam::FftFloor.with_number(fft, -100.0),
+            Some(NodeSpec::Fft(FftConfig {
+                floor_dbfs: -100.0,
+                ..FftConfig::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn with_fft_window_keeps_the_hop_fraction_of_the_window() {
+        for window in FFT_WINDOWS {
+            for divisor in FFT_HOP_DIVISORS {
+                let fft = FftConfig {
+                    window_size: 2048,
+                    hop_size: 2048 / divisor,
+                    floor_dbfs: -100.0,
+                };
+
+                let resized = with_fft_window(fft, window);
+
+                assert_eq!(resized.window_size, window);
+                assert_eq!(
+                    resized.hop_size,
+                    window / divisor,
+                    "window {window} / {divisor}"
+                );
+                assert_eq!(resized.floor_dbfs, -100.0);
+            }
+        }
+    }
+
+    #[test]
+    fn with_fft_window_never_produces_a_zero_hop() {
+        let fft = FftConfig {
+            window_size: 2048,
+            hop_size: 256,
+            floor_dbfs: -100.0,
+        };
+
+        let resized = with_fft_window(fft, 4);
+
+        assert_eq!(resized.window_size, 4);
+        assert_eq!(resized.hop_size, 1);
+    }
+}

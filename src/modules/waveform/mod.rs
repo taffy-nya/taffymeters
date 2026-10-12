@@ -269,3 +269,187 @@ impl Module for WaveformModule {
         ModuleResponse::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use crate::{
+        dataflow::SOURCE,
+        modules::test_support::{
+            BLOCK_FRAMES, PcmFixture, RecordingTarget, TEST_RECT, draw, repeat_frame,
+        },
+    };
+
+    fn waveform(fixture: &PcmFixture, data: Option<&DataSpec>) -> Box<dyn Module> {
+        WaveformFactory
+            .create(&fixture.services, &Registry::default(), data)
+            .unwrap()
+    }
+
+    /// A saved spec with the Waveform's shape and a History of `seconds`.
+    fn history_of(seconds: f32) -> DataSpec {
+        let mut spec = DataSpec::new();
+        spec.output(SOURCE, Keep::Seconds(seconds));
+        spec
+    }
+
+    /// `(min, max, value)` of the visible-time setting.
+    fn visible_time(module: &dyn Module) -> (f32, f32, f32) {
+        let setting = module
+            .view_settings()
+            .into_iter()
+            .find(|setting| setting.key == "visible_seconds")
+            .expect("Waveform has a visible-time setting");
+        let SettingKind::Number { min, max, .. } = setting.kind else {
+            panic!("visible time is a number");
+        };
+        (min, max, setting.value.number().unwrap())
+    }
+
+    fn set_visible_time(module: &mut dyn Module, seconds: f32) {
+        module
+            .set_view_setting("visible_seconds", &SettingValue::Number(seconds))
+            .unwrap();
+    }
+
+    /// Vertical extent of a bar of constant sample `level` at full scale: the bar is
+    /// one point tall and `level` moves it up (positive) from the center line.
+    fn flat_bar_y(level: f32) -> f32 {
+        TEST_RECT.center().y - level * TEST_RECT.height() * 0.5
+    }
+
+    #[test]
+    fn visible_time_is_limited_to_the_available_history() {
+        let fixture = PcmFixture::new(2);
+
+        let mut usual = waveform(&fixture, None);
+        let (min, max, _) = visible_time(usual.as_ref());
+        assert_eq!((min, max), (WAVEFORM_MIN_SECONDS, WAVEFORM_HISTORY_SECONDS));
+        set_visible_time(usual.as_mut(), 1_000.0);
+        assert_eq!(visible_time(usual.as_ref()).2, WAVEFORM_HISTORY_SECONDS);
+        set_visible_time(usual.as_mut(), 0.01);
+        assert_eq!(visible_time(usual.as_ref()).2, WAVEFORM_MIN_SECONDS);
+
+        let two_seconds = history_of(2.0);
+        let mut short = waveform(&fixture, Some(&two_seconds));
+        assert_eq!(visible_time(short.as_ref()).0, WAVEFORM_MIN_SECONDS);
+        assert_eq!(visible_time(short.as_ref()).1, 2.0);
+        set_visible_time(short.as_mut(), 4.0);
+        assert_eq!(
+            visible_time(short.as_ref()).2,
+            2.0,
+            "never beyond the History"
+        );
+
+        // A History shorter than the usual shortest span is the only span there is.
+        let tiny_history = history_of(0.1);
+        let mut tiny = waveform(&fixture, Some(&tiny_history));
+        let (min, max, _) = visible_time(tiny.as_ref());
+        assert_eq!((min, max), (0.1, 0.1));
+        set_visible_time(tiny.as_mut(), 4.0);
+        assert_eq!(visible_time(tiny.as_ref()).2, 0.1);
+        set_visible_time(tiny.as_mut(), 0.01);
+        assert_eq!(visible_time(tiny.as_ref()).2, 0.1);
+    }
+
+    #[test]
+    fn history_shorter_than_the_visible_span_is_drawn_from_the_left_edge() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        let mut target = RecordingTarget::default();
+
+        // 1/30 s of a constant 0.5 in the default 4 s window: a thin sliver at the
+        // left edge, not stretched across the Module.
+        fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        let first = target.rects.clone();
+        assert!(!first.is_empty());
+        assert_eq!(first[0].rect.min.x, TEST_RECT.min.x);
+        assert!(
+            first
+                .windows(2)
+                .all(|pair| pair[1].rect.min.x == pair[0].rect.max.x),
+            "bars are contiguous and increasing"
+        );
+        let covered = first.last().unwrap().rect.max.x - TEST_RECT.min.x;
+        assert!(
+            covered < TEST_RECT.width() * 0.25,
+            "{covered} of {} points covered by 1/30 s of a 4 s window",
+            TEST_RECT.width()
+        );
+        for bar in &first {
+            assert_eq!(bar.rect.min.y, flat_bar_y(0.5));
+        }
+
+        // The next 1/30 s (constant -0.5) extends the picture to the right without
+        // disturbing what was already folded in. The block boundary falls inside a
+        // bar, so that bar holds both levels.
+        fixture.feed(&repeat_frame(&[-0.5, -0.5], BLOCK_FRAMES));
+        target.clear();
+        draw(module.as_mut(), &mut target, Duration::from_millis(50));
+        let second = target.rects.clone();
+        assert!(second.len() > first.len(), "the picture grows to the right");
+        assert_eq!(second[0].rect.min.x, TEST_RECT.min.x);
+        assert!(
+            second
+                .windows(2)
+                .all(|pair| pair[1].rect.min.x == pair[0].rect.max.x),
+            "bars stay contiguous"
+        );
+        let settled = first.len() - 1;
+        assert_eq!(&second[..settled], &first[..settled], "earlier bars kept");
+        let both_levels = second
+            .iter()
+            .filter(|bar| bar.rect.min.y == flat_bar_y(0.5) && bar.rect.max.y == flat_bar_y(-0.5))
+            .count();
+        assert_eq!(both_levels, 1, "one bar spans both halves");
+        assert_eq!(second.last().unwrap().rect.min.y, flat_bar_y(-0.5));
+    }
+
+    #[test]
+    fn changing_channel_redraws_the_envelope_from_the_new_channel() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        let mut target = RecordingTarget::default();
+        fixture.feed(&repeat_frame(&[0.5, -0.5], BLOCK_FRAMES));
+
+        // Mono mix of +0.5 / -0.5 is silence.
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        assert_eq!(target.rects.len(), 4);
+        for bar in &target.rects {
+            assert_eq!(bar.rect.min.y, flat_bar_y(0.0));
+        }
+
+        // No new audio arrived: the bars must still be rebuilt for the new channel.
+        for (channel, level) in [
+            (ChannelSelection::Left, 0.5),
+            (ChannelSelection::Right, -0.5),
+        ] {
+            module.set_channel(channel).unwrap();
+            target.clear();
+            draw(module.as_mut(), &mut target, Duration::from_millis(50));
+            assert_eq!(target.rects.len(), 4, "{channel:?}");
+            for bar in &target.rects {
+                assert_eq!(bar.rect.min.y, flat_bar_y(level), "{channel:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn clearing_visual_state_rebuilds_the_same_bars_from_history() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        let mut target = RecordingTarget::default();
+        fixture.feed(&repeat_frame(&[0.5, 0.5], 2 * BLOCK_FRAMES));
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        let before = target.rects.clone();
+        assert!(!before.is_empty());
+
+        module.clear_visual_state();
+        target.clear();
+        draw(module.as_mut(), &mut target, Duration::from_millis(50));
+        assert_eq!(target.rects, before);
+    }
+}

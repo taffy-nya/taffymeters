@@ -251,3 +251,107 @@ fn to_egui_rect(rect: Rect) -> eframe::egui::Rect {
 fn to_egui_color(color: Color) -> eframe::egui::Color32 {
     eframe::egui::Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_color_serializes_to_the_short_hex_form_and_round_trips() {
+        let color = Color::rgb(0x12, 0xab, 0xff);
+
+        assert_eq!(color.to_hex(), "#12abff");
+        assert_eq!(Color::from_hex("#12abff"), Some(color));
+    }
+
+    #[test]
+    fn translucent_color_serializes_with_alpha_and_round_trips() {
+        let color = Color::rgba(0x01, 0x02, 0x03, 0x04);
+
+        assert_eq!(color.to_hex(), "#01020304");
+        assert_eq!(Color::from_hex("#01020304"), Some(color));
+    }
+
+    #[test]
+    fn fully_transparent_color_keeps_its_alpha() {
+        let color = Color::rgba(0xff, 0x00, 0x80, 0);
+
+        assert_eq!(color.to_hex(), "#ff008000");
+        assert_eq!(Color::from_hex("#ff008000"), Some(color));
+    }
+
+    #[test]
+    fn explicit_full_alpha_reads_as_opaque_and_is_written_in_the_short_form() {
+        let color = Color::from_hex("#00ff00ff").unwrap();
+
+        assert_eq!(color, Color::rgb(0, 255, 0));
+        assert_eq!(color.to_hex(), "#00ff00");
+    }
+
+    #[test]
+    fn hex_digits_are_read_case_insensitively_and_written_in_lower_case() {
+        let color = Color::from_hex("#ABCDEF").unwrap();
+
+        assert_eq!(color, Color::rgb(0xab, 0xcd, 0xef));
+        assert_eq!(color.to_hex(), "#abcdef");
+    }
+
+    #[test]
+    fn malformed_hex_colors_are_rejected() {
+        for text in [
+            "",
+            "#",
+            "ff0000",
+            "ff000080",
+            "#fff",
+            "#ff00",
+            "#ff000",
+            "#ff00000",
+            "#ff0000000",
+            "##ff0000",
+            "#gg0000",
+            "#ff00zz",
+            "#ff0000 ",
+            " #ff0000",
+            "#ff00000g",
+        ] {
+            assert_eq!(Color::from_hex(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn non_ascii_hex_colors_are_rejected_without_panicking() {
+        // Three two-byte characters make six bytes: the length check alone passes.
+        assert_eq!(Color::from_hex("#\u{e9}\u{e9}\u{e9}"), None);
+        assert_eq!(Color::from_hex("#ff00\u{e9}"), None);
+        assert_eq!(Color::from_hex("#\u{e9}\u{e9}\u{e9}\u{e9}"), None);
+    }
+
+    #[test]
+    fn color_is_saved_as_a_hex_string_and_loaded_back() {
+        let opaque = Color::rgb(0x10, 0x20, 0x30);
+        let translucent = Color::rgba(0x10, 0x20, 0x30, 0x40);
+
+        assert_eq!(serde_json::to_string(&opaque).unwrap(), "\"#102030\"");
+        assert_eq!(
+            serde_json::to_string(&translucent).unwrap(),
+            "\"#10203040\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Color>("\"#102030\"").unwrap(),
+            opaque
+        );
+        assert_eq!(
+            serde_json::from_str::<Color>("\"#10203040\"").unwrap(),
+            translucent
+        );
+    }
+
+    #[test]
+    fn loading_an_invalid_color_string_is_an_error() {
+        assert!(serde_json::from_str::<Color>("\"red\"").is_err());
+        assert!(serde_json::from_str::<Color>("\"102030\"").is_err());
+        assert!(serde_json::from_str::<Color>("\"#12345\"").is_err());
+        assert!(serde_json::from_str::<Color>("1056816").is_err());
+    }
+}

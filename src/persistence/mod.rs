@@ -306,6 +306,44 @@ impl WorkspaceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A unique temporary directory (not created until used) that is removed on
+    /// drop, also when the test fails.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "taffymeters-store-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&path);
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn empty_workspace(name: &str) -> WorkspaceFile {
+        WorkspaceFile {
+            format_version: FORMAT_VERSION,
+            name: name.into(),
+            input: InputConfig::default(),
+            theme: ThemeSettings::dark(),
+            windows: Vec::new(),
+        }
+    }
 
     #[test]
     fn names_reject_paths_reserved_words_and_edge_whitespace() {
@@ -320,11 +358,80 @@ mod tests {
     }
 
     #[test]
+    fn same_name_ignores_case_but_distinguishes_different_names() {
+        assert!(same_name("Mix", "mix"));
+        assert!(same_name("MIX", "mIx"));
+        assert!(same_name("Ärger", "ärger"));
+        assert!(same_name("混音", "混音"));
+        assert!(!same_name("Mix", "Mix 2"));
+        assert!(!same_name("Mix", "Mi"));
+        assert!(!same_name("Mix", ""));
+    }
+
+    #[test]
+    fn last_used_is_none_without_a_usable_selection() {
+        let dir = TestDir::new();
+        let store = WorkspaceStore::new(dir.path());
+        assert_eq!(store.last_used(), None, "no state.json yet");
+
+        fs::create_dir_all(dir.path()).unwrap();
+        let state = dir.path().join("state.json");
+        for unusable in [
+            &b"{ not json"[..],
+            b"",
+            b"{}",
+            br#"{"last_workspace": null}"#,
+            br#"{"last_workspace": 7}"#,
+            // A name that is not a valid file name is never handed out.
+            br#"{"last_workspace": "..\\evil"}"#,
+            br#"{"last_workspace": "a/b"}"#,
+            br#"{"last_workspace": ""}"#,
+        ] {
+            fs::write(&state, unusable).unwrap();
+            assert_eq!(
+                store.last_used(),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(unusable)
+            );
+        }
+    }
+
+    #[test]
+    fn last_used_names_a_workspace_that_does_not_exist_and_loading_it_finds_nothing() {
+        // The store does not check that the file exists: the caller falls back to a
+        // default layout when `load` reports `None` (`Workspace::open`).
+        let dir = TestDir::new();
+        let store = WorkspaceStore::new(dir.path());
+        store.set_last_used("Deleted").unwrap();
+        assert_eq!(store.last_used().as_deref(), Some("Deleted"));
+        assert!(matches!(store.load("Deleted"), Ok(None)));
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn saving_with_an_invalid_name_writes_nothing() {
+        let dir = TestDir::new();
+        let store = WorkspaceStore::new(dir.path());
+        for bad in ["", "a/b", "..", "CON", "x."] {
+            let file = WorkspaceFile {
+                name: bad.into(),
+                ..empty_workspace("Valid")
+            };
+            assert!(
+                matches!(store.save(&file), Err(PersistError::InvalidName(name)) if name == bad),
+                "{bad:?} was not rejected"
+            );
+        }
+        assert!(!store.workspaces().exists(), "a directory was created");
+        assert!(!dir.path().exists(), "the store root was created");
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
     fn newer_or_broken_files_are_reported_and_left_untouched() {
-        let root =
-            std::env::temp_dir().join(format!("taffymeters-store-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let store = WorkspaceStore::new(&root);
+        let dir = TestDir::new();
+        let store = WorkspaceStore::new(dir.path());
         assert!(store.load("Missing").unwrap().is_none());
         fs::create_dir_all(store.workspaces()).unwrap();
         fs::write(
@@ -339,18 +446,11 @@ mod tests {
         ));
         assert!(matches!(store.load("Broken"), Err(PersistError::Parse(..))));
         assert_eq!(fs::read(store.path_of("Broken")).unwrap(), b"{ not json");
-        let file = WorkspaceFile {
-            format_version: FORMAT_VERSION,
-            name: "Saved".into(),
-            input: InputConfig::default(),
-            theme: ThemeSettings::dark(),
-            windows: Vec::new(),
-        };
+        let file = empty_workspace("Saved");
         store.save(&file).unwrap();
         assert_eq!(store.load("Saved").unwrap(), Some(file));
         assert_eq!(store.list(), vec!["Broken", "Future", "Saved"]);
         store.set_last_used("Saved").unwrap();
         assert_eq!(store.last_used().as_deref(), Some("Saved"));
-        let _ = fs::remove_dir_all(&root);
     }
 }

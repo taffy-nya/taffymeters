@@ -164,3 +164,88 @@ impl Biquad {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+
+    fn sine_1khz(frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|index| {
+                (2.0 * std::f64::consts::PI * 1_000.0 * index as f64 / f64::from(RATE)).sin() as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn silence_reads_the_lufs_floor() {
+        let mut analyzer = LevelAnalyzer::new(RATE, 2);
+        let mut lufs = [0.0; 2];
+        let mut peaks = [1.0; 2];
+        analyzer.process(&vec![0.0; 2 * 4_800], &mut lufs, &mut peaks);
+        assert_eq!(lufs, [LUFS_FLOOR; 2]);
+        assert_eq!(peaks, [0.0; 2]);
+    }
+
+    #[test]
+    fn full_scale_1khz_sine_reads_minus_3_01_lufs_after_a_full_momentary_window() {
+        // BS.1770: K-weighting is +0.691 dB at 1 kHz, which the -0.691 offset
+        // cancels, so a 0 dBFS sine (mean square 1/2) reads 10*log10(0.5) = -3.01
+        // LUFS. The 0.1 dB tolerance covers the biquad's deviation from the
+        // reference at 48 kHz. One second (> 400 ms window + filter settling).
+        let mut analyzer = LevelAnalyzer::new(RATE, 1);
+        let mut lufs = [0.0];
+        let mut peaks = [0.0];
+        analyzer.process(&sine_1khz(RATE as usize), &mut lufs, &mut peaks);
+        assert!(
+            (lufs[0] + 3.01).abs() < 0.1,
+            "momentary loudness {} LUFS",
+            lufs[0]
+        );
+    }
+
+    #[test]
+    fn channels_are_measured_independently_in_interleaved_input() {
+        let mut analyzer = LevelAnalyzer::new(RATE, 2);
+        let interleaved: Vec<f32> = sine_1khz(RATE as usize)
+            .into_iter()
+            .flat_map(|sample| [sample, 0.0])
+            .collect();
+        let mut lufs = [0.0; 2];
+        let mut peaks = [0.0; 2];
+        analyzer.process(&interleaved, &mut lufs, &mut peaks);
+        assert!((lufs[0] + 3.01).abs() < 0.1, "left {} LUFS", lufs[0]);
+        assert_eq!(lufs[1], LUFS_FLOOR);
+        assert!(peaks[0] > 0.99 && peaks[0] <= 1.0, "left peak {}", peaks[0]);
+        assert_eq!(peaks[1], 0.0);
+    }
+
+    #[test]
+    fn loudness_forgets_audio_older_than_the_momentary_window() {
+        let mut analyzer = LevelAnalyzer::new(RATE, 1);
+        let mut lufs = [0.0];
+        let mut peaks = [0.0];
+        analyzer.process(&sine_1khz(RATE as usize), &mut lufs, &mut peaks);
+        assert!(lufs[0] > -10.0);
+        // 0.6 s of silence: the 0.4 s window holds only silence (and no filter
+        // ringing) by now.
+        analyzer.process(&vec![0.0; 28_800], &mut lufs, &mut peaks);
+        assert_eq!(lufs[0], LUFS_FLOOR);
+    }
+
+    #[test]
+    fn sample_peak_is_the_largest_absolute_value_of_the_interval() {
+        let mut analyzer = LevelAnalyzer::new(RATE, 2);
+        let mut lufs = [0.0; 2];
+        let mut peaks = [0.0; 2];
+        // Left: 0.5, -0.8, 0.3 (the negative sample is the peak);
+        // right: 0.25, 0.1, -0.2.
+        analyzer.process(&[0.5, 0.25, -0.8, 0.1, 0.3, -0.2], &mut lufs, &mut peaks);
+        assert_eq!(peaks, [0.8, 0.25]);
+        // The next interval starts over: a quieter block does not inherit the peak.
+        analyzer.process(&[0.1, -0.05], &mut lufs, &mut peaks);
+        assert_eq!(peaks, [0.1, 0.05]);
+    }
+}

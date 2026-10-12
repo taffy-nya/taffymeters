@@ -18,6 +18,10 @@ image = { version = "0.25.10", default-features = false, features = ["png"], opt
 sha2 = { version = "0.10", optional = true }
 realfft = "3"
 
+[[test]]
+name = "automation_core"
+required-features = ["automation"]
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse"] }
 

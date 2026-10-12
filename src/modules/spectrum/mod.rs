@@ -393,29 +393,10 @@ mod tests {
             SourceTelemetry, create_block_transport,
         },
         dataflow::{Dataflow, DataflowHandle, FftMetadata, WindowFunction},
-        render::{Circle, ColoredRect, RenderTarget},
+        modules::test_support::RecordingTarget,
+        render::ColoredRect,
         snapshot::Frame,
     };
-
-    #[derive(Default)]
-    struct RecordingTarget {
-        polylines: usize,
-        rectangles: usize,
-    }
-
-    impl RenderTarget for RecordingTarget {
-        fn polyline(&mut self, _clip: Rect, _points: &[Point], _stroke: crate::render::Stroke) {
-            self.polylines += 1;
-        }
-
-        fn fill_rects(&mut self, _clip: Rect, rects: &[ColoredRect]) {
-            self.rectangles += rects.len();
-        }
-
-        fn circles(&mut self, _clip: Rect, _circles: &[Circle]) {}
-
-        fn text(&mut self, _clip: Rect, _position: Point, _text: &str, _style: TextStyle) {}
-    }
 
     struct RuntimeFixture {
         capture: CaptureEndpoint,
@@ -484,8 +465,9 @@ mod tests {
 
     #[test]
     fn pixel_style_generates_cells_instead_of_recoloring_the_curve() {
+        // Quiet below bin 100 (2.34 kHz), a flat -50 dBFS from there up.
         let bins: Vec<f32> = (0..=1024)
-            .map(|index| -100.0 + index as f32 * 0.08)
+            .map(|index| if index < 100 { -100.0 } else { -50.0 })
             .collect();
         let plot = SpectrumPlot {
             fft: FftMetadata {
@@ -504,13 +486,14 @@ mod tests {
             min_dbfs: -100.0,
             max_dbfs: 0.0,
         };
+        let rect = Rect {
+            min: Point { x: 0.0, y: 0.0 },
+            max: Point { x: 800.0, y: 400.0 },
+        };
         let context = SpectrumStyleContext {
             snapshot: &plot,
             coordinates: &coordinates,
-            rect: Rect {
-                min: Point { x: 0.0, y: 0.0 },
-                max: Point { x: 800.0, y: 400.0 },
-            },
+            rect,
             monotonic_time: Duration::ZERO,
             palette: &crate::theme::Palette::default(),
         };
@@ -521,8 +504,84 @@ mod tests {
             .create_spectrum_style(PIXEL_SPECTRUM_STYLE_ID)
             .unwrap();
         pixel.draw(context, &mut target);
-        assert_eq!(target.polylines, 0);
-        assert!(target.rectangles > 100);
+        assert!(target.polylines.is_empty(), "cells replace the curve");
+        assert!(!target.rects.is_empty(), "the loud region produces cells");
+
+        let cell = target.rects[0].rect;
+        let (cell_width, cell_height) = (cell.width(), cell.height());
+        assert!(cell_width > 0.0 && cell_height > 0.0);
+        for cell in &target.rects {
+            let size = (cell.rect.width(), cell.rect.height());
+            assert_eq!(size, (cell_width, cell_height), "cells are uniform");
+            assert!(
+                cell.rect.min.x >= rect.min.x
+                    && cell.rect.max.x <= rect.max.x
+                    && cell.rect.min.y >= rect.min.y
+                    && cell.rect.max.y <= rect.max.y,
+                "cell {:?} leaves the plot",
+                cell.rect
+            );
+        }
+        for (index, a) in target.rects.iter().enumerate() {
+            for b in &target.rects[index + 1..] {
+                let overlaps = a.rect.min.x < b.rect.max.x
+                    && b.rect.min.x < a.rect.max.x
+                    && a.rect.min.y < b.rect.max.y
+                    && b.rect.min.y < a.rect.max.y;
+                assert!(!overlaps, "cells {:?} and {:?} overlap", a.rect, b.rect);
+            }
+        }
+
+        // Bins below 100 are quiet: no cell may be centered at a frequency that
+        // rounds to one of them. Bin 99.5 is the boundary.
+        let boundary_x = coordinates.x_for_frequency(99.5 * plot.fft.bin_hz, rect);
+        for cell in &target.rects {
+            let center_x = (cell.rect.min.x + cell.rect.max.x) * 0.5;
+            assert!(
+                center_x >= boundary_x,
+                "cell at x {center_x} is in the quiet region (< {boundary_x})"
+            );
+        }
+
+        // Loud columns start right at the boundary and run to the right edge.
+        let mut columns: std::collections::BTreeMap<u32, Vec<ColoredRect>> = Default::default();
+        for cell in &target.rects {
+            columns
+                .entry(cell.rect.min.x.to_bits())
+                .or_default()
+                .push(*cell);
+        }
+        let first_x = f32::from_bits(*columns.keys().next().unwrap());
+        let last_right = columns
+            .values()
+            .map(|cells| cells[0].rect.max.x)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            first_x - boundary_x <= 2.0 * cell_width,
+            "first loud column"
+        );
+        assert!(
+            rect.max.x - last_right <= 2.0 * cell_width,
+            "last loud column"
+        );
+
+        // Every loud column is a stack from the bottom up to the -50 dBFS level.
+        let level_y = coordinates.y_for_dbfs(-50.0, rect);
+        let expected_count = columns.values().next().unwrap().len();
+        for (key, cells) in &columns {
+            let x = f32::from_bits(*key);
+            assert_eq!(cells.len(), expected_count, "column at x {x}: equal levels");
+            let lowest = cells.iter().map(|c| c.rect.max.y).fold(f32::MIN, f32::max);
+            let highest = cells.iter().map(|c| c.rect.min.y).fold(f32::MAX, f32::min);
+            assert!(
+                rect.max.y - lowest <= cell_height,
+                "column at x {x} floats above the bottom"
+            );
+            assert!(
+                (highest - level_y).abs() <= cell_height,
+                "column at x {x} reaches y {highest}, level is {level_y}"
+            );
+        }
     }
 
     #[test]
@@ -668,7 +727,7 @@ mod tests {
                 });
             }
         }
-        assert!(target.polylines > 0 && target.rectangles > 0);
+        assert!(!target.polylines.is_empty() && !target.rects.is_empty());
         assert_eq!(
             fixture.services.dataflow.metrics().fft_evaluations,
             evaluated,

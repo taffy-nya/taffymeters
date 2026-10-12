@@ -242,7 +242,7 @@ pub(crate) fn source_status_text(status: &SourceStatus) -> String {
 }
 
 impl Workspace {
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pub(crate) fn control_targets(
         &self,
         window_id: WindowId,

@@ -168,3 +168,96 @@ impl Module for StereometerModule {
         self.circles.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use crate::modules::test_support::{
+        BLOCK_FRAMES, PcmFixture, RecordingTarget, TEST_RECT, draw, repeat_frame,
+    };
+
+    fn stereometer(fixture: &PcmFixture) -> Box<dyn Module> {
+        StereometerFactory
+            .create(&fixture.services, &Registry::default(), None)
+            .unwrap()
+    }
+
+    #[test]
+    fn mono_input_shows_a_hint_and_draws_no_points() {
+        let mut fixture = PcmFixture::new(1);
+        let mut module = stereometer(&fixture);
+        fixture.feed(&repeat_frame(&[0.5], BLOCK_FRAMES));
+
+        let mut target = RecordingTarget::default();
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+
+        assert_eq!(target.texts.len(), 1, "one hint explaining the requirement");
+        assert!(!target.texts[0].text.is_empty());
+        assert!(
+            TEST_RECT.contains(target.texts[0].position),
+            "the hint must be inside the Module's area"
+        );
+        assert!(
+            target.circles.is_empty(),
+            "mono has no stereo field to plot"
+        );
+        assert!(
+            target.polylines.is_empty(),
+            "no stereo guides without a field"
+        );
+    }
+
+    #[test]
+    fn stereo_input_plots_points_and_no_hint() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = stereometer(&fixture);
+        fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
+
+        let mut target = RecordingTarget::default();
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+
+        assert!(target.texts.is_empty());
+        assert!(!target.circles.is_empty(), "stereo input plots points");
+    }
+
+    #[test]
+    fn identical_channels_plot_on_the_vertical_axis_and_opposite_ones_on_the_horizontal() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = stereometer(&fixture);
+        let center = TEST_RECT.center();
+        let mut target = RecordingTarget::default();
+
+        // L = R: pure mid signal, straight up from the center for positive samples.
+        fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        assert!(!target.circles.is_empty());
+        for circle in &target.circles {
+            assert_eq!(
+                circle.center.x, center.x,
+                "L = R must stay on the vertical axis"
+            );
+            assert!(
+                circle.center.y < center.y,
+                "positive mid plots above center"
+            );
+        }
+
+        // L = -R: pure side signal, to the right of the center when L is positive.
+        fixture.feed(&repeat_frame(&[0.5, -0.5], BLOCK_FRAMES));
+        target.clear();
+        draw(module.as_mut(), &mut target, Duration::from_millis(50));
+        assert!(!target.circles.is_empty());
+        for circle in &target.circles {
+            assert_eq!(
+                circle.center.y, center.y,
+                "L = -R must stay on the horizontal axis"
+            );
+            assert!(
+                circle.center.x > center.x,
+                "positive left plots right of center"
+            );
+        }
+    }
+}

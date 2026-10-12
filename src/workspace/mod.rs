@@ -5,7 +5,7 @@
 
 mod arrange;
 mod desktop;
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 mod inspect;
 mod instances;
 mod layout;
@@ -35,7 +35,7 @@ use crate::{
 };
 
 pub(crate) use desktop::{DesktopProbe, NativeDesktop};
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 pub(crate) use layout::Axis;
 use layout::{Layout, LayoutError};
 pub(crate) use layout::{Side, SplitId};
@@ -507,8 +507,8 @@ impl Workspace {
     }
 
     /// A workspace with one window holding one default Spectrum, not saved
-    /// (automation and tests; the product opens its saved workspace).
-    #[cfg(any(test, feature = "automation"))]
+    /// (automation only; the product opens its saved workspace).
+    #[cfg(feature = "automation")]
     pub fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
         let mut workspace = Self::empty(live)?;
         workspace.add_default_window(always_on_top)?;

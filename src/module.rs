@@ -188,3 +188,133 @@ impl From<ControlError> for ModuleError {
         Self::Control(error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataflow::{FftConfig, Keep, NodeSpec, SOURCE, SharedAnalysisId};
+
+    /// Source → Channel → Fft, with the Fft output kept as the latest result.
+    fn default_spec() -> DataSpec {
+        let mut spec = DataSpec::new();
+        let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::Left));
+        let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
+        spec.output(fft, Keep::Latest);
+        spec
+    }
+
+    #[test]
+    fn spec_from_saved_without_saved_data_uses_the_default() {
+        assert_eq!(spec_from_saved(default_spec(), None), Ok(default_spec()));
+    }
+
+    #[test]
+    fn spec_from_saved_adopts_saved_parameters_and_bindings_of_the_same_shape() {
+        let mut saved = DataSpec::new();
+        let channel = saved.add(SOURCE, NodeSpec::Channel(ChannelSelection::Right));
+        let fft = saved.add(
+            channel,
+            NodeSpec::Fft(FftConfig {
+                window_size: 1024,
+                hop_size: 256,
+                floor_dbfs: -120.0,
+            }),
+        );
+        let output = saved.output(fft, Keep::Latest);
+        saved.bind(output, Some(SharedAnalysisId(7)));
+        assert!(saved.same_shape(&default_spec()));
+        assert_ne!(saved, default_spec());
+
+        let spec = spec_from_saved(default_spec(), Some(&saved));
+
+        assert_eq!(spec, Ok(saved));
+    }
+
+    #[test]
+    fn spec_from_saved_rejects_a_different_node_graph_instead_of_replacing_it() {
+        let mut saved = default_spec();
+        let tilt = saved.add(SOURCE, NodeSpec::Tilt { db_per_octave: 3.0 });
+        saved.output(tilt, Keep::Latest);
+
+        assert_eq!(
+            spec_from_saved(default_spec(), Some(&saved)),
+            Err(ModuleError::IncompatibleData)
+        );
+    }
+
+    #[test]
+    fn spec_from_saved_rejects_saved_data_that_keeps_a_different_kind_of_history() {
+        let mut saved = default_spec();
+        saved.set_keep(OutputId::from_index(0), Keep::Seconds(10.0));
+
+        assert_eq!(
+            spec_from_saved(default_spec(), Some(&saved)),
+            Err(ModuleError::IncompatibleData)
+        );
+    }
+
+    #[test]
+    fn spec_from_saved_rejects_an_empty_saved_spec() {
+        assert_eq!(
+            spec_from_saved(default_spec(), Some(&DataSpec::new())),
+            Err(ModuleError::IncompatibleData)
+        );
+    }
+
+    #[test]
+    fn number_setting_clamps_into_the_range() {
+        let range = (-10.0, 20.0);
+
+        assert_eq!(
+            number_setting("k", &SettingValue::Number(5.0), range),
+            Ok(5.0)
+        );
+        assert_eq!(
+            number_setting("k", &SettingValue::Number(99.0), range),
+            Ok(20.0)
+        );
+        assert_eq!(
+            number_setting("k", &SettingValue::Number(-99.0), range),
+            Ok(-10.0)
+        );
+        assert_eq!(
+            number_setting("k", &SettingValue::Number(20.0), range),
+            Ok(20.0)
+        );
+        assert_eq!(
+            number_setting("k", &SettingValue::Number(-10.0), range),
+            Ok(-10.0)
+        );
+    }
+
+    #[test]
+    fn number_setting_rejects_values_that_are_not_finite_numbers_and_names_the_key() {
+        let range = (0.0, 1.0);
+        let invalid = || Err(ModuleError::InvalidSetting("gain".to_owned()));
+
+        assert_eq!(
+            number_setting("gain", &SettingValue::Choice("0.5".to_owned()), range),
+            invalid()
+        );
+        assert_eq!(
+            number_setting(
+                "gain",
+                &SettingValue::Channel(ChannelSelection::Left),
+                range
+            ),
+            invalid()
+        );
+        assert_eq!(
+            number_setting("gain", &SettingValue::Number(f32::NAN), range),
+            invalid()
+        );
+        assert_eq!(
+            number_setting("gain", &SettingValue::Number(f32::INFINITY), range),
+            invalid()
+        );
+        assert_eq!(
+            number_setting("gain", &SettingValue::Number(f32::NEG_INFINITY), range),
+            invalid()
+        );
+    }
+}

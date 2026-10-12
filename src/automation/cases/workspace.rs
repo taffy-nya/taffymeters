@@ -1,4 +1,4 @@
-//! W01–W08: Workspace / BSP / multi-window behavior through the real Workspace,
+//! W01–W09: Workspace / BSP / multi-window behavior through the real Workspace,
 //! Module factories, manual source and egui events. Native window management, real
 //! DPI changes and the OS move loop are verified separately on a desktop.
 

@@ -594,3 +594,89 @@ impl fmt::Display for SpecError {
 }
 
 impl Error for SpecError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::{ChannelLayout, Generation, SourceId};
+
+    fn stereo_48k() -> AudioDescriptor {
+        AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo).unwrap()
+    }
+
+    /// Checks the History budget boundary of `node`. The frame model is
+    /// `bytes = (results_per_second * seconds + 1) *
+    /// (payload + FRAME_OVERHEAD_BYTES)`, i.e. one extra result at the window
+    /// boundary. `max_results` is the largest whole number of retained results
+    /// whose bytes stay within `HISTORY_BUDGET_BYTES`; the two probes sit half a
+    /// result inside and 1.5 results beyond that limit, so f32 rounding of the
+    /// seconds cannot flip either side.
+    fn assert_history_boundary(
+        mut spec: DataSpec,
+        node: NodeRef,
+        descriptor: &AudioDescriptor,
+        results_per_second: f64,
+        payload_bytes: f64,
+    ) {
+        let per_result = payload_bytes + FRAME_OVERHEAD_BYTES;
+        let max_results = (HISTORY_BUDGET_BYTES as f64 / per_result).floor() - 1.0;
+        let fits = ((max_results - 0.5) / results_per_second) as f32;
+        let too_long = ((max_results + 1.5) / results_per_second) as f32;
+        let output = spec.output(node, Keep::Seconds(fits));
+        assert_eq!(
+            spec.validated(descriptor).map(|_| ()),
+            Ok(()),
+            "a history of {fits} s fits the budget and must be accepted"
+        );
+        spec.set_keep(output, Keep::Seconds(too_long));
+        assert_eq!(
+            spec.validated(descriptor).map(|_| ()),
+            Err(SpecError::HistoryTooLarge),
+            "one more output frame ({too_long} s) exceeds the budget"
+        );
+    }
+
+    #[test]
+    fn spectrum_history_is_accepted_up_to_the_budget_and_rejected_one_frame_beyond() {
+        let descriptor = stereo_48k();
+        let fft = FftConfig::new(2048, 512, -160.0).unwrap();
+        let mut spec = DataSpec::new();
+        let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::Left));
+        let node = spec.add(channel, NodeSpec::Fft(fft));
+        assert_history_boundary(
+            spec,
+            node,
+            &descriptor,
+            f64::from(descriptor.sample_rate_hz) / fft.hop_size as f64,
+            (fft.window_size / 2 + 1) as f64 * 4.0,
+        );
+    }
+
+    #[test]
+    fn levels_history_is_accepted_up_to_the_budget_and_rejected_one_frame_beyond() {
+        let descriptor = stereo_48k();
+        let mut spec = DataSpec::new();
+        let node = spec.add(SOURCE, NodeSpec::Levels);
+        assert_history_boundary(
+            spec,
+            node,
+            &descriptor,
+            TIME_PUBLICATIONS_PER_SECOND as f64,
+            2.0 * f64::from(descriptor.channel_count) * 4.0,
+        );
+    }
+
+    #[test]
+    fn history_duration_rejects_negative_infinity_and_accepts_tiny_positive() {
+        let descriptor = stereo_48k();
+        let mut spec = DataSpec::new();
+        let levels = spec.add(SOURCE, NodeSpec::Levels);
+        let output = spec.output(levels, Keep::Seconds(f32::NEG_INFINITY));
+        assert_eq!(
+            spec.validated(&descriptor).map(|_| ()),
+            Err(SpecError::InvalidKeep)
+        );
+        spec.set_keep(output, Keep::Seconds(f32::MIN_POSITIVE));
+        assert!(spec.validated(&descriptor).is_ok());
+    }
+}

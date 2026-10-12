@@ -8,7 +8,7 @@ use crate::{
     dataflow::{ControlError, Dataflow, DataflowHandle},
 };
 
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 use crate::audio::synthetic::{
     ManualInputDriver, ManualSource, RealtimeSource, SyntheticConfig, SyntheticError,
 };
@@ -30,9 +30,9 @@ impl Default for LiveAudioConfig {
 
 enum InputDriver {
     System(SystemCapture),
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     Manual(ManualSource),
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     Realtime(RealtimeSource),
 }
 
@@ -89,7 +89,7 @@ impl LiveAudio {
         ))
     }
 
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pub(crate) fn open_manual(
         config: LiveAudioConfig,
         synthetic: SyntheticConfig,
@@ -120,7 +120,7 @@ impl LiveAudio {
         ))
     }
 
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pub(crate) fn open_realtime(
         config: LiveAudioConfig,
         synthetic: SyntheticConfig,
@@ -206,11 +206,11 @@ impl LiveAudio {
                 InputDriver::System(capture) => capture
                     .pause()
                     .map_err(|error| LiveAudioError::Input(error.to_string()))?,
-                #[cfg(any(test, feature = "automation"))]
+                #[cfg(feature = "automation")]
                 InputDriver::Manual(source) => {
                     source.pause().map_err(map_synthetic_error)?;
                 }
-                #[cfg(any(test, feature = "automation"))]
+                #[cfg(feature = "automation")]
                 InputDriver::Realtime(source) => {
                     source.pause().map_err(map_synthetic_error)?;
                 }
@@ -228,11 +228,11 @@ impl LiveAudio {
                         .resume()
                         .map_err(|error| LiveAudioError::Input(error.to_string()))?;
                 }
-                #[cfg(any(test, feature = "automation"))]
+                #[cfg(feature = "automation")]
                 InputDriver::Manual(source) => {
                     source.resume(&self.handle).map_err(map_synthetic_error)?;
                 }
-                #[cfg(any(test, feature = "automation"))]
+                #[cfg(feature = "automation")]
                 InputDriver::Realtime(source) => {
                     source.resume(&self.handle).map_err(map_synthetic_error)?;
                 }
@@ -243,7 +243,7 @@ impl LiveAudio {
     }
 }
 
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 fn map_synthetic_error(error: SyntheticError) -> LiveAudioError {
     match error {
         SyntheticError::Control(error) => LiveAudioError::Control(error),

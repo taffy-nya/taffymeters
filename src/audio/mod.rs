@@ -1,7 +1,7 @@
 mod descriptor;
 mod source;
 mod status;
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 pub(crate) mod synthetic;
 mod system;
 

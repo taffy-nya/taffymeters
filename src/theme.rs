@@ -324,4 +324,67 @@ mod tests {
             (c.red, c.green, c.blue, 255)
         );
     }
+
+    #[test]
+    fn heat_map_blends_low_into_mid_between_one_and_two_thirds() {
+        for preset in [Preset::Dark, Preset::Light] {
+            let palette = preset.palette();
+            let low = palette.color(ColorRole::Low);
+            let mid = palette.color(ColorRole::Mid);
+            let channels = |color: Color| [color.red, color.green, color.blue];
+            let (low_rgb, mid_rgb) = (channels(low), channels(mid));
+            let distance = |color: Color, to: [u8; 3]| -> u32 {
+                channels(color)
+                    .iter()
+                    .zip(to)
+                    .map(|(a, b)| u32::from(a.abs_diff(b)))
+                    .sum()
+            };
+
+            // The halfway value lands halfway between the two ramp colors.
+            let halfway = palette.heat(0.5);
+            for ((got, from), to) in channels(halfway).into_iter().zip(low_rgb).zip(mid_rgb) {
+                let middle = (i32::from(from) + i32::from(to)) / 2;
+                assert!(
+                    (i32::from(got) - middle).abs() <= 1,
+                    "{preset:?}: channel {got} is not halfway between {from} and {to}"
+                );
+            }
+            let alphas: Vec<u8> = [0.4, 0.5, 0.6]
+                .iter()
+                .map(|&value| palette.heat(value).alpha)
+                .collect();
+            assert!(
+                alphas.windows(2).all(|pair| pair[0] < pair[1]),
+                "opacity must rise with the value: {alphas:?}"
+            );
+
+            // Moving up the segment moves monotonically from Low toward Mid.
+            let steps = [0.36, 0.42, 0.5, 0.58, 0.64];
+            let from_low: Vec<u32> = steps
+                .iter()
+                .map(|&value| distance(palette.heat(value), low_rgb))
+                .collect();
+            let to_mid: Vec<u32> = steps
+                .iter()
+                .map(|&value| distance(palette.heat(value), mid_rgb))
+                .collect();
+            assert!(
+                from_low.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{from_low:?}"
+            );
+            assert!(
+                to_mid.windows(2).all(|pair| pair[0] >= pair[1]),
+                "{to_mid:?}"
+            );
+            assert!(from_low[0] < from_low[4] && to_mid[0] > to_mid[4]);
+
+            // The end of the segment is Mid itself (rounding tolerance of one step).
+            let end = palette.heat(2.0 / 3.0);
+            assert!(
+                distance(end, mid_rgb) <= 3,
+                "{preset:?}: {end:?} is not Mid"
+            );
+        }
+    }
 }

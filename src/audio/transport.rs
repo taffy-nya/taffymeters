@@ -194,10 +194,7 @@ impl ProcessingEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn allocations_during(action: impl FnOnce()) -> u64 {
-        crate::probe::allocations_during(action)
-    }
+    use crate::probe::allocations_during;
 
     #[test]
     fn callback_write_is_allocation_free_and_preserves_complete_blocks() {
