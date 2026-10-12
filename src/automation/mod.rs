@@ -1,30 +1,13 @@
-#![allow(clippy::missing_const_for_thread_local)] // The initializer is const; Clippy 1.98 flags the macro expansion.
-
+mod cases;
 mod harness;
 mod perf;
 mod report;
-mod scenarios;
-mod settings_scenarios;
+mod support;
 mod trace;
-mod workspace_scenarios;
-thread_local! {
-    static SCENARIO_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
-}
-
-fn with_scenario_deadline<T>(run: impl FnOnce() -> T) -> T {
-    SCENARIO_DEADLINE
-        .with(|value| value.set(Some(std::time::Instant::now() + Duration::from_secs(30))));
-    let result = run();
-    SCENARIO_DEADLINE.with(|value| value.set(None));
-    result
-}
 mod visual;
 
 use serde_json::json;
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 use crate::{LiveAudio, LiveAudioConfig, audio::synthetic::SyntheticConfig, workspace::Workspace};
 use report::new_output;
@@ -159,8 +142,8 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
             let mut report = report::new(&suite, input);
             let baseline = values.get(2).map(Path::new);
             match suite.as_str() {
-                "core" => scenarios::core(&mut report),
-                "visual" => scenarios::visual(&mut report, &output, baseline),
+                "core" => cases::core(&mut report),
+                "visual" => cases::visual(&mut report, &output, baseline),
                 _ => perf::suite(&mut report),
             }
             report.finish();
@@ -177,7 +160,7 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
             let output = PathBuf::from(&values[2]);
             new_output(&output).map_err(runtime)?;
             let mut report = report::new("compare", serde_json::Value::Null);
-            report.cases.push(scenarios::compare_case(
+            report.cases.push(cases::compare_case(
                 Path::new(&values[0]),
                 Path::new(&values[1]),
                 &output,
@@ -189,29 +172,4 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
         }
         _ => Err(usage("expected run, compare or preview".into())),
     }
-}
-
-pub(super) fn wait_until<T>(
-    deadline: std::time::Instant,
-    label: &str,
-    mut observe: impl FnMut() -> Option<T>,
-) -> Result<T, String> {
-    loop {
-        if let Some(value) = observe() {
-            return Ok(value);
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("Timeout waiting for {label}"));
-        }
-        std::thread::yield_now();
-    }
-}
-
-pub(super) fn deadline() -> std::time::Instant {
-    let condition = std::time::Instant::now() + Duration::from_secs(5);
-    SCENARIO_DEADLINE.with(|value| {
-        value
-            .get()
-            .map_or(condition, |scenario| scenario.min(condition))
-    })
 }

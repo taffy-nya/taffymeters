@@ -1,0 +1,268 @@
+//! BSP arrangement of instances: splitting, moving and detaching.
+
+use eframe::egui::{Vec2, pos2};
+
+use super::{
+    ActionOutcome, DETACH_OFFSET_POINTS, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget,
+    PendingDetach, Side, SplitId, WindowId, WindowState, Workspace, WorkspaceError,
+    layout::{Layout, fits},
+};
+
+impl Workspace {
+    /// Whether `incoming` can be placed on `side` of `target` in its current area.
+    fn can_place_beside(&self, target: ModuleInstanceId, side: Side, incoming_min: Vec2) -> bool {
+        let Some(window_id) = self.window_of(target) else {
+            return false;
+        };
+        let Some(rect) = self.leaf_rect(window_id, target) else {
+            return false;
+        };
+        fits(
+            rect.size(),
+            side.axis(),
+            self.module_min_size(target),
+            incoming_min,
+        )
+    }
+
+    pub(crate) fn can_split(&self, instance: ModuleInstanceId, side: Side) -> bool {
+        self.can_place_beside(instance, side, self.module_min_size(instance))
+    }
+
+    pub(crate) fn move_target_valid(&self, source: ModuleInstanceId, target: MoveTarget) -> bool {
+        if !self.modules.contains_key(&source) || self.window_of(source).is_none() {
+            return false;
+        }
+        match target {
+            MoveTarget::Beside { instance_id, side } => {
+                instance_id != source
+                    && self.can_place_beside(instance_id, side, self.module_min_size(source))
+            }
+            MoveTarget::EmptyWindow(window_id) => self
+                .windows
+                .get(&window_id)
+                .is_some_and(|window| window.layout.is_empty() && window.pending_detach.is_none()),
+        }
+    }
+
+    pub(super) fn select_after_removal(window: &mut WindowState, removed: ModuleInstanceId) {
+        if window.active == Some(removed) || window.active.is_none() {
+            window.active = window.layout.leaves().first().copied();
+        }
+    }
+
+    pub(super) fn split_module(
+        &mut self,
+        instance_id: ModuleInstanceId,
+        side: Side,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let window_id = self.located(instance_id)?;
+        if !self.can_split(instance_id, side) {
+            return Err(WorkspaceError::InsufficientSpace("split this module"));
+        }
+        let type_id = self.modules[&instance_id].type_id;
+        let split_id = SplitId(self.next_split_id);
+        let next_split = self
+            .next_split_id
+            .checked_add(1)
+            .ok_or(WorkspaceError::IdExhausted)?;
+        let new = self.create_module(type_id)?;
+        let window = self.window_mut(window_id)?;
+        if let Err(error) = window
+            .layout
+            .insert_beside(instance_id, side, new, split_id)
+        {
+            self.modules.remove(&new);
+            return Err(error.into());
+        }
+        window.active = Some(new);
+        self.next_split_id = next_split;
+        Ok(ActionOutcome::Created(new))
+    }
+
+    pub(super) fn set_split_ratio(
+        &mut self,
+        window_id: WindowId,
+        split_id: SplitId,
+        ratio: f32,
+        manual: bool,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        self.window_mut(window_id)?
+            .layout
+            .set_ratio(split_id, ratio, manual)?;
+        Ok(ActionOutcome::Applied)
+    }
+
+    pub(super) fn reset_split(
+        &mut self,
+        window_id: WindowId,
+        split_id: SplitId,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        self.window_mut(window_id)?.layout.reset_chain(split_id)?;
+        Ok(ActionOutcome::Applied)
+    }
+
+    pub(super) fn cancel_detach(
+        &mut self,
+        window_id: WindowId,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let window = self.window(window_id)?;
+        if window.pending_detach.is_none() || window.opened {
+            return Err(WorkspaceError::Unsupported(
+                "cancel a detach that is not pending",
+            ));
+        }
+        self.windows.remove(&window_id);
+        Ok(ActionOutcome::Applied)
+    }
+
+    pub(super) fn detach(
+        &mut self,
+        instance_id: ModuleInstanceId,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let source_id = self.located(instance_id)?;
+        let source = self.window(source_id)?;
+        if source.layout.leaves().len() < 2 {
+            return Err(WorkspaceError::Unsupported(
+                "detach the only module of a window",
+            ));
+        }
+        if self.windows.values().any(|window| {
+            window
+                .pending_detach
+                .is_some_and(|p| p.instance_id == instance_id)
+        }) {
+            return Err(WorkspaceError::Unsupported("detach a module twice"));
+        }
+        let size = self
+            .leaf_rect(source_id, instance_id)
+            .map_or(INITIAL_WINDOW_SIZE, |rect| rect.size())
+            .max(self.module_min_size(instance_id));
+        let ppp = source.pixels_per_point;
+        let position = source.desktop.outer.map(|outer| {
+            let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
+            pos2(physical.x / ppp, physical.y / ppp)
+        });
+        // The app-wide clock: the source window's own pass time stops while it is
+        // minimized (detach can be requested from the settings window then).
+        let requested_at = self.display_time;
+        let always_on_top = source.always_on_top;
+        let min_size = self.module_min_size(instance_id);
+        let window_id = WindowId(Self::allocate(&mut self.next_window_id)?);
+        let mut window = WindowState::new(Layout::default(), size, always_on_top);
+        // The window will hold this module: its minimum, not an empty window's.
+        window.initial_min_size = min_size;
+        window.initial_position = position;
+        window.pixels_per_point = ppp;
+        window.pending_detach = Some(PendingDetach {
+            instance_id,
+            source: source_id,
+            requested_at,
+        });
+        self.windows.insert(window_id, window);
+        Ok(ActionOutcome::WindowCreated(window_id))
+    }
+
+    /// Called on the first frame of a pending window: move the instance from its
+    /// source layout, or drop the empty window when the source became invalid.
+    pub(super) fn commit_detach(&mut self, window_id: WindowId) {
+        let Some(pending) = self
+            .windows
+            .get(&window_id)
+            .and_then(|window| window.pending_detach)
+        else {
+            return;
+        };
+        let current = self.window_of(pending.instance_id);
+        if current != Some(pending.source) || !self.modules.contains_key(&pending.instance_id) {
+            self.windows.remove(&window_id);
+            self.control_error = Some("detach canceled: the module is no longer there".into());
+            return;
+        }
+        let source = self
+            .windows
+            .get_mut(&pending.source)
+            .expect("source window located above");
+        source
+            .layout
+            .remove_leaf(pending.instance_id)
+            .expect("instance located in source above");
+        Self::select_after_removal(source, pending.instance_id);
+        let source_empty = source.layout.is_empty();
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .expect("pending window exists");
+        window
+            .layout
+            .place_root(pending.instance_id)
+            .expect("pending window starts empty");
+        window.active = Some(pending.instance_id);
+        window.pending_detach = None;
+        if source_empty {
+            let _ = self.close_window(pending.source);
+        }
+        self.sync_visibility();
+    }
+
+    pub(super) fn move_module(
+        &mut self,
+        instance_id: ModuleInstanceId,
+        target: MoveTarget,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let source_id = self.located(instance_id)?;
+        let target_window = match target {
+            MoveTarget::Beside {
+                instance_id: target_leaf,
+                ..
+            } => self.located(target_leaf)?,
+            MoveTarget::EmptyWindow(window_id) => {
+                self.window(window_id)?;
+                window_id
+            }
+        };
+        if !self.move_target_valid(instance_id, target) {
+            return Err(WorkspaceError::InsufficientSpace("place the module there"));
+        }
+        let split_id = match target {
+            MoveTarget::Beside { .. } => Some(SplitId(Self::allocate(&mut self.next_split_id)?)),
+            MoveTarget::EmptyWindow(_) => None,
+        };
+        // All preconditions hold; the two tree updates below cannot fail.
+        let source = self.windows.get_mut(&source_id).expect("located");
+        source
+            .layout
+            .remove_leaf(instance_id)
+            .expect("instance located in source");
+        Self::select_after_removal(source, instance_id);
+        let source_empty = source.layout.is_empty();
+        let window = self
+            .windows
+            .get_mut(&target_window)
+            .expect("target located");
+        match (target, split_id) {
+            (
+                MoveTarget::Beside {
+                    instance_id: target_leaf,
+                    side,
+                },
+                Some(split_id),
+            ) => window
+                .layout
+                .insert_beside(target_leaf, side, instance_id, split_id)
+                .expect("validated target"),
+            _ => window
+                .layout
+                .place_root(instance_id)
+                .expect("validated empty window"),
+        }
+        window.active = Some(instance_id);
+        if self.move_source == Some(instance_id) {
+            self.move_source = None;
+        }
+        if source_empty && source_id != target_window {
+            self.close_window(source_id)?;
+        }
+        Ok(ActionOutcome::Applied)
+    }
+}

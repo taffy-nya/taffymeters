@@ -16,11 +16,9 @@ use crate::{
     },
 };
 
-use super::{
-    deadline,
+use crate::automation::{
     harness::Harness,
-    scenarios::{action, add_module, check, created, first_leaf, workspace},
-    wait_until,
+    support::{action, add_module, check, created, deadline, first_leaf, wait_until, workspace},
 };
 
 type Scenario = fn() -> Result<Value, String>;

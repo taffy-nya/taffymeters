@@ -22,7 +22,7 @@ use crate::{
 use super::{
     harness::Harness,
     report::{Case, Report},
-    scenarios::{add_module, replace_first},
+    support::{add_module, replace_first},
 };
 
 const BLOCK_FRAMES: usize = 480;
