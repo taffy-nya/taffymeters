@@ -37,6 +37,93 @@ pub(crate) fn color32(color: crate::render::Color) -> Color32 {
     Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
 }
 
+/// Make egui's widgets (menus, buttons, the settings window) follow the global
+/// palette. Every viewport shares one style, so each pass applies it; the style is
+/// only rebuilt when the palette differs from the one last applied to `ctx`.
+pub(crate) fn apply_chrome_style(ctx: &egui::Context, palette: &crate::theme::Palette) {
+    let id = Id::new("taffymeters.chrome_palette");
+    if ctx.data(|data| data.get_temp::<crate::theme::Palette>(id)) == Some(*palette) {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(id, *palette));
+    let theme = if palette.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(theme);
+    ctx.set_visuals_of(theme, chrome_visuals(palette));
+}
+
+fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
+    let opaque = |role| {
+        let color = palette.color(role);
+        (
+            Color32::from_rgb(color.red, color.green, color.blue),
+            color.alpha,
+        )
+    };
+    let background = opaque(ColorRole::Background).0;
+    // Translucent roles are seen over the background.
+    let over = |role| {
+        let (color, alpha) = opaque(role);
+        background.lerp_to_gamma(color, f32::from(alpha) / 255.0)
+    };
+    let surface = over(ColorRole::Surface);
+    let divider = over(ColorRole::Divider);
+    let accent = over(ColorRole::Accent);
+    let text = over(ColorRole::Text);
+    let muted = over(ColorRole::Muted);
+    // Readable text on an accent fill.
+    let [red, green, blue, _] = accent.to_array();
+    let luma = 0.299 * f32::from(red) + 0.587 * f32::from(green) + 0.114 * f32::from(blue);
+    let on_accent = if luma > 140.0 {
+        Color32::from_rgb(10, 14, 18)
+    } else {
+        Color32::WHITE
+    };
+    let mut visuals = if palette.dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    let line = |width: f32, color: Color32| Stroke::new(width, color);
+    let control = surface.lerp_to_gamma(divider, 0.6);
+    let hover = divider;
+    let widgets = &mut visuals.widgets;
+    widgets.noninteractive.bg_fill = surface;
+    widgets.noninteractive.weak_bg_fill = surface;
+    widgets.noninteractive.bg_stroke = line(1.0, divider);
+    widgets.noninteractive.fg_stroke = line(1.0, text);
+    widgets.inactive.bg_fill = control;
+    widgets.inactive.weak_bg_fill = control;
+    widgets.inactive.bg_stroke = line(1.0, divider);
+    widgets.inactive.fg_stroke = line(1.0, text);
+    for state in [&mut widgets.hovered, &mut widgets.open] {
+        state.bg_fill = hover;
+        state.weak_bg_fill = hover;
+        state.bg_stroke = line(1.0, accent);
+        state.fg_stroke = line(1.5, text);
+    }
+    let pressed = hover.lerp_to_gamma(accent, 0.35);
+    widgets.active.bg_fill = pressed;
+    widgets.active.weak_bg_fill = pressed;
+    widgets.active.bg_stroke = line(1.0, accent);
+    widgets.active.fg_stroke = line(2.0, text);
+    visuals.selection.bg_fill = accent;
+    visuals.selection.stroke = line(1.0, on_accent);
+    visuals.hyperlink_color = accent;
+    visuals.weak_text_color = Some(muted);
+    visuals.panel_fill = background;
+    visuals.window_fill = surface;
+    visuals.window_stroke = line(1.0, divider);
+    visuals.faint_bg_color = surface;
+    visuals.extreme_bg_color = background;
+    visuals.code_bg_color = surface;
+    visuals.slider_trailing_fill = true;
+    visuals
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ResizeEdge {
     North,
@@ -274,13 +361,7 @@ impl Workspace {
             return false;
         }
         let rect = ui.max_rect();
-        if ctx.global_style().visuals.dark_mode != self.chrome.dark {
-            ctx.set_visuals(if self.chrome.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
-        }
+        apply_chrome_style(&ctx, &self.chrome);
         ui.painter()
             .rect_filled(rect, 0.0, color32(self.chrome.color(ColorRole::Background)));
         let windows_before: Vec<WindowId> = self.windows.keys().copied().collect();

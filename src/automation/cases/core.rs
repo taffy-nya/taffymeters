@@ -963,9 +963,7 @@ fn c09() -> Result<Value, String> {
                 key,
                 ControlKey::Settings(SettingsItem::Style(_) | SettingsItem::ClearVisual)
             )
-        }) && settings.contains_key(&ControlKey::Settings(SettingsItem::ModuleType(
-            EMPTY_MODULE_ID,
-        ))),
+        }) && settings.contains_key(&ControlKey::Settings(SettingsItem::TypePicker)),
         "Empty settings show style controls or miss the module type",
     )?;
     h.focus = SETTINGS;

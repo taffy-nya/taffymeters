@@ -1,16 +1,20 @@
-//! The Module tab: instance type, style, analysis nodes, view settings, colors, layout.
+//! The Module tab: layout actions, type, style and channel, analysis nodes, the
+//! Module's own view sections, colors and closing the instance.
 
-use eframe::egui;
+use eframe::egui::{self, RichText};
 
 use super::{
-    Pending, SettingsItem,
-    widgets::{button, channel_label, choice, color_row, number_row},
+    SettingsItem,
+    widgets::{
+        button, card, channel_label, choice, color_row, danger_button, header, number_row, record,
+        row, segment, trailing, warning,
+    },
 };
 use crate::{
     dataflow::{ChannelSelection, FftConfig, Keep, NodeSpec},
     settings::{
         DataSettings, FFT_HOP_DIVISORS, FFT_WINDOWS, NodeEntry, NodeParam, SettingKind,
-        SettingValue, node_label, with_fft_window,
+        SettingValue, ViewSetting, node_label, with_fft_window,
     },
     workspace::{
         ColorScope, ModuleInstanceId, Side, Workspace, WorkspaceAction,
@@ -23,99 +27,115 @@ impl Workspace {
         &self,
         ui: &mut egui::Ui,
         instance_id: ModuleInstanceId,
-        pending: &mut Pending,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
         let entry = &self.modules[&instance_id];
-        ui.heading(format!("{} #{}", entry.label, instance_id.0));
+        let window = self.window_of(instance_id);
+        let detail = window.map_or_else(String::new, |window| format!("in Window #{}", window.0));
         ui.horizontal_wrapped(|ui| {
-            ui.label("Type");
-            for (type_id, label) in self.registry.module_types() {
-                if choice(
+            header(ui, &format!("{} #{}", entry.label, instance_id.0), &detail);
+        });
+        self.layout_actions(ui, instance_id, controls, actions);
+        card(ui, "Module", |ui| {
+            self.type_row(ui, instance_id, controls, actions);
+            if let Some(file) = &entry.preserved {
+                warning(
                     ui,
-                    type_id == entry.type_id,
-                    label,
-                    SettingsItem::ModuleType(type_id),
-                    controls,
-                ) {
-                    actions.push(WorkspaceAction::ReplaceModule {
-                        instance_id,
-                        type_id,
-                    });
-                }
+                    &format!(
+                        "Module type {} cannot be used here; its saved configuration is kept unchanged.",
+                        file.type_id
+                    ),
+                );
+            } else {
+                self.style_rows(ui, instance_id, controls, actions);
             }
         });
-        if let Some(file) = &entry.preserved {
-            ui.label(format!(
-                "Module type {} cannot be used here; its saved configuration is kept unchanged.",
-                file.type_id
-            ));
-        } else {
-            self.module_settings(ui, instance_id, pending, controls, actions);
+        if entry.preserved.is_none() {
+            self.module_settings(ui, instance_id, controls, actions);
         }
-        ui.separator();
-        ui.strong("Layout");
+    }
+
+    /// Split (copies), detach, move and close the instance: first on the page,
+    /// where they stay in reach.
+    fn layout_actions(
+        &self,
+        ui: &mut egui::Ui,
+        instance_id: ModuleInstanceId,
+        controls: &mut Controls,
+        actions: &mut Vec<WorkspaceAction>,
+    ) {
         ui.horizontal_wrapped(|ui| {
-            let installed = entry.preserved.is_none();
+            ui.spacing_mut().item_spacing.x = 4.0;
             for (item, side, label) in [
                 (SettingsItem::SplitRight, Side::Right, "Split right"),
                 (SettingsItem::SplitDown, Side::Below, "Split down"),
             ] {
-                if button(
-                    ui,
-                    installed && self.can_split(instance_id, side),
-                    label,
-                    item,
-                    controls,
-                ) {
+                if button(ui, self.can_split(instance_id, side), label, item, controls) {
                     actions.push(WorkspaceAction::SplitModule { instance_id, side });
                 }
-            }
-            if button(
-                ui,
-                installed && self.can_split(instance_id, Side::Right),
-                "Duplicate",
-                SettingsItem::Duplicate,
-                controls,
-            ) {
-                actions.push(WorkspaceAction::DuplicateModule { instance_id });
             }
             let leaves = self
                 .window_of(instance_id)
                 .map_or(0, |window| self.windows[&window].layout.leaves().len());
-            if button(
-                ui,
-                leaves > 1,
-                "Detach to new window",
-                SettingsItem::Detach,
-                controls,
-            ) {
+            if button(ui, leaves > 1, "Detach", SettingsItem::Detach, controls) {
                 actions.push(WorkspaceAction::DetachModule { instance_id });
             }
             if button(ui, true, "Move to…", SettingsItem::MoveTo, controls) {
                 actions.push(WorkspaceAction::BeginMove { instance_id });
             }
-            if button(
-                ui,
-                true,
-                "Close module",
-                SettingsItem::CloseModule,
-                controls,
-            ) {
+            if danger_button(ui, "Close", SettingsItem::CloseModule, controls) {
                 actions.push(WorkspaceAction::CloseModule { instance_id });
             }
         });
         if self.move_source == Some(instance_id) {
-            ui.label("Click an edge target in any window (Esc or right click there cancels).");
+            ui.label(
+                RichText::new(
+                    "Click an edge target in any window (Esc or right click there cancels).",
+                )
+                .weak(),
+            );
         }
     }
 
-    fn module_settings(
+    fn type_row(
         &self,
         ui: &mut egui::Ui,
         instance_id: ModuleInstanceId,
-        pending: &mut Pending,
+        controls: &mut Controls,
+        actions: &mut Vec<WorkspaceAction>,
+    ) {
+        let entry = &self.modules[&instance_id];
+        let types = self.registry.module_types();
+        let current = types
+            .iter()
+            .find(|(type_id, _)| *type_id == entry.type_id)
+            .map_or(entry.label, |(_, label)| label);
+        row(ui, "Type", |ui| {
+            let response = egui::ComboBox::from_id_salt("taffymeters.settings.module_type")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for &(type_id, label) in &types {
+                        let selected = type_id == entry.type_id;
+                        let response = ui.selectable_label(selected, label);
+                        record(controls, SettingsItem::ModuleType(type_id), &response);
+                        if response.clicked() && !selected {
+                            actions.push(WorkspaceAction::ReplaceModule {
+                                instance_id,
+                                type_id,
+                            });
+                        }
+                    }
+                });
+            record(controls, SettingsItem::TypePicker, &response.response);
+        });
+    }
+
+    /// Style (with clearing the visual state) and the instance's channel.
+    fn style_rows(
+        &self,
+        ui: &mut egui::Ui,
+        instance_id: ModuleInstanceId,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
@@ -130,13 +150,7 @@ impl Workspace {
                 .is_none()
                 .then(|| module.active_style())
                 .flatten();
-            if let Some(kept) = &entry.preserved_style {
-                ui.label(format!(
-                    "Saved style {kept} is not available; showing the default"
-                ));
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Style");
+            row(ui, "Style", |ui| {
                 for option in styles {
                     if choice(
                         ui,
@@ -151,24 +165,19 @@ impl Workspace {
                         });
                     }
                 }
-                if button(
-                    ui,
-                    true,
-                    "Clear visual state",
-                    SettingsItem::ClearVisual,
-                    controls,
-                ) {
-                    actions.push(WorkspaceAction::ClearVisualState { instance_id });
-                }
             });
+            if let Some(kept) = &entry.preserved_style {
+                warning(
+                    ui,
+                    &format!("Saved style {kept} is not available; showing the default"),
+                );
+            }
         }
         // The channel is one row however the Module implements it (an analysis
         // Channel node or a display choice), matching the 1 / 2 / M shortcuts.
-        let channel = module.channel();
-        if let Some(selected) = channel {
+        if let Some(selected) = module.channel() {
             let descriptor = self.services.source.descriptor().clone();
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Channel");
+            row(ui, "Channel", |ui| {
                 let options = channel_options(&descriptor)
                     .chain(std::iter::once((0, ChannelSelection::MonoAverage)));
                 for (index, option) in options {
@@ -187,6 +196,32 @@ impl Workspace {
                 }
             });
         }
+        if !styles.is_empty() {
+            trailing(ui, |ui| {
+                if button(
+                    ui,
+                    true,
+                    "Clear visual state",
+                    SettingsItem::ClearVisual,
+                    controls,
+                ) {
+                    actions.push(WorkspaceAction::ClearVisualState { instance_id });
+                }
+            });
+        }
+    }
+
+    /// Analysis nodes, the Module's view sections and the instance's colors.
+    fn module_settings(
+        &self,
+        ui: &mut egui::Ui,
+        instance_id: ModuleInstanceId,
+        controls: &mut Controls,
+        actions: &mut Vec<WorkspaceAction>,
+    ) {
+        let entry = &self.modules[&instance_id];
+        let module = &entry.module;
+        let channel = module.channel();
         if let Some(controller) = module.data() {
             let spec = controller.spec();
             let settings = DataSettings::describe(&spec);
@@ -208,113 +243,73 @@ impl Workspace {
                 .filter(|output| matches!(output.keep, Keep::Seconds(_)))
                 .count();
             if !nodes.is_empty() || histories > 0 {
-                ui.separator();
-                ui.strong("Analysis");
-            }
-            for node in nodes {
-                self.node_rows(ui, instance_id, node, pending, controls, actions);
-            }
-            for output in &settings.outputs {
-                let label = module.output_label(output.output).unwrap_or("Output");
-                if let Keep::Seconds(seconds) = output.keep
-                    && let Some(seconds) = number_row(
-                        ui,
-                        &format!("{label} length"),
-                        SettingsItem::Keep(output.output),
-                        seconds,
-                        (0.5, 60.0),
-                        "s",
-                        false,
-                        pending,
-                        controls,
-                    )
-                {
-                    actions.push(WorkspaceAction::SetKeep {
-                        instance_id,
-                        output: output.output,
-                        seconds,
-                    });
-                }
+                card(ui, "Analysis", |ui| {
+                    for node in nodes {
+                        self.node_rows(ui, instance_id, node, controls, actions);
+                    }
+                    for output in &settings.outputs {
+                        let label = module.output_label(output.output).unwrap_or("Output");
+                        if let Keep::Seconds(seconds) = output.keep
+                            && let Some(seconds) = number_row(
+                                ui,
+                                &format!("{label} length"),
+                                SettingsItem::Keep(output.output),
+                                seconds,
+                                (0.5, 60.0),
+                                "s",
+                                false,
+                                controls,
+                            )
+                        {
+                            actions.push(WorkspaceAction::SetKeep {
+                                instance_id,
+                                output: output.output,
+                                seconds,
+                            });
+                        }
+                    }
+                });
             }
         }
-        let mut section = "";
-        for setting in module.view_settings() {
-            if matches!(setting.kind, SettingKind::Channel) && channel.is_some() {
+        // One card per section the Module declares, in its order. Channel settings
+        // never show here: with the capability they are the channel row, without it
+        // there is no display channel.
+        let view = module.view_settings();
+        let mut rest = view.as_slice();
+        while let Some(first) = rest.first() {
+            let length = rest
+                .iter()
+                .take_while(|setting| setting.section == first.section)
+                .count();
+            let (section, tail) = rest.split_at(length);
+            rest = tail;
+            if section
+                .iter()
+                .all(|setting| matches!(setting.kind, SettingKind::Channel))
+            {
                 continue;
             }
-            if setting.section != section {
-                section = setting.section;
-                ui.separator();
-                ui.strong(section);
-            }
-            match setting.kind {
-                SettingKind::Number {
-                    min,
-                    max,
-                    unit,
-                    logarithmic,
-                } => {
-                    let current = setting.value.number().unwrap_or(min);
-                    if let Some(value) = number_row(
-                        ui,
-                        setting.label,
-                        SettingsItem::ViewNumber(setting.key),
-                        current,
-                        (min, max),
-                        unit,
-                        logarithmic,
-                        pending,
-                        controls,
-                    ) {
-                        actions.push(WorkspaceAction::SetViewSetting {
-                            instance_id,
-                            key: setting.key,
-                            value: SettingValue::Number(value),
-                        });
-                    }
+            card(ui, first.section, |ui| {
+                for setting in section {
+                    view_setting_row(ui, instance_id, setting, controls, actions);
                 }
-                SettingKind::Choice(choices) => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(setting.label);
-                        for option in choices {
-                            if choice(
-                                ui,
-                                setting.value == SettingValue::Choice(option.id.into()),
-                                option.label,
-                                SettingsItem::ViewChoice {
-                                    key: setting.key,
-                                    id: option.id,
-                                },
-                                controls,
-                            ) {
-                                actions.push(WorkspaceAction::SetViewSetting {
-                                    instance_id,
-                                    key: setting.key,
-                                    value: SettingValue::Choice(option.id.to_owned()),
-                                });
-                            }
-                        }
-                    });
-                }
-                // Modules without the channel capability have no display channel.
-                SettingKind::Channel => {}
-            }
+            });
         }
         let roles = module.color_roles();
         if !roles.is_empty() {
-            ui.separator();
-            ui.strong("Colors (checked: this module only)");
-            for role in roles {
-                color_row(
-                    ui,
-                    ColorScope::Instance(instance_id),
-                    *role,
-                    entry.palette.color(*role),
-                    entry.colors.contains_key(role),
-                    controls,
-                    actions,
-                );
-            }
+            card(ui, "Colors · this module", |ui| {
+                for role in roles {
+                    color_row(
+                        ui,
+                        ColorScope::Instance(instance_id),
+                        *role,
+                        entry.palette.color(*role),
+                        entry.colors.contains_key(role),
+                        controls,
+                        actions,
+                    );
+                }
+            });
         }
     }
 
@@ -323,7 +318,6 @@ impl Workspace {
         ui: &mut egui::Ui,
         instance_id: ModuleInstanceId,
         entry: &NodeEntry,
-        pending: &mut Pending,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
@@ -339,13 +333,12 @@ impl Workspace {
             match (param, entry.spec) {
                 (NodeParam::Channel, NodeSpec::Channel(current)) => {
                     let descriptor = self.services.source.descriptor().clone();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(param.label());
+                    row(ui, param.label(), |ui| {
                         let options = channel_options(&descriptor)
                             .chain(std::iter::once((0, ChannelSelection::MonoAverage)));
                         for (index, option) in options {
-                            let response = ui
-                                .selectable_label(current == option, channel_label(index, option));
+                            let response =
+                                segment(ui, current == option, &channel_label(index, option));
                             if response.clicked() && current != option {
                                 edit(NodeSpec::Channel(option));
                             }
@@ -353,8 +346,7 @@ impl Workspace {
                     });
                 }
                 (NodeParam::FftWindow, NodeSpec::Fft(fft)) => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(param.label());
+                    row(ui, param.label(), |ui| {
                         for size in FFT_WINDOWS {
                             if choice(
                                 ui,
@@ -369,8 +361,7 @@ impl Workspace {
                     });
                 }
                 (NodeParam::FftHop, NodeSpec::Fft(fft)) => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(param.label());
+                    row(ui, param.label(), |ui| {
                         for divisor in FFT_HOP_DIVISORS {
                             let hop = (fft.window_size / divisor).max(1);
                             if choice(
@@ -410,7 +401,6 @@ impl Workspace {
                         (min, max),
                         unit,
                         false,
-                        pending,
                         controls,
                     ) && let Some(spec) = param.with_number(spec, value)
                     {
@@ -419,5 +409,64 @@ impl Workspace {
                 }
             }
         }
+    }
+}
+
+fn view_setting_row(
+    ui: &mut egui::Ui,
+    instance_id: ModuleInstanceId,
+    setting: &ViewSetting,
+    controls: &mut Controls,
+    actions: &mut Vec<WorkspaceAction>,
+) {
+    match setting.kind {
+        SettingKind::Number {
+            min,
+            max,
+            unit,
+            logarithmic,
+        } => {
+            let current = setting.value.number().unwrap_or(min);
+            if let Some(value) = number_row(
+                ui,
+                setting.label,
+                SettingsItem::ViewNumber(setting.key),
+                current,
+                (min, max),
+                unit,
+                logarithmic,
+                controls,
+            ) {
+                actions.push(WorkspaceAction::SetViewSetting {
+                    instance_id,
+                    key: setting.key,
+                    value: SettingValue::Number(value),
+                });
+            }
+        }
+        SettingKind::Choice(choices) => {
+            row(ui, setting.label, |ui| {
+                for option in choices {
+                    if choice(
+                        ui,
+                        setting.value == SettingValue::Choice(option.id.into()),
+                        option.label,
+                        SettingsItem::ViewChoice {
+                            key: setting.key,
+                            id: option.id,
+                        },
+                        controls,
+                    ) {
+                        actions.push(WorkspaceAction::SetViewSetting {
+                            instance_id,
+                            key: setting.key,
+                            value: SettingValue::Choice(option.id.to_owned()),
+                        });
+                    }
+                }
+            });
+        }
+        // The channel row or nothing (see `module_settings`).
+        SettingKind::Channel => {}
     }
 }

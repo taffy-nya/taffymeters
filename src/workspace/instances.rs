@@ -1,8 +1,8 @@
 //! Module instance lifecycle and per-instance analysis and view parameters.
 
 use super::{
-    ActionOutcome, ModuleEntry, ModuleInstanceId, Side, SplitId, WindowId, Workspace,
-    WorkspaceError, layout::LayoutError, persist,
+    ActionOutcome, ModuleEntry, ModuleInstanceId, WindowId, Workspace, WorkspaceError,
+    layout::LayoutError,
 };
 use crate::{
     dataflow::{ChannelSelection, Keep, NodeRef, NodeSpec, OutputId},
@@ -271,46 +271,5 @@ impl Workspace {
                 }
             }
         }
-    }
-
-    /// Copy an instance next to itself: same type, `DataSpec` (with bindings),
-    /// style, view settings and colors; new subscription and fresh private state.
-    pub(super) fn duplicate(
-        &mut self,
-        instance_id: ModuleInstanceId,
-    ) -> Result<ActionOutcome, WorkspaceError> {
-        let window_id = self.located(instance_id)?;
-        if self.modules[&instance_id].preserved.is_some() {
-            return Err(WorkspaceError::Unsupported(
-                "copying a module that is not installed",
-            ));
-        }
-        if !self.can_split(instance_id, Side::Right) {
-            return Err(WorkspaceError::InsufficientSpace("copy this module"));
-        }
-        let config = persist::ModuleConfig::of(&self.modules[&instance_id]);
-        let split_id = SplitId(self.next_split_id);
-        let next_split = self
-            .next_split_id
-            .checked_add(1)
-            .ok_or(WorkspaceError::IdExhausted)?;
-        let new = self.create_instance(config.type_id, config.data.as_ref())?;
-        // A copy that lost settings is not a copy: nothing is committed. A style this
-        // build lacks stays the kept, unavailable style of the original.
-        if let Err(reason) = self.apply_config(new, &config) {
-            self.modules.remove(&new);
-            return Err(WorkspaceError::CopyIncomplete(reason));
-        }
-        let window = self.window_mut(window_id)?;
-        if let Err(error) = window
-            .layout
-            .insert_beside(instance_id, Side::Right, new, split_id)
-        {
-            self.modules.remove(&new);
-            return Err(error.into());
-        }
-        window.active = Some(new);
-        self.next_split_id = next_split;
-        Ok(ActionOutcome::Created(new))
     }
 }

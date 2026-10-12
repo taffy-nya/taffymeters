@@ -6,6 +6,7 @@ use super::{
     ActionOutcome, DETACH_OFFSET_POINTS, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget,
     PendingDetach, Side, SplitId, WindowId, WindowState, Workspace, WorkspaceError,
     layout::{Layout, fits},
+    persist,
 };
 
 impl Workspace {
@@ -25,8 +26,13 @@ impl Workspace {
         )
     }
 
+    /// Whether a copy of `instance` fits on `side`. Placeholders of types this
+    /// build lacks cannot be copied.
     pub(crate) fn can_split(&self, instance: ModuleInstanceId, side: Side) -> bool {
-        self.can_place_beside(instance, side, self.module_min_size(instance))
+        self.modules
+            .get(&instance)
+            .is_some_and(|entry| entry.preserved.is_none())
+            && self.can_place_beside(instance, side, self.module_min_size(instance))
     }
 
     pub(crate) fn move_target_valid(&self, source: ModuleInstanceId, target: MoveTarget) -> bool {
@@ -51,22 +57,35 @@ impl Workspace {
         }
     }
 
+    /// Copy an instance next to itself: same type, `DataSpec` (with bindings),
+    /// style, view settings and colors; new subscription and fresh private state.
     pub(super) fn split_module(
         &mut self,
         instance_id: ModuleInstanceId,
         side: Side,
     ) -> Result<ActionOutcome, WorkspaceError> {
         let window_id = self.located(instance_id)?;
+        if self.modules[&instance_id].preserved.is_some() {
+            return Err(WorkspaceError::Unsupported(
+                "copying a module that is not installed",
+            ));
+        }
         if !self.can_split(instance_id, side) {
             return Err(WorkspaceError::InsufficientSpace("split this module"));
         }
-        let type_id = self.modules[&instance_id].type_id;
+        let config = persist::ModuleConfig::of(&self.modules[&instance_id]);
         let split_id = SplitId(self.next_split_id);
         let next_split = self
             .next_split_id
             .checked_add(1)
             .ok_or(WorkspaceError::IdExhausted)?;
-        let new = self.create_module(type_id)?;
+        let new = self.create_instance(config.type_id, config.data.as_ref())?;
+        // A copy that lost settings is not a copy: nothing is committed. A style this
+        // build lacks stays the kept, unavailable style of the original.
+        if let Err(reason) = self.apply_config(new, &config) {
+            self.modules.remove(&new);
+            return Err(WorkspaceError::CopyIncomplete(reason));
+        }
         let window = self.window_mut(window_id)?;
         if let Err(error) = window
             .layout

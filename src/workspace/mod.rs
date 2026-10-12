@@ -98,7 +98,8 @@ pub(crate) enum WorkspaceAction {
         window_id: WindowId,
         type_id: &'static str,
     },
-    /// Create a default instance of the same type next to `instance_id`.
+    /// Copy the instance next to `instance_id`: same type, configuration, analysis
+    /// spec and bindings, with a new subscription and fresh private state.
     SplitModule {
         instance_id: ModuleInstanceId,
         side: Side,
@@ -166,11 +167,6 @@ pub(crate) enum WorkspaceAction {
     },
     LeaveGroup {
         window_id: WindowId,
-    },
-    /// Copy configuration, analysis spec and bindings into a new instance on the
-    /// right; the copy gets fresh private state.
-    DuplicateModule {
-        instance_id: ModuleInstanceId,
     },
     /// Set the parameters of one node of the instance's analysis. Nodes in the
     /// shared group of an explicit binding change for every member.
@@ -720,7 +716,6 @@ impl Workspace {
             WorkspaceAction::ToggleMaximized { window_id } => self.toggle_maximized(window_id),
             WorkspaceAction::GroupTouching { window_id } => self.group_touching(window_id),
             WorkspaceAction::LeaveGroup { window_id } => self.leave_group(window_id),
-            WorkspaceAction::DuplicateModule { instance_id } => self.duplicate(instance_id),
             WorkspaceAction::EditNode {
                 instance_id,
                 node,

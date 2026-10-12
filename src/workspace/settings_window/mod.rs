@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use eframe::egui::{self, Pos2, Vec2, ViewportCommand, pos2, vec2};
+use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 
 use self::widgets::record;
 #[cfg(any(test, feature = "automation"))]
@@ -58,6 +58,8 @@ impl Tab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SettingsItem {
     Tab(Tab),
+    /// The Module type picker; its entries are `ModuleType`.
+    TypePicker,
     ModuleType(&'static str),
     Style(&'static str),
     ClearVisual,
@@ -81,7 +83,8 @@ pub(crate) enum SettingsItem {
         id: &'static str,
     },
     ViewNumber(&'static str),
-    Override {
+    /// Back to the inherited color (shown while the scope sets its own).
+    ResetColor {
         scope: ColorScope,
         role: ColorRole,
     },
@@ -92,7 +95,6 @@ pub(crate) enum SettingsItem {
     },
     SplitRight,
     SplitDown,
-    Duplicate,
     Detach,
     MoveTo,
     CloseModule,
@@ -144,16 +146,12 @@ const TYPE_ROLES: [ColorRole; 9] = [
     ColorRole::High,
 ];
 
-/// A slider value being dragged; committed once on release.
-type Pending = Option<(SettingsItem, f32)>;
-
 pub(crate) struct SettingsWindow {
     tab: Tab,
     /// The instance the Module tab edits.
     instance: Option<ModuleInstanceId>,
     /// The window the Window tab edits when no instance is targeted.
     window: Option<WindowId>,
-    pending: Pending,
     type_style: Option<&'static str>,
     name: String,
     confirm_reset: bool,
@@ -180,7 +178,6 @@ impl SettingsWindow {
             tab: Tab::Module,
             instance: None,
             window: None,
-            pending: None,
             type_style: None,
             name: String::new(),
             confirm_reset: false,
@@ -209,7 +206,6 @@ impl SettingsWindow {
     pub(super) fn forget_targets(&mut self) {
         self.instance = None;
         self.window = None;
-        self.pending = None;
         self.confirm_reset = false;
         if matches!(self.tab, Tab::Module | Tab::Window) {
             self.tab = Tab::Workspace;
@@ -285,7 +281,6 @@ impl Workspace {
         } else {
             Tab::Window
         };
-        settings.pending = None;
         settings.confirm_reset = false;
         settings.commands.push(ViewportCommand::Focus);
         Ok(())
@@ -316,13 +311,7 @@ impl Workspace {
         // pass keeps moving even when every Workspace window is minimized.
         self.tick(display_time);
         let ctx = ui.ctx().clone();
-        if ctx.global_style().visuals.dark_mode != self.chrome.dark {
-            ctx.set_visuals(if self.chrome.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
-        }
+        super::window::apply_chrome_style(&ctx, &self.chrome);
         // Targets are resolved while the settings state is still in place.
         let (instance, window) = self.settings_targets_now();
         let Some(mut settings) = self.settings.take() else {
@@ -360,12 +349,42 @@ impl Workspace {
             actions.push(WorkspaceAction::CloseSettings);
         }
         let mut controls = Controls::default();
-        let frame = egui::Frame::central_panel(ui.style());
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(10));
         frame.show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            let spacing = ui.spacing_mut();
+            spacing.item_spacing = vec2(6.0, 8.0);
+            spacing.button_padding = vec2(8.0, 3.0);
+            spacing.interact_size.y = 22.0;
             ui.horizontal(|ui| {
-                for tab in Tab::ALL {
-                    let response = ui.selectable_label(settings.tab == tab, tab.label());
+                // Equal tabs when they fit; at the minimum width each keeps its text.
+                let gap = 4.0;
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.spacing_mut().button_padding.x = 4.0;
+                let text = Tab::ALL.map(|tab| {
+                    egui::WidgetText::from(tab.label())
+                        .into_galley(
+                            ui,
+                            Some(egui::TextWrapMode::Extend),
+                            f32::INFINITY,
+                            egui::TextStyle::Button,
+                        )
+                        .size()
+                        .x
+                });
+                let count = Tab::ALL.len() as f32;
+                let room = ui.available_width() - gap * (count - 1.0);
+                let equal = room / count;
+                let padding = ((room - text.iter().sum::<f32>()) / count).max(8.0);
+                let fits = text.iter().all(|text| text + 8.0 <= equal);
+                for (tab, text) in Tab::ALL.into_iter().zip(text) {
+                    let width = if fits { equal } else { text + padding };
+                    let response = ui.add_sized(
+                        [width, 26.0],
+                        egui::Button::new(tab.label())
+                            .selected(settings.tab == tab)
+                            .frame_when_inactive(true),
+                    );
                     record(&mut controls, SettingsItem::Tab(tab), &response);
                     if response.clicked() {
                         settings.tab = tab;
@@ -373,39 +392,36 @@ impl Workspace {
                     }
                 }
             });
-            ui.separator();
+            ui.add_space(2.0);
             settings.typing = false;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match settings.tab {
                     Tab::Module => match instance {
-                        Some(instance) => self.module_tab(
-                            ui,
-                            instance,
-                            &mut settings.pending,
-                            &mut controls,
-                            &mut actions,
-                        ),
+                        Some(instance) => {
+                            self.module_tab(ui, instance, &mut controls, &mut actions)
+                        }
                         None => {
-                            ui.label("No module selected. Right-click a module to edit it.");
+                            ui.label(
+                                RichText::new(
+                                    "No module selected. Right-click a module to edit it.",
+                                )
+                                .weak(),
+                            );
                         }
                     },
                     Tab::Window => match window {
                         Some(window) => self.window_tab(ui, window, &mut controls, &mut actions),
                         None => {
-                            ui.label("No window selected.");
+                            ui.label(RichText::new("No window selected.").weak());
                         }
                     },
                     Tab::Workspace => {
                         self.workspace_tab(ui, &mut settings, &mut controls, &mut actions);
                     }
-                    Tab::Theme => self.theme_tab(
-                        ui,
-                        &mut settings.type_style,
-                        &mut settings.pending,
-                        &mut controls,
-                        &mut actions,
-                    ),
+                    Tab::Theme => {
+                        self.theme_tab(ui, &mut settings.type_style, &mut controls, &mut actions)
+                    }
                 });
         });
         #[cfg(any(test, feature = "automation"))]

@@ -154,11 +154,11 @@ fn s01() -> Result<Value, String> {
     h.frame(vec![]);
     let a = first_leaf(&h.ws)?;
     let a_object = h.ws.observation().module(a).ok_or("a missing")?.object;
-    open_settings(&mut h, a, &[SettingsItem::Duplicate])?;
+    open_settings(&mut h, a, &[SettingsItem::SplitRight])?;
     let window = leaves(&h.ws, FIRST_WINDOW);
     check(
         window.len() == 2 && window[0] == a,
-        "Duplicate did not add a copy beside the original",
+        "Split right did not add a copy beside the original",
     )?;
     let b = window[1];
     settle(&h.ws, 2)?;
@@ -206,12 +206,27 @@ fn s01() -> Result<Value, String> {
         node: tilt,
         param: NodeParam::Tilt,
     });
+    // The slider applies while it is dragged, before the button is released.
     let slider = h.locate(&key)?.rect;
-    h.drag(
-        key,
-        &[pos2(slider.max.x - 2.0, slider.center().y)],
-        egui::Modifiers::NONE,
-        None,
+    let (start, end) = (slider.center(), pos2(slider.max.x - 2.0, slider.center().y));
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.frame(vec![egui::Event::PointerMoved(start)]);
+    h.frame(vec![button(start, true)]);
+    h.frame(vec![egui::Event::PointerMoved(end)]);
+    let live = match spec(&h.ws, b)?.node(tilt) {
+        Some(NodeSpec::Tilt { db_per_octave }) => db_per_octave,
+        _ => f32::NAN,
+    };
+    h.frame(vec![button(end, false)]);
+    h.frame(vec![]);
+    check(
+        live > 6.0,
+        &format!("Tilt did not follow the slider during the drag: {live}"),
     )?;
     let (spec_a, spec_b) = (spec(&h.ws, a)?, spec(&h.ws, b)?);
     let tilt_of = |spec: &DataSpec| match spec.node(tilt) {
@@ -265,7 +280,10 @@ fn s01() -> Result<Value, String> {
     )?;
     let zoomed = created(action(
         &mut h.ws,
-        WorkspaceAction::DuplicateModule { instance_id: a },
+        WorkspaceAction::SplitModule {
+            instance_id: a,
+            side: Side::Right,
+        },
     )?)?;
     let copied_range = view_of(&h, zoomed, "max_frequency_hz");
     check(
@@ -317,7 +335,10 @@ fn s02() -> Result<Value, String> {
     let a = first_leaf(&h.ws)?;
     let b = created(action(
         &mut h.ws,
-        WorkspaceAction::DuplicateModule { instance_id: a },
+        WorkspaceAction::SplitModule {
+            instance_id: a,
+            side: Side::Right,
+        },
     )?)?;
     settle(&h.ws, 2)?;
     let fft_nodes = || handle.metrics().active_fft_nodes;
@@ -401,7 +422,10 @@ fn s03() -> Result<Value, String> {
     let a = first_leaf(&h.ws)?;
     let b = created(action(
         &mut h.ws,
-        WorkspaceAction::DuplicateModule { instance_id: a },
+        WorkspaceAction::SplitModule {
+            instance_id: a,
+            side: Side::Right,
+        },
     )?)?;
     let waveform = created(action(
         &mut h.ws,
@@ -410,28 +434,33 @@ fn s03() -> Result<Value, String> {
             side: Side::Below,
         },
     )?)?;
-    let waveform = created(action(
-        &mut h.ws,
-        WorkspaceAction::ReplaceModule {
-            instance_id: waveform,
-            type_id: WAVEFORM_MODULE_ID,
-        },
-    )?)?;
+    // The type picker replaces the instance; the settings follow its successor.
+    open_settings(&mut h, waveform, &[])?;
+    h.dropdown(
+        ControlKey::Settings(SettingsItem::TypePicker),
+        ControlKey::Settings(SettingsItem::ModuleType(WAVEFORM_MODULE_ID)),
+    )?;
+    let waveform =
+        h.ws.observation()
+            .modules
+            .iter()
+            .find(|module| module.type_id == WAVEFORM_MODULE_ID)
+            .map(|module| module.instance_id)
+            .ok_or("the type picker did not replace the module with a Waveform")?;
+    check(
+        h.ws.observation().module(b).map(|m| m.type_id) == Some(SPECTRUM_MODULE_ID),
+        "the type picker replaced the wrong instance",
+    )?;
     let swatch = SWATCHES[3];
+    // A swatch sets the instance's own color directly.
     open_settings(
         &mut h,
         b,
-        &[
-            SettingsItem::Override {
-                scope: ColorScope::Instance(b),
-                role: ColorRole::Primary,
-            },
-            SettingsItem::Swatch {
-                scope: ColorScope::Instance(b),
-                role: ColorRole::Primary,
-                index: 3,
-            },
-        ],
+        &[SettingsItem::Swatch {
+            scope: ColorScope::Instance(b),
+            role: ColorRole::Primary,
+            index: 3,
+        }],
     )?;
     let dark = Preset::Dark.palette();
     let light = Preset::Light.palette();
@@ -479,10 +508,6 @@ fn s03() -> Result<Value, String> {
     )?;
     h.in_settings(&[
         SettingsItem::TypeStyle(SPECTRUM_MODULE_ID),
-        SettingsItem::Override {
-            scope: type_scope,
-            role: ColorRole::Secondary,
-        },
         SettingsItem::Swatch {
             scope: type_scope,
             role: ColorRole::Secondary,
@@ -497,23 +522,27 @@ fn s03() -> Result<Value, String> {
                 == light.color(ColorRole::Secondary),
         "type style did not apply to exactly the Spectrum instances",
     )?;
-    h.in_settings(&[
-        SettingsItem::Override {
-            scope: ColorScope::Global,
-            role: ColorRole::Primary,
-        },
-        SettingsItem::Swatch {
-            scope: ColorScope::Global,
-            role: ColorRole::Primary,
-            index: 4,
-        },
-    ])?;
+    h.in_settings(&[SettingsItem::Swatch {
+        scope: ColorScope::Global,
+        role: ColorRole::Primary,
+        index: 4,
+    }])?;
     let global = SWATCHES[4];
     check(
         palette(&h, a)?.color(ColorRole::Primary) == global
             && palette(&h, waveform)?.color(ColorRole::Primary) == global
             && palette(&h, b)?.color(ColorRole::Primary) == swatch,
         "global edit must reach every instance without its own override",
+    )?;
+    // Reset returns the global role to the preset; the instance keeps its own.
+    h.in_settings(&[SettingsItem::ResetColor {
+        scope: ColorScope::Global,
+        role: ColorRole::Primary,
+    }])?;
+    check(
+        palette(&h, a)?.color(ColorRole::Primary) == light.color(ColorRole::Primary)
+            && palette(&h, b)?.color(ColorRole::Primary) == swatch,
+        "Reset did not return the global color to the preset",
     )?;
     let theme = h.ws.observation().theme;
     Ok(
@@ -608,7 +637,10 @@ fn s04() -> Result<Value, String> {
     }
     let b = created(action(
         &mut h.ws,
-        WorkspaceAction::DuplicateModule { instance_id: a },
+        WorkspaceAction::SplitModule {
+            instance_id: a,
+            side: Side::Right,
+        },
     )?)?;
     let waveform = created(action(
         &mut h.ws,
@@ -950,8 +982,9 @@ fn s05() -> Result<Value, String> {
     // A copy carries the kept style too.
     let copy = created(action(
         &mut h.ws,
-        WorkspaceAction::DuplicateModule {
+        WorkspaceAction::SplitModule {
             instance_id: oscilloscope,
+            side: Side::Right,
         },
     )?)?;
     action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
@@ -982,8 +1015,9 @@ fn s05() -> Result<Value, String> {
     check(
         action(
             &mut h.ws,
-            WorkspaceAction::DuplicateModule {
+            WorkspaceAction::SplitModule {
                 instance_id: placeholder,
+                side: Side::Right,
             },
         )
         .is_err(),
