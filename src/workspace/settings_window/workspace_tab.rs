@@ -57,7 +57,6 @@ impl Workspace {
                     .desired_width(f32::INFINITY),
             );
             record(controls, SettingsItem::Name, &response);
-            settings.typing = response.has_focus();
             let name = settings.name.trim().to_owned();
             let valid = valid_name(&name);
             // Windows names files case-insensitively.

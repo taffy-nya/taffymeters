@@ -5,13 +5,14 @@ use eframe::egui::{self, RichText};
 
 use super::{
     SettingsItem,
+    theme_tab::clear_colors,
     widgets::{
-        button, card, channel_label, choice, color_row, danger_button, header, number_row, record,
-        row, segment, trailing, warning,
+        Number, button, card, card_with_reset, channel_label, choice, color_row, danger_button,
+        differs, header, number_row, record, row, segment, trailing, warning,
     },
 };
 use crate::{
-    dataflow::{ChannelSelection, FftConfig, Keep, NodeSpec},
+    dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeSpec},
     settings::{
         DataSettings, FFT_HOP_DIVISORS, FFT_WINDOWS, NodeEntry, NodeParam, SettingKind,
         SettingValue, ViewSetting, node_label, with_fft_window,
@@ -211,7 +212,8 @@ impl Workspace {
         }
     }
 
-    /// Analysis nodes, the Module's view sections and the instance's colors.
+    /// Analysis nodes, the Module's view sections and the instance's colors, each
+    /// card with ↺ while something in it differs from the type's defaults.
     fn module_settings(
         &self,
         ui: &mut egui::Ui,
@@ -222,6 +224,7 @@ impl Workspace {
         let entry = &self.modules[&instance_id];
         let module = &entry.module;
         let channel = module.channel();
+        let defaults = self.registry.default_data(entry.type_id);
         if let Some(controller) = module.data() {
             let spec = controller.spec();
             let settings = DataSettings::describe(&spec);
@@ -242,33 +245,81 @@ impl Workspace {
                 .iter()
                 .filter(|output| matches!(output.keep, Keep::Seconds(_)))
                 .count();
+            // What resetting the card changes: shown nodes and History lengths that
+            // differ from the type's default analysis (same shape, same positions).
+            let mut resets = Vec::new();
+            if let Some(defaults) = defaults {
+                for node in &nodes {
+                    if let Some(default) = defaults.node(node.node)
+                        && default != node.spec
+                    {
+                        resets.push(WorkspaceAction::EditNode {
+                            instance_id,
+                            node: node.node,
+                            spec: default,
+                        });
+                    }
+                }
+                for output in &settings.outputs {
+                    if let (Keep::Seconds(_), Some(default)) =
+                        (output.keep, defaults.outputs().get(output.output.index()))
+                        && let Keep::Seconds(seconds) = default.keep
+                        && default.keep != output.keep
+                    {
+                        resets.push(WorkspaceAction::SetKeep {
+                            instance_id,
+                            output: output.output,
+                            seconds,
+                        });
+                    }
+                }
+            }
             if !nodes.is_empty() || histories > 0 {
-                card(ui, "Analysis", |ui| {
-                    for node in nodes {
-                        self.node_rows(ui, instance_id, node, controls, actions);
-                    }
-                    for output in &settings.outputs {
-                        let label = module.output_label(output.output).unwrap_or("Output");
-                        if let Keep::Seconds(seconds) = output.keep
-                            && let Some(seconds) = number_row(
-                                ui,
-                                &format!("{label} length"),
-                                SettingsItem::Keep(output.output),
-                                seconds,
-                                (0.5, 60.0),
-                                "s",
-                                false,
-                                controls,
-                            )
-                        {
-                            actions.push(WorkspaceAction::SetKeep {
-                                instance_id,
-                                output: output.output,
-                                seconds,
-                            });
+                let (_, reset) = card_with_reset(
+                    ui,
+                    "Analysis",
+                    SettingsItem::ResetAnalysis,
+                    !resets.is_empty(),
+                    controls,
+                    |ui, controls| {
+                        for node in nodes {
+                            self.node_rows(ui, instance_id, node, defaults, controls, actions);
                         }
-                    }
-                });
+                        for output in &settings.outputs {
+                            let label = module.output_label(output.output).unwrap_or("Output");
+                            let default = defaults
+                                .and_then(|defaults| defaults.outputs().get(output.output.index()))
+                                .and_then(|default| match default.keep {
+                                    Keep::Seconds(seconds) => Some(seconds),
+                                    Keep::Latest => None,
+                                });
+                            if let Keep::Seconds(seconds) = output.keep
+                                && let Some(seconds) = number_row(
+                                    ui,
+                                    Number {
+                                        label: &format!("{label} length"),
+                                        key: SettingsItem::Keep(output.output),
+                                        current: seconds,
+                                        range: (0.5, 60.0),
+                                        unit: "s",
+                                        logarithmic: false,
+                                        default,
+                                    },
+                                    controls,
+                                )
+                            {
+                                actions.push(WorkspaceAction::SetKeep {
+                                    instance_id,
+                                    output: output.output,
+                                    seconds,
+                                });
+                            }
+                        }
+                    },
+                );
+                if reset {
+                    actions.extend(resets);
+                }
             }
         }
         // One card per section the Module declares, in its order. Channel settings
@@ -289,27 +340,58 @@ impl Workspace {
             {
                 continue;
             }
-            card(ui, first.section, |ui| {
-                for setting in section {
-                    view_setting_row(ui, instance_id, setting, controls, actions);
-                }
-            });
+            let changed: Vec<&ViewSetting> = section
+                .iter()
+                .filter(|setting| view_default(setting).is_some_and(|d| view_differs(setting, &d)))
+                .collect();
+            let (_, reset) = card_with_reset(
+                ui,
+                first.section,
+                SettingsItem::ResetSection(first.section),
+                !changed.is_empty(),
+                controls,
+                |ui, controls| {
+                    for setting in section {
+                        view_setting_row(ui, instance_id, setting, controls, actions);
+                    }
+                },
+            );
+            if reset {
+                actions.extend(changed.into_iter().filter_map(|setting| {
+                    Some(WorkspaceAction::SetViewSetting {
+                        instance_id,
+                        key: setting.key,
+                        value: view_default(setting)?,
+                    })
+                }));
+            }
         }
         let roles = module.color_roles();
         if !roles.is_empty() {
-            card(ui, "Colors · this module", |ui| {
-                for role in roles {
-                    color_row(
-                        ui,
-                        ColorScope::Instance(instance_id),
-                        *role,
-                        entry.palette.color(*role),
-                        entry.colors.contains_key(role),
-                        controls,
-                        actions,
-                    );
-                }
-            });
+            let scope = ColorScope::Instance(instance_id);
+            let (_, reset) = card_with_reset(
+                ui,
+                "Colors · this module",
+                SettingsItem::ResetColors(scope),
+                !entry.colors.is_empty(),
+                controls,
+                |ui, controls| {
+                    for role in roles {
+                        color_row(
+                            ui,
+                            scope,
+                            *role,
+                            entry.palette.color(*role),
+                            entry.colors.contains_key(role),
+                            controls,
+                            actions,
+                        );
+                    }
+                },
+            );
+            if reset {
+                clear_colors(scope, entry.colors.keys().copied(), actions);
+            }
         }
     }
 
@@ -318,10 +400,12 @@ impl Workspace {
         ui: &mut egui::Ui,
         instance_id: ModuleInstanceId,
         entry: &NodeEntry,
+        defaults: Option<&DataSpec>,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
         let node = entry.node;
+        let default_spec = defaults.and_then(|defaults| defaults.node(node));
         let mut edit = |spec: NodeSpec| {
             actions.push(WorkspaceAction::EditNode {
                 instance_id,
@@ -392,15 +476,18 @@ impl Workspace {
                     };
                     if let Some(value) = number_row(
                         ui,
-                        &label,
-                        SettingsItem::Number {
-                            node,
-                            param: *param,
+                        Number {
+                            label: &label,
+                            key: SettingsItem::Number {
+                                node,
+                                param: *param,
+                            },
+                            current,
+                            range: (min, max),
+                            unit,
+                            logarithmic: false,
+                            default: default_spec.and_then(|default| param.number(&default)),
                         },
-                        current,
-                        (min, max),
-                        unit,
-                        false,
                         controls,
                     ) && let Some(spec) = param.with_number(spec, value)
                     {
@@ -409,6 +496,26 @@ impl Workspace {
                 }
             }
         }
+    }
+}
+
+/// What a view setting returns to: its default, numbers kept inside the current
+/// range (a short History narrows the visible time). Channels reset with the
+/// channel row, not here.
+fn view_default(setting: &ViewSetting) -> Option<SettingValue> {
+    match (setting.kind, &setting.default) {
+        (SettingKind::Number { min, max, .. }, SettingValue::Number(default)) => {
+            Some(SettingValue::Number(default.clamp(min, max)))
+        }
+        (SettingKind::Choice(_), default) => Some(default.clone()),
+        _ => None,
+    }
+}
+
+fn view_differs(setting: &ViewSetting, default: &SettingValue) -> bool {
+    match (&setting.value, default) {
+        (SettingValue::Number(value), SettingValue::Number(default)) => differs(*value, *default),
+        (value, default) => value != default,
     }
 }
 
@@ -429,12 +536,15 @@ fn view_setting_row(
             let current = setting.value.number().unwrap_or(min);
             if let Some(value) = number_row(
                 ui,
-                setting.label,
-                SettingsItem::ViewNumber(setting.key),
-                current,
-                (min, max),
-                unit,
-                logarithmic,
+                Number {
+                    label: setting.label,
+                    key: SettingsItem::ViewNumber(setting.key),
+                    current,
+                    range: (min, max),
+                    unit,
+                    logarithmic,
+                    default: setting.default.number(),
+                },
                 controls,
             ) {
                 actions.push(WorkspaceAction::SetViewSetting {

@@ -202,6 +202,10 @@ pub(crate) enum ControlKey {
     AddModule(&'static str),
     MoveTarget(MoveTarget),
     Settings(SettingsItem),
+    /// The typed value next to a slider in the settings window.
+    SettingsValue(SettingsItem),
+    /// The Reset next to a value in the settings window.
+    SettingsReset(SettingsItem),
 }
 
 #[cfg(any(test, feature = "automation"))]

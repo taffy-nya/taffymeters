@@ -123,6 +123,12 @@ pub trait ModuleFactory: Send + Sync {
         registry: &Registry,
         data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError>;
+
+    /// The analysis a new instance starts with, for resetting its parameters in
+    /// the settings. `None` when the type has nothing adjustable to reset.
+    fn default_data(&self) -> Option<DataSpec> {
+        None
+    }
 }
 
 /// The spec an instance subscribes with: `saved` when it has the default's shape.

@@ -20,6 +20,8 @@ use crate::{
 const HISTORY_SECONDS: f32 = 8.0;
 /// Shortest visible span.
 const MIN_VISIBLE_SECONDS: f32 = 0.5;
+/// Visible span a new Spectrogram shows.
+const DEFAULT_VISIBLE_SECONDS: f32 = 6.0;
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
 
@@ -46,10 +48,7 @@ impl ModuleFactory for SpectrogramFactory {
         _registry: &Registry,
         data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
-        let mut spec = DataSpec::new();
-        let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
-        let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
-        let history = spec.output(fft, Keep::Seconds(HISTORY_SECONDS));
+        let (spec, channel, history) = spectrogram_spec();
         let spec = spec_from_saved(spec, data)?;
         let subscription = services
             .dataflow
@@ -63,11 +62,24 @@ impl ModuleFactory for SpectrogramFactory {
             channel_node: channel,
             history_output: history,
             history: HistoryView::new(),
-            visible_seconds: 6.0,
+            visible_seconds: DEFAULT_VISIBLE_SECONDS,
             cells: Vec::with_capacity(16_384),
             band_bins: Vec::with_capacity(96),
         }))
     }
+
+    fn default_data(&self) -> Option<DataSpec> {
+        Some(spectrogram_spec().0)
+    }
+}
+
+/// The default analysis: Channel(Mono) → FFT, the FFT output kept as History.
+fn spectrogram_spec() -> (DataSpec, NodeRef, OutputId) {
+    let mut spec = DataSpec::new();
+    let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
+    let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
+    let history = spec.output(fft, Keep::Seconds(HISTORY_SECONDS));
+    (spec, channel, history)
 }
 
 struct SpectrogramModule {
@@ -152,6 +164,7 @@ impl Module for SpectrogramModule {
                 logarithmic: false,
             },
             value: SettingValue::Number(self.visible_seconds),
+            default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
         }]
     }
 

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::{
     LiveAudio, LiveAudioConfig,
     audio::synthetic::{ManualInputDriver, SyntheticConfig},
-    dataflow::{ChannelSelection, DataSpec, FftConfig, NodeRef, NodeSpec, OutputId},
+    dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId},
     modules::{
         BAR_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID,
         SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
@@ -240,6 +240,21 @@ fn heat_map_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
     })
 }
 
+/// Click the typed value of `item` in the open settings window, type `text` and
+/// finish with `key`: Enter applies it, Escape keeps the old value.
+fn type_value(
+    h: &mut Harness,
+    item: SettingsItem,
+    text: &str,
+    key: egui::Key,
+) -> Result<(), String> {
+    h.click(ControlKey::SettingsValue(item))?;
+    h.frame(vec![Event::Text(text.to_owned())]);
+    h.key(key);
+    h.frame(vec![]);
+    Ok(())
+}
+
 /// Copy, analysis settings shown once per node, edits that only reach the target.
 fn s01() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
@@ -457,6 +472,77 @@ fn s01() -> Result<Value, String> {
         spectrogram,
         "the Spectrogram heat map",
         heat_map_shown,
+    )?;
+    // A value can be typed, with or without its unit; text that is no number in
+    // that unit, or Escape, keeps the value, and Escape stays in the field
+    // instead of closing the window.
+    let visible = SettingsItem::ViewNumber("visible_seconds");
+    let seconds = |h: &Harness| view_of(h, spectrogram, "visible_seconds");
+    type_value(&mut h, visible, "2 s", egui::Key::Enter)?;
+    check(
+        seconds(&h) == Some(SettingValue::Number(2.0)),
+        &format!("typed visible time: {:?}", seconds(&h)),
+    )?;
+    type_value(&mut h, visible, "abc", egui::Key::Enter)?;
+    type_value(&mut h, visible, "3", egui::Key::Escape)?;
+    check(
+        seconds(&h) == Some(SettingValue::Number(2.0)) && h.ws.settings_open(),
+        &format!(
+            "invalid or escaped typing changed the value or closed the window: {:?}",
+            seconds(&h)
+        ),
+    )?;
+    // ↺ beside a value returns it to the type's default and then goes away.
+    h.in_settings(&[])?;
+    h.click(ControlKey::SettingsReset(visible))?;
+    let reset_gone = !h
+        .ws
+        .settings_targets()
+        .contains_key(&ControlKey::SettingsReset(visible));
+    check(
+        seconds(&h) == Some(SettingValue::Number(6.0)) && reset_gone,
+        &format!(
+            "row reset: {:?}, ↺ still shown: {}",
+            seconds(&h),
+            !reset_gone
+        ),
+    )?;
+    // The Analysis card's ↺ returns every analysis parameter, History length
+    // included, to the defaults; the channel belongs to the Module card and stays.
+    type_value(
+        &mut h,
+        SettingsItem::Keep(OutputId::from_index(0)),
+        "3",
+        egui::Key::Enter,
+    )?;
+    h.in_settings(&[
+        SettingsItem::Channel(ChannelSelection::Right),
+        SettingsItem::FftWindow {
+            node: spectrogram_fft,
+            size: 4096,
+        },
+        SettingsItem::ResetAnalysis,
+    ])?;
+    let restored = spec(&h.ws, spectrogram)?;
+    check(
+        restored.node(spectrogram_fft) == Some(NodeSpec::Fft(FftConfig::default()))
+            && restored.outputs()[0].keep == Keep::Seconds(8.0)
+            && channel_of(&restored) == Some(ChannelSelection::Right),
+        &format!("Analysis reset left {restored:?}"),
+    )?;
+    // Frequencies take kilohertz; the Display card's ↺ restores the view.
+    open_settings(&mut h, b, &[])?;
+    let max_frequency = SettingsItem::ViewNumber("max_frequency_hz");
+    type_value(&mut h, max_frequency, "1.5k", egui::Key::Enter)?;
+    let typed_frequency = view_of(&h, b, "max_frequency_hz");
+    h.in_settings(&[SettingsItem::ResetSection("Display")])?;
+    check(
+        typed_frequency == Some(SettingValue::Number(1_500.0))
+            && view_of(&h, b, "max_frequency_hz") == Some(SettingValue::Number(20_000.0)),
+        &format!(
+            "typed {typed_frequency:?}, after the Display reset {:?}",
+            view_of(&h, b, "max_frequency_hz")
+        ),
     )?;
     h.ws.check_ownership()?;
     Ok(
@@ -684,6 +770,46 @@ fn s03() -> Result<Value, String> {
         palette(&h, a)?.color(ColorRole::Primary) == light.color(ColorRole::Primary)
             && palette(&h, b)?.color(ColorRole::Primary) == swatch,
         "Reset did not return the global color to the preset",
+    )?;
+    // Typed text size; its ↺ follows the preset's size again.
+    type_value(&mut h, SettingsItem::TextSize, "14", egui::Key::Enter)?;
+    let typed_size = h.ws.observation().theme.text_size;
+    h.click(ControlKey::SettingsReset(SettingsItem::TextSize))?;
+    check(
+        typed_size == Some(14.0) && h.ws.observation().theme.text_size.is_none(),
+        &format!(
+            "text size typed {typed_size:?}, after ↺ {:?}",
+            h.ws.observation().theme.text_size
+        ),
+    )?;
+    // Card ↺: every global edit, the shown type's style, every instance override.
+    h.in_settings(&[
+        SettingsItem::Swatch {
+            scope: ColorScope::Global,
+            role: ColorRole::Text,
+            index: 1,
+        },
+        SettingsItem::ResetColors(ColorScope::Global),
+        SettingsItem::ResetColors(type_scope),
+        SettingsItem::Tab(Tab::Module),
+        SettingsItem::ResetColors(ColorScope::Instance(b)),
+    ])?;
+    let theme = h.ws.observation().theme;
+    check(
+        theme.colors.is_empty()
+            && theme
+                .type_styles
+                .get(SPECTRUM_MODULE_ID)
+                .is_none_or(|s| s.is_empty())
+            && h.ws
+                .observation()
+                .module(b)
+                .is_some_and(|m| m.colors.is_empty())
+            && palette(&h, b)? == palette(&h, a)?,
+        &format!(
+            "card resets left global {:?}, type {:?}",
+            theme.colors, theme.type_styles
+        ),
     )?;
     let theme = h.ws.observation().theme;
     Ok(

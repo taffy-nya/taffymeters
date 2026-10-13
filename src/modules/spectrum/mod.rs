@@ -98,6 +98,9 @@ const COLOR_ROLES: &[ColorRole] = &[
 /// below 0 dBFS.
 const MAX_FREQUENCY_RANGE: (f32, f32) = (80.0, 96_000.0);
 const DB_RANGE: (f32, f32) = (24.0, 180.0);
+/// Highest frequency and dB range a new Spectrum shows.
+const DEFAULT_MAX_FREQUENCY_HZ: f32 = 20_000.0;
+const DEFAULT_RANGE_DB: f32 = 100.0;
 
 struct SpectrumModuleFactory;
 
@@ -127,8 +130,8 @@ impl SpectrumModuleFactory {
             style_id: DEFAULT_SPECTRUM_STYLE_ID,
             coordinates: SpectrumCoordinates {
                 min_frequency_hz: 20.0,
-                max_frequency_hz: 20_000.0,
-                min_dbfs: -100.0,
+                max_frequency_hz: DEFAULT_MAX_FREQUENCY_HZ,
+                min_dbfs: -DEFAULT_RANGE_DB,
                 max_dbfs: 0.0,
             },
             hover_line: String::with_capacity(128),
@@ -152,6 +155,10 @@ impl ModuleFactory for SpectrumModuleFactory {
         data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         Ok(Box::new(self.create_instance(services, registry, data)?))
+    }
+
+    fn default_data(&self) -> Option<DataSpec> {
+        Some(spectrum_data().spec)
     }
 }
 
@@ -281,6 +288,7 @@ impl Module for SpectrumModule {
                     logarithmic: true,
                 },
                 value: SettingValue::Number(self.coordinates.max_frequency_hz),
+                default: SettingValue::Number(DEFAULT_MAX_FREQUENCY_HZ),
             },
             ViewSetting {
                 key: "range_db",
@@ -293,6 +301,7 @@ impl Module for SpectrumModule {
                     logarithmic: false,
                 },
                 value: SettingValue::Number(self.coordinates.max_dbfs - self.coordinates.min_dbfs),
+                default: SettingValue::Number(DEFAULT_RANGE_DB),
             },
         ]
     }

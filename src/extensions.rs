@@ -12,6 +12,8 @@ use crate::{
 #[derive(Default)]
 pub struct Registry {
     modules: HashMap<String, Arc<dyn ModuleFactory>>,
+    /// Each type's default analysis, built once when it registers.
+    module_defaults: HashMap<String, DataSpec>,
     spectrum_styles: HashMap<String, Arc<dyn SpectrumStyleFactory>>,
     oscilloscope_styles: HashMap<String, Arc<dyn OscilloscopeStyleFactory>>,
 }
@@ -24,6 +26,9 @@ impl Registry {
         let id = factory.type_id();
         if self.modules.contains_key(id) {
             return Err(RegistryError::DuplicateModule(id.to_owned()));
+        }
+        if let Some(defaults) = factory.default_data() {
+            self.module_defaults.insert(id.to_owned(), defaults);
         }
         self.modules.insert(id.to_owned(), Arc::new(factory));
         Ok(())
@@ -73,6 +78,11 @@ impl Registry {
         self.modules
             .get(id)
             .map(|factory| (factory.type_id(), factory.display_name()))
+    }
+
+    /// The analysis a new instance of `id` starts with, if it has one to reset to.
+    pub fn default_data(&self, id: &str) -> Option<&DataSpec> {
+        self.module_defaults.get(id)
     }
 
     pub fn module_types(&self) -> Vec<(&'static str, &'static str)> {

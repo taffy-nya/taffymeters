@@ -4,7 +4,7 @@ use eframe::egui;
 
 use super::{
     SettingsItem, TYPE_ROLES,
-    widgets::{card, choice, color_row, number_row, row},
+    widgets::{Number, card, card_with_reset, choice, color_row, differs, number_row, row},
 };
 use crate::{
     theme::{ColorRole, Preset, RoleOverrides, TEXT_SIZE_RANGE},
@@ -34,62 +34,103 @@ impl Workspace {
                     }
                 }
             });
+            let preset_size = preset.palette().text_size;
             if let Some(size) = number_row(
                 ui,
-                "Text size",
-                SettingsItem::TextSize,
-                self.chrome.text_size,
-                TEXT_SIZE_RANGE,
-                "pt",
-                false,
+                Number {
+                    label: "Text size",
+                    key: SettingsItem::TextSize,
+                    current: self.chrome.text_size,
+                    range: TEXT_SIZE_RANGE,
+                    unit: "pt",
+                    logarithmic: false,
+                    default: Some(preset_size),
+                },
                 controls,
             ) {
+                // The preset's own size follows the preset again.
+                let size = differs(size, preset_size).then_some(size);
                 actions.push(WorkspaceAction::SetTextSize { size });
             }
         });
-        card(ui, "Global colors · dot: changed in this workspace", |ui| {
-            for role in ColorRole::ALL {
-                color_row(
-                    ui,
-                    ColorScope::Global,
-                    role,
-                    self.chrome.color(role),
-                    self.theme.colors.contains_key(&role),
-                    controls,
-                    actions,
-                );
-            }
-        });
-        card(ui, "Module type style", |ui| {
-            row(ui, "Type", |ui| {
-                for (type_id, label) in self.registry.module_types() {
-                    let selected = *selected_type == Some(type_id);
-                    if choice(
-                        ui,
-                        selected,
-                        label,
-                        SettingsItem::TypeStyle(type_id),
-                        controls,
-                    ) {
-                        *selected_type = Some(type_id);
-                    }
-                }
-            });
-            if let Some(type_id) = *selected_type {
-                let style = self.theme.type_styles.get(type_id);
-                let resolved = self.theme.resolve(type_id, &RoleOverrides::new());
-                for role in TYPE_ROLES {
+        let global_scope = ColorScope::Global;
+        let (_, reset) = card_with_reset(
+            ui,
+            "Global colors",
+            SettingsItem::ResetColors(global_scope),
+            !self.theme.colors.is_empty(),
+            controls,
+            |ui, controls| {
+                for role in ColorRole::ALL {
                     color_row(
                         ui,
-                        ColorScope::Type(type_id),
+                        global_scope,
                         role,
-                        resolved.color(role),
-                        style.is_some_and(|style| style.contains_key(&role)),
+                        self.chrome.color(role),
+                        self.theme.colors.contains_key(&role),
                         controls,
                         actions,
                     );
                 }
-            }
-        });
+            },
+        );
+        if reset {
+            clear_colors(global_scope, self.theme.colors.keys().copied(), actions);
+        }
+        let style = selected_type.and_then(|type_id| self.theme.type_styles.get(type_id));
+        let type_scope = selected_type.map(ColorScope::Type);
+        let (_, reset) = card_with_reset(
+            ui,
+            "Module type style",
+            SettingsItem::ResetColors(type_scope.unwrap_or(global_scope)),
+            style.is_some_and(|style| !style.is_empty()),
+            controls,
+            |ui, controls| {
+                row(ui, "Type", |ui| {
+                    for (type_id, label) in self.registry.module_types() {
+                        let selected = *selected_type == Some(type_id);
+                        if choice(
+                            ui,
+                            selected,
+                            label,
+                            SettingsItem::TypeStyle(type_id),
+                            controls,
+                        ) {
+                            *selected_type = Some(type_id);
+                        }
+                    }
+                });
+                if let (Some(type_id), Some(scope)) = (*selected_type, type_scope) {
+                    let resolved = self.theme.resolve(type_id, &RoleOverrides::new());
+                    for role in TYPE_ROLES {
+                        color_row(
+                            ui,
+                            scope,
+                            role,
+                            resolved.color(role),
+                            style.is_some_and(|style| style.contains_key(&role)),
+                            controls,
+                            actions,
+                        );
+                    }
+                }
+            },
+        );
+        if reset && let (Some(scope), Some(style)) = (type_scope, style) {
+            clear_colors(scope, style.keys().copied(), actions);
+        }
     }
+}
+
+/// Return every role of `roles` in `scope` to its inherited color.
+pub(super) fn clear_colors(
+    scope: ColorScope,
+    roles: impl Iterator<Item = ColorRole>,
+    actions: &mut Vec<WorkspaceAction>,
+) {
+    actions.extend(roles.map(|role| WorkspaceAction::SetColor {
+        scope,
+        role,
+        color: None,
+    }));
 }

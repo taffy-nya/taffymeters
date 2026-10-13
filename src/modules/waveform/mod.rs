@@ -12,7 +12,12 @@ use crate::{
     theme::ColorRole,
 };
 
-use crate::modules::pcm_view::{channel_setting, channel_value, scale_setting, subscribe_pcm};
+use crate::modules::pcm_view::{
+    channel_setting, channel_value, pcm_spec, scale_setting, subscribe_pcm,
+};
+
+/// Visible span a new Waveform shows.
+const DEFAULT_VISIBLE_SECONDS: f32 = 4.0;
 
 /// Source time the Waveform keeps by default; it shows up to its History.
 const WAVEFORM_HISTORY_SECONDS: f32 = 10.0;
@@ -53,11 +58,15 @@ impl ModuleFactory for WaveformFactory {
             output,
             history: HistoryView::new(),
             channel: ChannelSelection::MonoAverage,
-            seconds: 4.0,
+            seconds: DEFAULT_VISIBLE_SECONDS,
             y_scale: 1.0,
             bars: Vec::with_capacity(2048),
             envelope: WaveformEnvelope::default(),
         }))
+    }
+
+    fn default_data(&self) -> Option<DataSpec> {
+        Some(pcm_spec(Keep::Seconds(WAVEFORM_HISTORY_SECONDS)).0)
     }
 }
 
@@ -150,6 +159,7 @@ impl Module for WaveformModule {
                     logarithmic: false,
                 },
                 value: SettingValue::Number(self.seconds),
+                default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
             },
             scale_setting(self.y_scale, WAVEFORM_SCALE),
         ]

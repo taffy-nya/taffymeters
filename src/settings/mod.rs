@@ -60,6 +60,8 @@ pub struct ViewSetting {
     pub section: &'static str,
     pub kind: SettingKind,
     pub value: SettingValue,
+    /// What a new instance shows; the settings offer to reset to it.
+    pub default: SettingValue,
 }
 
 impl ViewSetting {
@@ -286,6 +288,7 @@ mod tests {
             label: "Test",
             section: "Test",
             kind,
+            default: value.clone(),
             value,
         }
     }

@@ -201,8 +201,9 @@ pub(crate) enum WorkspaceAction {
     SetThemePreset {
         preset: Preset,
     },
+    /// `None` follows the preset's size.
     SetTextSize {
-        size: f32,
+        size: Option<f32>,
     },
     SaveWorkspace,
     SaveWorkspaceAs {
@@ -825,12 +826,12 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    fn set_text_size(&mut self, size: f32) -> Result<ActionOutcome, WorkspaceError> {
-        if !size.is_finite() {
+    fn set_text_size(&mut self, size: Option<f32>) -> Result<ActionOutcome, WorkspaceError> {
+        if size.is_some_and(|size| !size.is_finite()) {
             return Err(WorkspaceError::Unsupported("a non-finite text size"));
         }
         let (min, max) = crate::theme::TEXT_SIZE_RANGE;
-        self.theme.text_size = Some(size.clamp(min, max));
+        self.theme.text_size = size.map(|size| size.clamp(min, max));
         self.refresh_palettes();
         Ok(ActionOutcome::Applied)
     }

@@ -6,18 +6,25 @@ use crate::{
     settings::{SettingKind, SettingValue, ViewSetting},
 };
 
+/// The source PCM output kept as `keep`: the whole analysis of these Modules.
+pub(super) fn pcm_spec(keep: Keep) -> (DataSpec, OutputId) {
+    let mut spec = DataSpec::new();
+    let output = spec.output(SOURCE, keep);
+    (spec, output)
+}
+
 /// A subscription to the merged source PCM (or the saved equivalent).
 pub(super) fn subscribe_pcm(
     services: &ModuleServices,
     keep: Keep,
     saved: Option<&DataSpec>,
 ) -> Result<(DataSubscription, OutputId), ModuleError> {
-    let mut spec = DataSpec::new();
-    let output = spec.output(SOURCE, keep);
+    let (spec, output) = pcm_spec(keep);
     let spec = spec_from_saved(spec, saved)?;
     Ok((services.dataflow.subscribe(spec)?, output))
 }
 
+/// Every PCM view starts at unit scale.
 pub(super) fn scale_setting(value: f32, range: (f32, f32)) -> ViewSetting {
     ViewSetting {
         key: "scale",
@@ -30,9 +37,11 @@ pub(super) fn scale_setting(value: f32, range: (f32, f32)) -> ViewSetting {
             logarithmic: true,
         },
         value: SettingValue::Number(value),
+        default: SettingValue::Number(1.0),
     }
 }
 
+/// Every PCM view starts with the mono average.
 pub(super) fn channel_setting(channel: ChannelSelection) -> ViewSetting {
     ViewSetting {
         key: "channel",
@@ -40,6 +49,7 @@ pub(super) fn channel_setting(channel: ChannelSelection) -> ViewSetting {
         section: "Display",
         kind: SettingKind::Channel,
         value: SettingValue::Channel(channel),
+        default: SettingValue::Channel(ChannelSelection::MonoAverage),
     }
 }
 

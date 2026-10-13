@@ -88,6 +88,12 @@ pub(crate) enum SettingsItem {
         scope: ColorScope,
         role: ColorRole,
     },
+    /// Every color this scope sets back to the inherited one.
+    ResetColors(ColorScope),
+    /// The instance's analysis parameters back to its type's defaults.
+    ResetAnalysis,
+    /// The instance's view settings of one section back to their defaults.
+    ResetSection(&'static str),
     Swatch {
         scope: ColorScope,
         role: ColorRole,
@@ -155,8 +161,10 @@ pub(crate) struct SettingsWindow {
     type_style: Option<&'static str>,
     name: String,
     confirm_reset: bool,
-    /// A text field has keyboard focus: Escape belongs to it.
-    typing: bool,
+    /// A text field (a name, a typed number) had keyboard focus at the end of the
+    /// last pass: Escape belongs to it. egui drops the focus on Escape before the
+    /// next pass runs, so the pass that sees Escape cannot ask egui itself.
+    text_focus: bool,
     /// Builder inputs stay fixed while the window lives.
     initial_position: Option<Pos2>,
     /// Distinguishes each opening: a reopened window is a new viewport that starts
@@ -181,7 +189,7 @@ impl SettingsWindow {
             type_style: None,
             name: String::new(),
             confirm_reset: false,
-            typing: false,
+            text_focus: false,
             initial_position,
             opening,
             placed: false,
@@ -345,7 +353,7 @@ impl Workspace {
         }
         let mut actions = Vec::new();
         let escape = ctx.input(|input| input.key_pressed(egui::Key::Escape));
-        if escape && !settings.typing && !egui::Popup::is_any_open(&ctx) {
+        if escape && !settings.text_focus && !egui::Popup::is_any_open(&ctx) {
             actions.push(WorkspaceAction::CloseSettings);
         }
         let mut controls = Controls::default();
@@ -393,7 +401,6 @@ impl Workspace {
                 }
             });
             ui.add_space(2.0);
-            settings.typing = false;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match settings.tab {
@@ -424,6 +431,7 @@ impl Workspace {
                     }
                 });
         });
+        settings.text_focus = ctx.egui_wants_keyboard_input();
         #[cfg(any(test, feature = "automation"))]
         for (key, response) in controls.responses {
             settings.targets.insert(

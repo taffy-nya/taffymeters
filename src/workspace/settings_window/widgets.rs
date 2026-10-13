@@ -15,8 +15,10 @@ use crate::{
     },
 };
 
-/// Width of a slider's value readout.
-const VALUE_WIDTH: f32 = 80.0;
+/// Width of a slider's value readout; fits the widest value ("-160.0 dBFS").
+const VALUE_WIDTH: f32 = 86.0;
+/// Width kept for a row's ↺, shown or not, so the slider never resizes.
+const RESET_WIDTH: f32 = 22.0;
 /// Side of a color swatch.
 const SWATCH: f32 = 14.0;
 
@@ -41,8 +43,7 @@ pub(super) fn header(ui: &mut egui::Ui, title: &str, detail: &str) {
     }
 }
 
-/// A titled card holding one group of settings.
-pub(super) fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+fn card_frame<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let visuals = ui.visuals();
     egui::Frame::new()
         .fill(visuals.faint_bg_color)
@@ -51,12 +52,73 @@ pub(super) fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            if !title.is_empty() {
-                ui.label(RichText::new(title).small().strong().weak());
-            }
             add(ui)
         })
         .inner
+}
+
+fn card_title(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).small().strong().weak());
+}
+
+/// A titled card holding one group of settings.
+pub(super) fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    card_frame(ui, |ui| {
+        if !title.is_empty() {
+            card_title(ui, title);
+        }
+        add(ui)
+    })
+}
+
+/// A titled card whose title row offers ↺ (`reset`) while `changed`; returns what
+/// `add` returns and whether ↺ was clicked.
+pub(super) fn card_with_reset<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    reset: SettingsItem,
+    changed: bool,
+    controls: &mut Controls,
+    add: impl FnOnce(&mut egui::Ui, &mut Controls) -> R,
+) -> (R, bool) {
+    card_frame(ui, |ui| {
+        let mut clicked = false;
+        ui.horizontal(|ui| {
+            // The title row keeps its height whether ↺ shows or not.
+            ui.set_min_height(ui.spacing().interact_size.y);
+            card_title(ui, title);
+            if changed {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    clicked = reset_button(
+                        ui,
+                        ControlKey::Settings(reset),
+                        "Reset this group to its defaults",
+                        controls,
+                    );
+                });
+            }
+        });
+        (add(ui, controls), clicked)
+    })
+}
+
+/// A frameless ↺ in the muted text color; it shows a frame while hovered.
+pub(super) fn reset_button(
+    ui: &mut egui::Ui,
+    key: ControlKey,
+    hint: &str,
+    controls: &mut Controls,
+) -> bool {
+    let muted = ui.visuals().weak_text_color();
+    let response = ui
+        .add(
+            egui::Button::new(RichText::new("↺").color(muted))
+                .frame_when_inactive(false)
+                .min_size(vec2(RESET_WIDTH, 0.0)),
+        )
+        .on_hover_text(hint);
+    controls.record(key, &response);
+    response.clicked()
 }
 
 /// The label column: one width for every row of every card, so controls line up.
@@ -94,6 +156,58 @@ fn row_with<R>(
             },
         )
         .inner
+    })
+    .inner
+}
+
+/// A labelled row whose label column ends in ↺ while `reset` is set: the right
+/// edge stays free for the controls. Returns what `add` returns and whether ↺
+/// was clicked.
+fn row_with_reset<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    reset: Option<(ControlKey, &str)>,
+    controls: &mut Controls,
+    add: impl FnOnce(&mut egui::Ui, &mut Controls) -> R,
+) -> (R, bool) {
+    let width = label_width(ui);
+    let height = ui.spacing().interact_size.y;
+    ui.horizontal_top(|ui| {
+        let clicked = ui
+            .allocate_ui_with_layout(
+                vec2(width, height),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_width(width);
+                    // ↺ takes the end of the label column only while shown; the
+                    // controls never move, a long label just truncates sooner.
+                    let room = match reset {
+                        Some(_) => width - RESET_WIDTH - ui.spacing().item_spacing.x,
+                        None => width,
+                    };
+                    ui.allocate_ui_with_layout(
+                        vec2(room, height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| ui.add(egui::Label::new(label).truncate()),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        reset.is_some_and(|(key, hint)| reset_button(ui, key, hint, controls))
+                    })
+                    .inner
+                },
+            )
+            .inner;
+        let inner = ui
+            .allocate_ui_with_layout(
+                vec2(ui.available_width(), height),
+                Layout::left_to_right(Align::Center).with_main_wrap(true),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    add(ui, controls)
+                },
+            )
+            .inner;
+        (inner, clicked)
     })
     .inner
 }
@@ -184,23 +298,72 @@ pub(super) fn format_value(value: f32, unit: &str) -> String {
     )
 }
 
+/// A typed value in `unit`: the number alone, or followed by the unit as shown
+/// (`-6`, `-6 dB`); Hz also takes kilohertz (`20k`, `20 kHz`). `None` when it
+/// is not a finite number in that unit.
+pub(super) fn parse_value(text: &str, unit: &str) -> Option<f32> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+')))
+        .unwrap_or(text.len());
+    let (number, suffix) = text.split_at(split);
+    let number: f32 = number.trim().parse().ok().filter(|n: &f32| n.is_finite())?;
+    let suffix = suffix.trim();
+    let scale = match suffix {
+        "" => 1.0,
+        "k" | "kHz" | "khz" | "KHz" if unit == "Hz" => 1_000.0,
+        _ if suffix.eq_ignore_ascii_case(unit) => 1.0,
+        _ => return None,
+    };
+    Some(number * scale)
+}
+
+/// Whether two setting values differ beyond float noise.
+pub(super) fn differs(a: f32, b: f32) -> bool {
+    (a - b).abs() > 1e-4 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// One numeric setting: slider, typed value and, away from `default`, ↺.
+pub(super) struct Number<'a> {
+    pub label: &'a str,
+    pub key: SettingsItem,
+    pub current: f32,
+    pub range: (f32, f32),
+    pub unit: &'a str,
+    pub logarithmic: bool,
+    /// What ↺ restores (kept inside the range); `None` offers no ↺.
+    pub default: Option<f32>,
+}
+
 /// One slider row; returns the new value whenever it changes, so dragging
-/// applies continuously.
-#[allow(clippy::too_many_arguments)]
+/// applies continuously. Clicking the value types one (Enter or clicking
+/// elsewhere applies it, Escape keeps the old one).
 pub(super) fn number_row(
     ui: &mut egui::Ui,
-    label: &str,
-    key: SettingsItem,
-    current: f32,
-    (min, max): (f32, f32),
-    unit: &str,
-    logarithmic: bool,
+    number: Number<'_>,
     controls: &mut Controls,
 ) -> Option<f32> {
+    let Number {
+        label,
+        key,
+        current,
+        range: (min, max),
+        unit,
+        logarithmic,
+        default,
+    } = number;
+    let default = default.map(|default| default.clamp(min, max));
+    let hint = default.map(|default| format!("Reset to {}", format_value(default, unit)));
+    let reset = default
+        .filter(|default| differs(current, *default))
+        .zip(hint.as_deref())
+        .map(|(_, hint)| (ControlKey::SettingsReset(key), hint));
     let mut value = current;
-    row(ui, label, |ui| {
+    let (_, reset_clicked) = row_with_reset(ui, label, reset, controls, |ui, controls| {
+        // The slider takes what the value leaves, so the row stays one line down
+        // to the narrowest window.
         let spacing = ui.spacing().item_spacing.x;
-        ui.spacing_mut().slider_width = (ui.available_width() - VALUE_WIDTH - spacing).max(48.0);
+        ui.spacing_mut().slider_width = (ui.available_width() - VALUE_WIDTH - spacing).max(32.0);
         let response = ui.add(
             egui::Slider::new(&mut value, min..=max)
                 .logarithmic(logarithmic)
@@ -208,17 +371,34 @@ pub(super) fn number_row(
                 .trailing_fill(true),
         );
         record(controls, key, &response);
-        ui.allocate_ui_with_layout(
-            vec2(VALUE_WIDTH, ui.spacing().interact_size.y),
-            Layout::right_to_left(Align::Center),
-            |ui| ui.label(format_value(value, unit)),
-        );
+        // The value reads as plain text; hovering frames it as a field to type
+        // in. It and its edit field both take the interact width.
+        ui.spacing_mut().interact_size.x = VALUE_WIDTH;
+        let resting = &mut ui.visuals_mut().widgets.inactive;
+        resting.weak_bg_fill = egui::Color32::TRANSPARENT;
+        resting.bg_stroke = Stroke::NONE;
+        let typed = ui
+            .add(
+                egui::DragValue::new(&mut value)
+                    .range(min..=max)
+                    // Typed, not dragged: a linear drag fights the log sliders.
+                    .speed(0.0)
+                    .update_while_editing(false)
+                    .custom_formatter(|value, _| format_value(value as f32, unit))
+                    .custom_parser(|text| parse_value(text, unit).map(f64::from)),
+            )
+            .on_hover_cursor(egui::CursorIcon::Text);
+        controls.record(ControlKey::SettingsValue(key), &typed);
     });
-    ((value - current).abs() > f32::EPSILON).then_some(value)
+    if reset_clicked && let Some(default) = default {
+        value = default;
+    }
+    differs(value, current).then_some(value)
 }
 
-/// One color role: quick swatches (clicking one sets this scope's color), the full
-/// picker, and Reset back to the inherited color while this scope sets its own.
+/// One color role: quick swatches (clicking one sets this scope's color) and the
+/// full picker; while this scope sets its own color, ↺ in the label column returns
+/// it to the inherited one.
 pub(super) fn color_row(
     ui: &mut egui::Ui,
     scope: ColorScope,
@@ -229,15 +409,11 @@ pub(super) fn color_row(
     actions: &mut Vec<WorkspaceAction>,
 ) {
     let accent = ui.visuals().selection.bg_fill;
-    let label = |ui: &mut egui::Ui| {
-        // A dot marks the roles this scope sets itself.
-        let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
-        if overridden {
-            ui.painter().circle_filled(dot.center(), 3.0, accent);
-        }
-        ui.add(egui::Label::new(role.label()).truncate())
-    };
-    row_with(ui, label, |ui| {
+    let reset = overridden.then_some((
+        ControlKey::Settings(SettingsItem::ResetColor { scope, role }),
+        "Use the inherited color",
+    ));
+    let (_, reset_clicked) = row_with_reset(ui, role.label(), reset, controls, |ui, controls| {
         ui.spacing_mut().item_spacing.x = 2.0;
         let ring = ui.visuals().widgets.noninteractive.fg_stroke.color;
         let edge = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -290,29 +466,19 @@ pub(super) fn color_row(
                 color: Some(Color::rgba(red, green, blue, alpha)),
             });
         }
-        if overridden {
-            let response = ui
-                .add(egui::Button::new("Reset").small())
-                .on_hover_text("Use the inherited color");
-            record(
-                controls,
-                SettingsItem::ResetColor { scope, role },
-                &response,
-            );
-            if response.clicked() {
-                actions.push(WorkspaceAction::SetColor {
-                    scope,
-                    role,
-                    color: None,
-                });
-            }
-        }
     });
+    if reset_clicked {
+        actions.push(WorkspaceAction::SetColor {
+            scope,
+            role,
+            color: None,
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_value;
+    use super::{format_value, parse_value};
 
     #[test]
     fn values_read_in_their_unit_without_negative_zero() {
@@ -325,5 +491,25 @@ mod tests {
         assert_eq!(format_value(30.0, "s"), "30 s");
         assert_eq!(format_value(1.5, "×"), "1.50×");
         assert_eq!(format_value(3.0, ""), "3.0");
+    }
+
+    #[test]
+    fn typed_values_take_the_number_with_or_without_its_unit() {
+        assert_eq!(parse_value(" -6 ", "dB"), Some(-6.0));
+        assert_eq!(parse_value("-6 dB", "dB"), Some(-6.0));
+        assert_eq!(parse_value("-160dbfs", "dBFS"), Some(-160.0));
+        assert_eq!(parse_value("440", "Hz"), Some(440.0));
+        assert_eq!(parse_value("20k", "Hz"), Some(20_000.0));
+        assert_eq!(parse_value("1.5 kHz", "Hz"), Some(1_500.0));
+        assert_eq!(parse_value("+3", "dB/oct"), Some(3.0));
+        assert_eq!(parse_value("2×", "×"), Some(2.0));
+        // A kilo prefix only means something for frequencies; other units and
+        // text are not numbers in this unit.
+        assert_eq!(parse_value("20k", "ms"), None);
+        assert_eq!(parse_value("5 s", "ms"), None);
+        assert_eq!(parse_value("abc", "dB"), None);
+        assert_eq!(parse_value("", "dB"), None);
+        assert_eq!(parse_value("1e40", "dB"), None);
+        assert_eq!(parse_value("--1", "dB"), None);
     }
 }
