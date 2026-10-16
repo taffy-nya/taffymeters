@@ -74,8 +74,12 @@ impl LiveAudio {
             .map_err(|error| LiveAudioError::Input(error.to_string()))?;
         let descriptor = Arc::clone(system_input.descriptor());
         let telemetry = Arc::new(SourceTelemetry::new());
-        let (endpoint, dataflow, handle) =
-            Self::create_transport(config, Arc::clone(&descriptor), Arc::clone(&telemetry))?;
+        let (endpoint, dataflow, handle) = Self::create_transport(
+            config,
+            Arc::clone(&descriptor),
+            Arc::clone(&telemetry),
+            true,
+        )?;
         let capture = system_input
             .start(endpoint, Arc::clone(&telemetry))
             .map_err(|error| LiveAudioError::Input(error.to_string()))?;
@@ -99,8 +103,12 @@ impl LiveAudio {
             .map_err(|error| LiveAudioError::Synthetic(error.to_string()))?;
         let descriptor = Arc::new(synthetic.descriptor.clone());
         let telemetry = Arc::new(SourceTelemetry::new());
-        let (endpoint, dataflow, handle) =
-            Self::create_transport(config, Arc::clone(&descriptor), Arc::clone(&telemetry))?;
+        let (endpoint, dataflow, handle) = Self::create_transport(
+            config,
+            Arc::clone(&descriptor),
+            Arc::clone(&telemetry),
+            false,
+        )?;
         let (source, driver) = ManualSource::new(
             endpoint,
             synthetic,
@@ -130,8 +138,12 @@ impl LiveAudio {
             .map_err(|error| LiveAudioError::Synthetic(error.to_string()))?;
         let descriptor = Arc::new(synthetic.descriptor.clone());
         let telemetry = Arc::new(SourceTelemetry::new());
-        let (endpoint, dataflow, handle) =
-            Self::create_transport(config, Arc::clone(&descriptor), Arc::clone(&telemetry))?;
+        let (endpoint, dataflow, handle) = Self::create_transport(
+            config,
+            Arc::clone(&descriptor),
+            Arc::clone(&telemetry),
+            false,
+        )?;
         let source = RealtimeSource::start(
             endpoint,
             synthetic,
@@ -149,10 +161,13 @@ impl LiveAudio {
         ))
     }
 
+    /// `fill_silence`: the input stops delivering while nothing plays (the system
+    /// loopback), so the worker stands in silence for it.
     fn create_transport(
         config: LiveAudioConfig,
         descriptor: Arc<crate::audio::AudioDescriptor>,
         telemetry: Arc<SourceTelemetry>,
+        fill_silence: bool,
     ) -> Result<(CaptureEndpoint, Dataflow, DataflowHandle), LiveAudioError> {
         let (mut endpoint, processing_endpoint) = create_block_transport(
             usize::from(descriptor.channel_count),
@@ -161,8 +176,12 @@ impl LiveAudio {
             Arc::clone(&telemetry),
         )
         .map_err(|error| LiveAudioError::Transport(error.to_string()))?;
-        let (dataflow, handle) =
-            Dataflow::spawn(Arc::clone(&descriptor), processing_endpoint, telemetry);
+        let (dataflow, handle) = Dataflow::spawn_with(
+            Arc::clone(&descriptor),
+            processing_endpoint,
+            telemetry,
+            fill_silence,
+        );
         endpoint.set_worker(dataflow.worker_thread());
         Ok((endpoint, dataflow, handle))
     }

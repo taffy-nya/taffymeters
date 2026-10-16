@@ -27,6 +27,15 @@ impl AudioBlock {
         }
     }
 
+    /// A block of `frame_count` silent frames, for the worker to stand in for a
+    /// source that delivers nothing (see `dataflow::silence`).
+    pub(crate) fn silence(channels: usize, frame_count: usize) -> Self {
+        Self {
+            frame_count,
+            ..Self::new(channels * frame_count)
+        }
+    }
+
     pub(crate) fn samples(&self, channels: usize) -> &[f32] {
         &self.samples[..self.frame_count * channels]
     }

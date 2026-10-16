@@ -56,6 +56,10 @@ impl SourceTelemetry {
         self.state.store(state as u8, Ordering::Release);
     }
 
+    pub(crate) fn state(&self) -> SourceState {
+        SourceState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
     pub(crate) fn continuity(&self) -> u64 {
         self.continuity.load(Ordering::Acquire)
     }

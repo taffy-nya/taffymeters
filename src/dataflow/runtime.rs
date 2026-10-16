@@ -9,7 +9,7 @@ use std::{
         mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle, Thread},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwapOption;
@@ -287,11 +287,31 @@ impl DataController {
 }
 
 impl Dataflow {
+    /// A worker for a source that always delivers (test fixtures).
+    #[cfg(test)]
     pub(crate) fn spawn(
+        descriptor: Arc<AudioDescriptor>,
+        endpoint: ProcessingEndpoint,
+        telemetry: Arc<SourceTelemetry>,
+    ) -> (Self, DataflowHandle) {
+        Self::spawn_with(descriptor, endpoint, telemetry, false)
+    }
+
+    /// `fill_silence`: a source that may stop delivering samples while silent (the
+    /// system loopback); the worker then stands in silence (see `silence`).
+    pub(crate) fn spawn_with(
         descriptor: Arc<AudioDescriptor>,
         mut endpoint: ProcessingEndpoint,
         telemetry: Arc<SourceTelemetry>,
+        fill_silence: bool,
     ) -> (Self, DataflowHandle) {
+        let silence = fill_silence.then(|| {
+            super::silence::SilenceFill::new(
+                Arc::clone(&telemetry),
+                descriptor.sample_rate_hz,
+                usize::from(descriptor.channel_count),
+            )
+        });
         let (command_sender, command_receiver) = sync_channel(CONTROL_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -326,6 +346,7 @@ impl Dataflow {
                 run_worker(Worker {
                     engine: &mut engine,
                     endpoint: &mut endpoint,
+                    silence,
                     commands: command_receiver,
                     stop: worker_stop,
                     metrics: &worker_metrics,
@@ -530,6 +551,7 @@ impl Drop for Dataflow {
 struct Worker<'a> {
     engine: &'a mut Engine,
     endpoint: &'a mut ProcessingEndpoint,
+    silence: Option<super::silence::SilenceFill>,
     commands: Receiver<Command>,
     stop: Arc<AtomicBool>,
     metrics: &'a Metrics,
@@ -542,6 +564,7 @@ fn run_worker(worker: Worker<'_>) {
     let Worker {
         engine,
         endpoint,
+        mut silence,
         commands,
         stop,
         metrics,
@@ -588,7 +611,10 @@ fn run_worker(worker: Worker<'_>) {
         if published() != before_commands {
             wake();
         }
-        if let Some(block) = endpoint.try_pop() {
+        if let Some(mut block) = endpoint.try_pop() {
+            if let Some(silence) = &mut silence {
+                silence.captured(&mut block, Instant::now());
+            }
             #[cfg(any(test, feature = "automation"))]
             let block_end = u64::try_from(block.frame_count)
                 .ok()
@@ -602,6 +628,15 @@ fn run_worker(worker: Worker<'_>) {
             #[cfg(any(test, feature = "automation"))]
             if let Some(block_end) = block_end {
                 processed_frontier.store(block_end, Ordering::Release);
+            }
+        } else if let Some(block) = silence
+            .as_mut()
+            .and_then(|silence| silence.due(Instant::now()))
+        {
+            let before = published();
+            engine.process_block(block);
+            if published() != before {
+                wake();
             }
         } else if !command_budget_exhausted {
             thread::park_timeout(Duration::from_millis(5));

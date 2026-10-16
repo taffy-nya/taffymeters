@@ -3,6 +3,7 @@ mod engine;
 mod fft;
 mod kernels;
 mod runtime;
+mod silence;
 mod spec;
 pub(crate) mod store;
 #[cfg(test)]
