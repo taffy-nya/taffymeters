@@ -27,6 +27,12 @@ const DEFAULT_VISIBLE_SECONDS: f32 = 6.0;
 const LEVEL_SPAN_DB: f32 = 90.0;
 /// Lowest frequency shown, at the bottom edge.
 const MIN_FREQUENCY_HZ: f32 = 20.0;
+/// Display gain: brightens (or dims) every level alike without touching the
+/// analysis; 0 dB in the middle.
+const GAIN_DB_RANGE: (f32, f32) = (-24.0, 24.0);
+/// Wheel gain per scroll point (a wheel notch scrolls about 36 points): the
+/// zoom pace of the other views is a fraction of a dB here, too slow to see.
+const WHEEL_GAIN_DB_PER_POINT: f32 = 0.05;
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
 
@@ -68,6 +74,7 @@ impl ModuleFactory for SpectrogramFactory {
             history_output: history,
             history: HistoryView::new(),
             visible_seconds: DEFAULT_VISIBLE_SECONDS,
+            gain_db: 0.0,
             picture: ColumnRing::default(),
             picture_key: None,
             rows: Vec::new(),
@@ -106,6 +113,7 @@ struct SpectrogramModule {
     history_output: OutputId,
     history: HistoryView,
     visible_seconds: f32,
+    gain_db: f32,
     /// The picture: one column per FFT hop, each computed once, when its result
     /// arrives.
     picture: ColumnRing,
@@ -126,7 +134,8 @@ struct PictureKey {
     rows: usize,
     hop: u64,
     max_frequency_bits: u32,
-    reference_bits: u32,
+    /// Level at the top of the color scale (reference level minus gain).
+    top_bits: u32,
     colors: [Color; 3],
 }
 
@@ -186,26 +195,44 @@ impl Module for SpectrogramModule {
 
     fn view_settings(&self) -> Vec<ViewSetting> {
         let (min, max) = self.visible_range();
-        vec![ViewSetting {
-            key: "visible_seconds",
-            label: "Visible time",
-            section: "Display",
-            kind: SettingKind::Number {
-                min,
-                max,
-                unit: "s",
-                logarithmic: false,
+        vec![
+            ViewSetting {
+                key: "visible_seconds",
+                label: "Visible time",
+                section: "Display",
+                kind: SettingKind::Number {
+                    min,
+                    max,
+                    unit: "s",
+                    logarithmic: false,
+                },
+                value: SettingValue::Number(self.visible_seconds),
+                default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
             },
-            value: SettingValue::Number(self.visible_seconds),
-            default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
-        }]
+            ViewSetting {
+                key: "gain_db",
+                label: "Gain",
+                section: "Display",
+                kind: SettingKind::Number {
+                    min: GAIN_DB_RANGE.0,
+                    max: GAIN_DB_RANGE.1,
+                    unit: "dB",
+                    logarithmic: false,
+                },
+                value: SettingValue::Number(self.gain_db),
+                default: SettingValue::Number(0.0),
+            },
+        ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
-        if key != "visible_seconds" {
-            return Err(ModuleError::UnknownSetting(key.to_owned()));
+        match key {
+            "visible_seconds" => {
+                self.visible_seconds = number_setting(key, value, self.visible_range())?;
+            }
+            "gain_db" => self.gain_db = number_setting(key, value, GAIN_DB_RANGE)?,
+            _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
-        self.visible_seconds = number_setting(key, value, self.visible_range())?;
         Ok(())
     }
 
@@ -213,10 +240,16 @@ impl Module for SpectrogramModule {
         if frame
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
-            && (frame.zoom_delta - 1.0).abs() > 0.001
         {
-            let (min, max) = self.visible_range();
-            self.visible_seconds = (self.visible_seconds / frame.zoom_delta).clamp(min, max);
+            if (frame.zoom_delta - 1.0).abs() > 0.001 {
+                let (min, max) = self.visible_range();
+                self.visible_seconds = (self.visible_seconds / frame.zoom_delta).clamp(min, max);
+            }
+            // The wheel brightens (up) or dims the picture, about 2 dB per notch.
+            if frame.scroll_delta_y.abs() > 0.01 {
+                self.gain_db = (self.gain_db + frame.scroll_delta_y * WHEEL_GAIN_DB_PER_POINT)
+                    .clamp(GAIN_DB_RANGE.0, GAIN_DB_RANGE.1);
+            }
         }
         self.reader
             .sync_history(self.history_output, &mut self.history);
@@ -239,7 +272,7 @@ impl Module for SpectrogramModule {
             rows: frame.rect.height().round().max(1.0) as usize,
             hop,
             max_frequency_bits: max_frequency.to_bits(),
-            reference_bits: frame.reference_dbfs.to_bits(),
+            top_bits: (frame.reference_dbfs - self.gain_db).to_bits(),
             colors: [ColorRole::Low, ColorRole::Mid, ColorRole::High]
                 .map(|role| frame.palette.color(role)),
         };
@@ -260,7 +293,9 @@ impl Module for SpectrogramModule {
         }
         let start = history
             .partition_point(|entry| entry.frame.processed_through_frame <= self.written_through);
-        let top_dbfs = frame.reference_dbfs;
+        // Gain lifts every level by the same dB: the top of the color scale moves
+        // down. Display only; the analysis keeps its values.
+        let top_dbfs = frame.reference_dbfs - self.gain_db;
         for entry in &history[start..] {
             let Some(data) = entry.frame.spectrum() else {
                 continue;
@@ -355,5 +390,38 @@ mod tests {
             }
         }
         assert!(fed > 0);
+    }
+
+    #[test]
+    fn gain_brightens_the_picture_without_changing_the_analysis() {
+        let mut fixture = PcmFixture::new(1);
+        let mut module = SpectrogramFactory
+            .create(&fixture.services, &Registry::default(), None)
+            .unwrap();
+        // A faint tone (about -79 dB as shown): dim at 0 dB gain.
+        let faint: Vec<f32> = tone(0, 4_096)
+            .iter()
+            .map(|sample| sample * 0.000_2)
+            .collect();
+        fixture.feed(&faint);
+        let mut target = RecordingTarget::default();
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        let dim = target.images.pop().unwrap();
+        let row = row_of(3_000.0, dim.height);
+        let spec = module.data().unwrap().spec();
+
+        module
+            .set_view_setting("gain_db", &SettingValue::Number(24.0))
+            .unwrap();
+        // No new audio: the picture is rebuilt from the History.
+        draw(module.as_mut(), &mut target, Duration::from_millis(16));
+        let bright = target.images.pop().unwrap();
+        let (before, after) = (dim.columns[8][row].alpha, bright.columns[8][row].alpha);
+        assert!(before < 200 && after > before, "alpha {before} -> {after}");
+        assert_eq!(
+            module.data().unwrap().spec(),
+            spec,
+            "the analysis is untouched"
+        );
     }
 }
