@@ -1,6 +1,7 @@
 use super::BAR_SPECTRUM_STYLE_ID;
 use crate::{
     modules::spectrum::style::{SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory},
+    plotting::spectrum_dbfs_between,
     render::{ColoredRect, Point, Rect, RenderTarget},
     theme::ColorRole,
 };
@@ -32,24 +33,15 @@ impl SpectrumStyle for BarSpectrumStyle {
         self.bars.clear();
         let width = context.rect.width().max(1.0);
         let bar_count = (width / 6.0).floor().max(1.0) as usize;
-        let range = context.coordinates.visible_bin_range(
-            context.snapshot.fft.bin_hz,
-            context.snapshot.spectrum_dbfs.len(),
-        );
         for bar in 0..bar_count {
             let x0 = context.rect.min.x + bar as f32 * width / bar_count as f32;
             let x1 = context.rect.min.x + (bar + 1) as f32 * width / bar_count as f32;
-            let f0 = context.coordinates.frequency_at_x(x0, context.rect);
-            let f1 = context.coordinates.frequency_at_x(x1, context.rect);
-            let first = ((f0 / context.snapshot.fft.bin_hz).floor() as usize).max(range.start);
-            let end = ((f1 / context.snapshot.fft.bin_hz).ceil() as usize)
-                .saturating_add(1)
-                .min(range.end);
-            let Some(dbfs) = context.snapshot.spectrum_dbfs[first.min(end)..end]
-                .iter()
-                .copied()
-                .max_by(f32::total_cmp)
-            else {
+            let Some(dbfs) = spectrum_dbfs_between(
+                context.snapshot.spectrum_dbfs,
+                context.snapshot.fft.bin_hz,
+                context.coordinates.frequency_at_x(x0, context.rect),
+                context.coordinates.frequency_at_x(x1, context.rect),
+            ) else {
                 continue;
             };
             self.bars.push(ColoredRect {

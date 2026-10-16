@@ -91,8 +91,6 @@ pub enum NodeSpec {
     Tilt { db_per_octave: f32 },
     /// Per-bin attack/release exponential smoothing in source time (stateful).
     Smooth(SmoothConfig),
-    /// Spectrum − `db`.
-    Center { db: f32 },
     /// Spectrum + `db`.
     Gain { db: f32 },
     /// Per-bin peak hold, then linear decay in dB/s (stateful).
@@ -116,11 +114,9 @@ impl NodeSpec {
         match self {
             Self::Channel(_) | Self::Levels => SignalKind::Pcm,
             Self::Fft(_) => SignalKind::Mono,
-            Self::Tilt { .. }
-            | Self::Smooth(_)
-            | Self::Center { .. }
-            | Self::Gain { .. }
-            | Self::Peak(_) => SignalKind::Spectrum,
+            Self::Tilt { .. } | Self::Smooth(_) | Self::Gain { .. } | Self::Peak(_) => {
+                SignalKind::Spectrum
+            }
         }
     }
 
@@ -161,9 +157,6 @@ impl NodeSpec {
                 db_per_octave: finite(db_per_octave, SpecError::InvalidTilt)?,
             },
             Self::Smooth(config) => Self::Smooth(config.validated()?),
-            Self::Center { db } => Self::Center {
-                db: finite(db, SpecError::InvalidCenter)?,
-            },
             Self::Gain { db } => Self::Gain {
                 db: finite(db, SpecError::InvalidGain)?,
             },
@@ -552,7 +545,6 @@ pub enum SpecError {
     InvalidFft,
     InvalidTilt,
     InvalidSmoothTime,
-    InvalidCenter,
     InvalidGain,
     InvalidPeakTime,
     InvalidKeep,
@@ -577,7 +569,6 @@ impl fmt::Display for SpecError {
             Self::InvalidSmoothTime => {
                 f.write_str("smooth attack/release must be finite and non-negative")
             }
-            Self::InvalidCenter => f.write_str("center offset must be finite"),
             Self::InvalidGain => f.write_str("gain must be finite"),
             Self::InvalidPeakTime => f.write_str("peak hold/decay must be finite and non-negative"),
             Self::InvalidKeep => f.write_str("history duration must be finite and positive"),

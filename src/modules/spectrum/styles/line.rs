@@ -3,7 +3,7 @@ use crate::{
     modules::spectrum::style::{
         SpectrumPlot, SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory,
     },
-    plotting::SpectrumCoordinates,
+    plotting::{SpectrumCoordinates, spectrum_dbfs_at},
     render::{Point, Rect, RenderTarget, Stroke},
     theme::ColorRole,
 };
@@ -78,11 +78,14 @@ fn spectrum_points(
 ) {
     // Display sampling: on the log axis many high bins share one point-wide column;
     // keep only the loudest bin of each column so peaks survive and the path stays
-    // proportional to the drawn width instead of the FFT size.
+    // proportional to the drawn width instead of the FFT size. The ends are the
+    // levels interpolated at the range bounds, so the curve reaches both edges even
+    // when the first bin lies well inside the range (small FFTs).
     output.clear();
+    let bin_hz = snapshot.fft.bin_hz;
     let mut column: Option<(i32, Point)> = None;
-    for index in coordinates.visible_bin_range(snapshot.fft.bin_hz, bins.len()) {
-        let point = coordinates.point(index as f32 * snapshot.fft.bin_hz, bins[index], rect);
+    let mut add = |frequency_hz: f32, dbfs: f32| {
+        let point = coordinates.point(frequency_hz, dbfs, rect);
         let x = point.x.floor() as i32;
         match &mut column {
             Some((current, loudest)) if *current == x => {
@@ -96,6 +99,16 @@ fn spectrum_points(
                 }
             }
         }
+    };
+    let edge = |frequency_hz: f32| spectrum_dbfs_at(bins, bin_hz, frequency_hz);
+    if let Some(dbfs) = edge(coordinates.min_frequency_hz) {
+        add(coordinates.min_frequency_hz, dbfs);
+    }
+    for index in coordinates.interior_bin_range(bin_hz, bins.len()) {
+        add(index as f32 * bin_hz, bins[index]);
+    }
+    if let Some(dbfs) = edge(coordinates.max_frequency_hz) {
+        add(coordinates.max_frequency_hz, dbfs);
     }
     if let Some((_, loudest)) = column {
         output.push(loudest);

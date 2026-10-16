@@ -3,7 +3,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        number_setting,
+        flag_setting, number_setting, overlay_setting,
     },
     render::{Circle, Point, Stroke, TextStyle},
     settings::{SettingValue, ViewSetting},
@@ -45,6 +45,7 @@ impl ModuleFactory for StereometerFactory {
             _subscription: subscription,
             output,
             scale: 1.0,
+            show_guides: false,
             circles: Vec::with_capacity(512),
         }))
     }
@@ -56,6 +57,7 @@ struct StereometerModule {
     _subscription: DataSubscription,
     output: OutputId,
     scale: f32,
+    show_guides: bool,
     circles: Vec<Circle>,
 }
 
@@ -73,14 +75,18 @@ impl Module for StereometerModule {
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
-        vec![scale_setting(self.scale, STEREOMETER_SCALE)]
+        vec![
+            scale_setting(self.scale, STEREOMETER_SCALE),
+            overlay_setting("show_guides", "Axes", self.show_guides),
+        ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
-        if key != "scale" {
-            return Err(ModuleError::UnknownSetting(key.to_owned()));
+        match key {
+            "scale" => self.scale = number_setting(key, value, STEREOMETER_SCALE)?,
+            "show_guides" => self.show_guides = flag_setting(key, value)?,
+            _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
-        self.scale = number_setting(key, value, STEREOMETER_SCALE)?;
         Ok(())
     }
 
@@ -111,40 +117,42 @@ impl Module for StereometerModule {
         }
         let center = frame.rect.center();
         let radius = frame.rect.width().min(frame.rect.height()) * 0.45;
-        let guide = Stroke {
-            width: 1.0,
-            color: frame.palette.color(ColorRole::Guide),
-        };
+        if self.show_guides {
+            let guide = Stroke {
+                width: 1.0,
+                color: frame.palette.color(ColorRole::Guide),
+            };
+            frame.renderer.polyline(
+                frame.rect,
+                &[
+                    Point {
+                        x: center.x,
+                        y: center.y - radius,
+                    },
+                    Point {
+                        x: center.x,
+                        y: center.y + radius,
+                    },
+                ],
+                guide,
+            );
+            frame.renderer.polyline(
+                frame.rect,
+                &[
+                    Point {
+                        x: center.x - radius,
+                        y: center.y,
+                    },
+                    Point {
+                        x: center.x + radius,
+                        y: center.y,
+                    },
+                ],
+                guide,
+            );
+        }
         let dot = frame.palette.color(ColorRole::Primary);
         let dot = dot.with_alpha((f32::from(dot.alpha) * 180.0 / 255.0) as u8);
-        frame.renderer.polyline(
-            frame.rect,
-            &[
-                Point {
-                    x: center.x,
-                    y: center.y - radius,
-                },
-                Point {
-                    x: center.x,
-                    y: center.y + radius,
-                },
-            ],
-            guide,
-        );
-        frame.renderer.polyline(
-            frame.rect,
-            &[
-                Point {
-                    x: center.x - radius,
-                    y: center.y,
-                },
-                Point {
-                    x: center.x + radius,
-                    y: center.y,
-                },
-            ],
-            guide,
-        );
         self.circles.clear();
         if let Some(chunk) = snapshot.pcm() {
             let step = chunk.frame_count.div_ceil(512).max(1);

@@ -8,7 +8,7 @@ use crate::{
     },
     extensions::{Registry, RegistryError},
     render::{Point, Rect, RenderTarget, Size},
-    settings::{SettingValue, ViewSetting},
+    settings::{SettingKind, SettingValue, ViewSetting},
     theme::{ColorRole, Palette},
 };
 
@@ -153,6 +153,26 @@ pub fn number_setting(
         .number()
         .map(|number| number.clamp(range.0, range.1))
         .ok_or_else(|| ModuleError::InvalidSetting(key.to_owned()))
+}
+
+/// A view setting value as on/off.
+pub fn flag_setting(key: &str, value: &SettingValue) -> Result<bool, ModuleError> {
+    value
+        .flag()
+        .ok_or_else(|| ModuleError::InvalidSetting(key.to_owned()))
+}
+
+/// An optional overlay of a Module (peak curve, guide lines, readout): hidden on a
+/// new instance, listed under "Overlays".
+pub fn overlay_setting(key: &'static str, label: &'static str, shown: bool) -> ViewSetting {
+    ViewSetting {
+        key,
+        label,
+        section: "Overlays",
+        kind: SettingKind::Toggle,
+        value: SettingValue::Bool(shown),
+        default: SettingValue::Bool(false),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

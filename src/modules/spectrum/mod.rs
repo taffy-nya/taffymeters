@@ -9,9 +9,9 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption, number_setting, spec_from_saved,
+        StyleOption, flag_setting, number_setting, overlay_setting, spec_from_saved,
     },
-    plotting::SpectrumCoordinates,
+    plotting::{SpectrumCoordinates, spectrum_dbfs_at},
     render::{Point, Rect, TextStyle},
     settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, Snapshot},
@@ -46,8 +46,8 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(SpectrumModuleFactory)
 }
 
-/// The Spectrum's data: a shared raw FFT feeding the displayed curve and the peak
-/// curve.
+/// The Spectrum's data: a shared raw FFT feeding the displayed curve, and the peak
+/// curve held from that displayed curve (so Tilt and Gain move both alike).
 struct SpectrumData {
     spec: DataSpec,
     channel: NodeRef,
@@ -63,12 +63,11 @@ fn spectrum_data() -> SpectrumData {
         fft,
         [
             NodeSpec::Tilt { db_per_octave: 0.0 },
-            NodeSpec::Center { db: 0.0 },
             NodeSpec::Gain { db: 0.0 },
         ],
     );
     let peak = spec.add(
-        fft,
+        curve,
         NodeSpec::Peak(PeakConfig {
             hold_ms: 1_000.0,
             decay_db_per_second: 18.0,
@@ -94,13 +93,18 @@ const COLOR_ROLES: &[ColorRole] = &[
 ];
 
 /// Highest frequency shown (the zoom gesture and the setting share these bounds;
-/// the source's Nyquist frequency caps it when drawing), and the shown dB range
-/// below 0 dBFS.
+/// the source's Nyquist frequency caps it when drawing), the level at the bottom
+/// edge, and the shown dB range above it.
 const MAX_FREQUENCY_RANGE: (f32, f32) = (80.0, 96_000.0);
+const BOTTOM_DBFS_RANGE: (f32, f32) = (-160.0, -20.0);
 const DB_RANGE: (f32, f32) = (24.0, 180.0);
-/// Highest frequency and dB range a new Spectrum shows.
+/// What a new Spectrum shows: up to 20 kHz, -100 to 0 dBFS.
 const DEFAULT_MAX_FREQUENCY_HZ: f32 = 20_000.0;
+const DEFAULT_BOTTOM_DBFS: f32 = -100.0;
 const DEFAULT_RANGE_DB: f32 = 100.0;
+/// Wheel zoom per scroll point: the range scales by `exp(-k · dy)`, the pace of the
+/// previous implementation's `1 + 0.001 · dy`.
+const WHEEL_ZOOM_PER_POINT: f32 = 0.001;
 
 struct SpectrumModuleFactory;
 
@@ -131,9 +135,11 @@ impl SpectrumModuleFactory {
             coordinates: SpectrumCoordinates {
                 min_frequency_hz: 20.0,
                 max_frequency_hz: DEFAULT_MAX_FREQUENCY_HZ,
-                min_dbfs: -DEFAULT_RANGE_DB,
-                max_dbfs: 0.0,
+                min_dbfs: DEFAULT_BOTTOM_DBFS,
+                max_dbfs: DEFAULT_BOTTOM_DBFS + DEFAULT_RANGE_DB,
             },
+            show_peak: false,
+            show_readout: false,
             hover_line: String::with_capacity(128),
         })
     }
@@ -174,10 +180,15 @@ struct SpectrumModule {
     style: Box<dyn SpectrumStyle>,
     style_id: &'static str,
     coordinates: SpectrumCoordinates,
+    show_peak: bool,
+    show_readout: bool,
     hover_line: String,
 }
 
 impl SpectrumModule {
+    /// The wheel scales the shown dB range about the bottom edge: the curve grows
+    /// or shrinks upward from it, louder parts leaving through the top. Pinch or
+    /// Ctrl+wheel zooms the frequency axis.
     fn update_range(
         coordinates: &mut SpectrumCoordinates,
         frame: &ModuleFrame<'_>,
@@ -191,9 +202,9 @@ impl SpectrumModule {
             }
             if frame.scroll_delta_y.abs() > 0.01 {
                 let span = coordinates.max_dbfs - coordinates.min_dbfs;
-                let next_span =
-                    (span * (-frame.scroll_delta_y * 0.002).exp()).clamp(DB_RANGE.0, DB_RANGE.1);
-                coordinates.min_dbfs = coordinates.max_dbfs - next_span;
+                let next_span = (span * (-frame.scroll_delta_y * WHEEL_ZOOM_PER_POINT).exp())
+                    .clamp(DB_RANGE.0, DB_RANGE.1);
+                coordinates.max_dbfs = coordinates.min_dbfs + next_span;
             }
         }
     }
@@ -210,8 +221,7 @@ impl SpectrumModule {
         };
         let frequency = coordinates.frequency_at_x(pointer.x, plot);
         let axis_dbfs = coordinates.dbfs_at_y(pointer.y, plot);
-        let bin = (frequency / data.fft.bin_hz).round() as usize;
-        let curve_dbfs = data.spectrum_dbfs.get(bin).copied();
+        let curve_dbfs = spectrum_dbfs_at(data.spectrum_dbfs, data.fft.bin_hz, frequency);
         hover_line.clear();
         let _ = write!(
             hover_line,
@@ -291,6 +301,19 @@ impl Module for SpectrumModule {
                 default: SettingValue::Number(DEFAULT_MAX_FREQUENCY_HZ),
             },
             ViewSetting {
+                key: "bottom_dbfs",
+                label: "Bottom",
+                section: "Display",
+                kind: SettingKind::Number {
+                    min: BOTTOM_DBFS_RANGE.0,
+                    max: BOTTOM_DBFS_RANGE.1,
+                    unit: "dBFS",
+                    logarithmic: false,
+                },
+                value: SettingValue::Number(self.coordinates.min_dbfs),
+                default: SettingValue::Number(DEFAULT_BOTTOM_DBFS),
+            },
+            ViewSetting {
                 key: "range_db",
                 label: "Range",
                 section: "Display",
@@ -303,19 +326,29 @@ impl Module for SpectrumModule {
                 value: SettingValue::Number(self.coordinates.max_dbfs - self.coordinates.min_dbfs),
                 default: SettingValue::Number(DEFAULT_RANGE_DB),
             },
+            overlay_setting("show_peak", "Peak curve", self.show_peak),
+            overlay_setting("show_readout", "Cursor readout", self.show_readout),
         ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        let range = self.coordinates.max_dbfs - self.coordinates.min_dbfs;
         match key {
             "max_frequency_hz" => {
                 self.coordinates.max_frequency_hz =
                     number_setting(key, value, MAX_FREQUENCY_RANGE)?;
             }
-            "range_db" => {
-                self.coordinates.min_dbfs =
-                    self.coordinates.max_dbfs - number_setting(key, value, DB_RANGE)?;
+            // Moving the bottom keeps the range: the whole view shifts.
+            "bottom_dbfs" => {
+                self.coordinates.min_dbfs = number_setting(key, value, BOTTOM_DBFS_RANGE)?;
+                self.coordinates.max_dbfs = self.coordinates.min_dbfs + range;
             }
+            "range_db" => {
+                self.coordinates.max_dbfs =
+                    self.coordinates.min_dbfs + number_setting(key, value, DB_RANGE)?;
+            }
+            "show_peak" => self.show_peak = flag_setting(key, value)?,
+            "show_readout" => self.show_readout = flag_setting(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())
@@ -332,10 +365,12 @@ impl Module for SpectrumModule {
         };
         // One read sees the outputs of a block together, so main and peak share a
         // hop except right after a change, when either may still be the previous one.
+        // A hidden peak curve keeps running so it is current when shown again.
         let peak = self
             .snapshot
             .get(self.peak)
-            .and_then(|peak| peak.spectrum());
+            .and_then(|peak| peak.spectrum())
+            .filter(|_| self.show_peak);
         let data = SpectrumPlot {
             fft: spectrum.fft,
             spectrum_dbfs: &spectrum.bins_dbfs,
@@ -355,13 +390,15 @@ impl Module for SpectrumModule {
             },
             frame.renderer,
         );
-        Self::draw_hover(
-            &self.coordinates,
-            &mut self.hover_line,
-            &mut frame,
-            plot,
-            &data,
-        );
+        if self.show_readout {
+            Self::draw_hover(
+                &self.coordinates,
+                &mut self.hover_line,
+                &mut frame,
+                plot,
+                &data,
+            );
+        }
         ModuleResponse::default()
     }
 
@@ -539,14 +576,15 @@ mod tests {
             }
         }
 
-        // Bins below 100 are quiet: no cell may be centered at a frequency that
-        // rounds to one of them. Bin 99.5 is the boundary.
-        let boundary_x = coordinates.x_for_frequency(99.5 * plot.fft.bin_hz, rect);
+        // Bins below 100 are quiet: a column (cells sit on a pitch one point wider
+        // than the cell) is loud only when it reaches bin 100, its loudest bin.
+        let boundary_x = coordinates.x_for_frequency(100.0 * plot.fft.bin_hz, rect);
+        let pitch = cell_width + 1.0;
         for cell in &target.rects {
-            let center_x = (cell.rect.min.x + cell.rect.max.x) * 0.5;
             assert!(
-                center_x >= boundary_x,
-                "cell at x {center_x} is in the quiet region (< {boundary_x})"
+                cell.rect.min.x + pitch >= boundary_x,
+                "column at x {} lies in the quiet region (< {boundary_x})",
+                cell.rect.min.x
             );
         }
 
@@ -591,6 +629,181 @@ mod tests {
         }
     }
 
+    fn frame_at<'a>(
+        target: &'a mut RecordingTarget,
+        palette: &'a crate::theme::Palette,
+        pointer: Option<Point>,
+        scroll_delta_y: f32,
+    ) -> ModuleFrame<'a> {
+        ModuleFrame {
+            rect: Rect {
+                min: Point { x: 0.0, y: 0.0 },
+                max: Point { x: 800.0, y: 400.0 },
+            },
+            monotonic_time: Duration::from_secs(1),
+            pointer,
+            scroll_delta_y,
+            zoom_delta: 1.0,
+            palette,
+            renderer: target,
+        }
+    }
+
+    #[test]
+    fn curve_reaches_both_edges_even_when_the_first_bin_lies_inside_the_range() {
+        // 256-point FFT at 48 kHz: bins every 187.5 Hz, the first above 20 Hz is far
+        // into the plot. Levels rise linearly with frequency.
+        let bin_hz = 187.5;
+        let bins: Vec<f32> = (0..=128).map(|index| -100.0 + index as f32 * 0.5).collect();
+        let plot = SpectrumPlot {
+            fft: FftMetadata {
+                window: WindowFunction::PeriodicHann,
+                window_size: 256,
+                hop_size: 64,
+                bin_hz,
+                floor_dbfs: -160.0,
+            },
+            spectrum_dbfs: &bins,
+            peak_dbfs: None,
+        };
+        let coordinates = SpectrumCoordinates {
+            min_frequency_hz: 20.0,
+            max_frequency_hz: 20_000.0,
+            min_dbfs: -120.0,
+            max_dbfs: 0.0,
+        };
+        let rect = Rect {
+            min: Point { x: 10.0, y: 0.0 },
+            max: Point { x: 810.0, y: 400.0 },
+        };
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let mut curve = registry
+            .create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)
+            .unwrap();
+        let mut target = RecordingTarget::default();
+        curve.draw(
+            SpectrumStyleContext {
+                snapshot: &plot,
+                coordinates: &coordinates,
+                rect,
+                monotonic_time: Duration::ZERO,
+                palette: &crate::theme::Palette::default(),
+            },
+            &mut target,
+        );
+        let points = &target.polylines[0].points;
+        let (first, last) = (points[0], *points.last().unwrap());
+        assert_eq!(first.x, rect.min.x, "the curve starts at the left edge");
+        assert_eq!(last.x, rect.max.x, "the curve ends at the right edge");
+        // The edge levels are interpolated between the neighboring bins.
+        let level = |frequency: f32| -100.0 + frequency / bin_hz * 0.5;
+        assert!((first.y - coordinates.y_for_dbfs(level(20.0), rect)).abs() < 0.01);
+        assert!((last.y - coordinates.y_for_dbfs(level(20_000.0), rect)).abs() < 0.01);
+    }
+
+    #[test]
+    fn wheel_scales_the_level_axis_about_the_bottom_edge() {
+        let mut coordinates = SpectrumCoordinates {
+            min_frequency_hz: 20.0,
+            max_frequency_hz: 20_000.0,
+            min_dbfs: DEFAULT_BOTTOM_DBFS,
+            max_dbfs: DEFAULT_BOTTOM_DBFS + DEFAULT_RANGE_DB,
+        };
+        let palette = crate::theme::Palette::default();
+        let mut target = RecordingTarget::default();
+        let inside = Some(Point { x: 400.0, y: 200.0 });
+        let frame = frame_at(&mut target, &palette, inside, 200.0);
+        let plot = frame.rect;
+        let before = coordinates.y_for_dbfs(-50.0, plot);
+        SpectrumModule::update_range(&mut coordinates, &frame, plot, 24_000.0);
+        assert_eq!(
+            coordinates.min_dbfs, DEFAULT_BOTTOM_DBFS,
+            "the bottom stays"
+        );
+        assert_eq!(
+            coordinates.y_for_dbfs(DEFAULT_BOTTOM_DBFS, plot),
+            plot.max.y
+        );
+        let range = coordinates.max_dbfs - coordinates.min_dbfs;
+        assert!((range - DEFAULT_RANGE_DB * (-0.2_f32).exp()).abs() < 0.01);
+        let after = coordinates.y_for_dbfs(-50.0, plot);
+        assert!(after < before, "scrolling up makes the curve taller");
+        // Linear about the bottom: heights above it scale by one factor.
+        let height = |y: f32| plot.max.y - y;
+        assert!((height(after) / height(before) - DEFAULT_RANGE_DB / range).abs() < 0.001);
+
+        // Away from the plot the wheel does nothing.
+        let frame = frame_at(&mut target, &palette, None, 200.0);
+        let unchanged = coordinates;
+        SpectrumModule::update_range(&mut coordinates, &frame, plot, 24_000.0);
+        assert_eq!(coordinates, unchanged);
+    }
+
+    #[test]
+    fn peak_curve_follows_gain_and_overlays_are_hidden_until_enabled() {
+        let mut fixture = runtime_fixture();
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let mut module = SpectrumModuleFactory
+            .create_instance(&fixture.services, &registry, None)
+            .unwrap();
+        let gain = module.controller.with_spec(|spec| {
+            spec.nodes()
+                .find(|(_, _, node)| matches!(node, NodeSpec::Gain { .. }))
+                .expect("the Spectrum has a Gain")
+                .0
+        });
+        module
+            .controller
+            .update(|spec| spec.set_node(gain, NodeSpec::Gain { db: 20.0 }))
+            .unwrap();
+        let samples: Vec<f32> = (0..8_192)
+            .flat_map(|frame| {
+                let sample =
+                    0.2 * (2.0 * std::f32::consts::PI * 3_000.0 * frame as f32 / 48_000.0).sin();
+                [sample, sample]
+            })
+            .collect();
+        fixture.capture.write(&samples);
+        let main = main_at(&module, 2, 8_192);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let peak = loop {
+            if let Some(frame) = module.reader.latest(module.peak)
+                && frame.processed_through_frame >= 8_192
+            {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "no peak result");
+            std::thread::yield_now();
+        };
+        // 3 kHz is bin 128 of the 2048-point FFT. A steady tone holds the peak at
+        // the displayed (gained) level, not 20 dB below it at the raw level.
+        let main_db = main.spectrum().unwrap().bins_dbfs[128];
+        let peak_db = peak.spectrum().unwrap().bins_dbfs[128];
+        assert!(
+            (peak_db - main_db).abs() < 1.0,
+            "peak {peak_db} dBFS, curve {main_db} dBFS"
+        );
+
+        let palette = crate::theme::Palette::default();
+        let inside = Some(Point { x: 400.0, y: 200.0 });
+        let mut target = RecordingTarget::default();
+        module.draw(frame_at(&mut target, &palette, inside, 0.0));
+        assert_eq!(target.polylines.len(), 1, "only the curve by default");
+        assert!(target.texts.is_empty(), "no readout by default");
+
+        for key in ["show_peak", "show_readout"] {
+            module
+                .set_view_setting(key, &SettingValue::Bool(true))
+                .unwrap();
+        }
+        let mut target = RecordingTarget::default();
+        module.draw(frame_at(&mut target, &palette, inside, 0.0));
+        assert_eq!(target.polylines.len(), 2, "curve and peak curve");
+        assert_eq!(target.texts.len(), 1, "the cursor readout");
+    }
+
     #[test]
     fn factory_instances_keep_private_state_and_release_only_their_own_analysis() {
         let mut fixture = runtime_fixture();
@@ -605,10 +818,10 @@ mod tests {
             .unwrap();
         wait_for_subscriptions(&fixture.services.dataflow, 2);
 
-        // One shared Channel/FFT/Tilt/Center/Gain chain, one private Peak each.
+        // One shared Channel/FFT/Tilt/Gain chain, one private Peak each.
         let shared_prefix = fixture.services.dataflow.metrics();
         assert_eq!(shared_prefix.active_fft_nodes, 1);
-        assert_eq!(shared_prefix.active_spectrum_nodes, 5);
+        assert_eq!(shared_prefix.active_spectrum_nodes, 4);
         assert_eq!(
             second.controller.spec().node(fft_node(&second)),
             Some(NodeSpec::Fft(FftConfig::default()))
@@ -682,8 +895,8 @@ mod tests {
         let shared = fixture.services.dataflow.metrics();
         assert_eq!(shared.fft_evaluations, 5, "one shared FFT");
         assert_eq!(
-            shared.spectrum_evaluations, 25,
-            "shared Tilt/Center/Gain and two private Peaks per hop"
+            shared.spectrum_evaluations, 20,
+            "shared Tilt/Gain and two private Peaks per hop"
         );
 
         let mut source: Vec<Box<SpectrumModule>> = vec![first, second];

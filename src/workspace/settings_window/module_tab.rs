@@ -507,7 +507,7 @@ fn view_default(setting: &ViewSetting) -> Option<SettingValue> {
         (SettingKind::Number { min, max, .. }, SettingValue::Number(default)) => {
             Some(SettingValue::Number(default.clamp(min, max)))
         }
-        (SettingKind::Choice(_), default) => Some(default.clone()),
+        (SettingKind::Choice(_), default) | (SettingKind::Toggle, default) => Some(default.clone()),
         _ => None,
     }
 }
@@ -573,6 +573,21 @@ fn view_setting_row(
                             value: SettingValue::Choice(option.id.to_owned()),
                         });
                     }
+                }
+            });
+        }
+        SettingKind::Toggle => {
+            let current = setting.value.flag().unwrap_or(false);
+            row(ui, setting.label, |ui| {
+                let mut shown = current;
+                let response = ui.checkbox(&mut shown, "");
+                record(controls, SettingsItem::ViewToggle(setting.key), &response);
+                if response.changed() {
+                    actions.push(WorkspaceAction::SetViewSetting {
+                        instance_id,
+                        key: setting.key,
+                        value: SettingValue::Bool(shown),
+                    });
                 }
             });
         }

@@ -83,6 +83,7 @@ pub(crate) enum SettingsItem {
         id: &'static str,
     },
     ViewNumber(&'static str),
+    ViewToggle(&'static str),
     /// Back to the inherited color (shown while the scope sets its own).
     ResetColor {
         scope: ColorScope,

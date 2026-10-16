@@ -906,8 +906,9 @@ fn w08() -> Result<Value, String> {
     Ok(json!({"rounds":10,"windows":1,"modules":1,"subscriptions":after.subscriptions}))
 }
 
-/// A minimized window stops only work that serves the display: the Spectrum keeps
-/// its Peak and the Waveform keeps recording; restoring brings the curve back.
+/// A minimized window stops only work that serves the display. The Spectrum has
+/// none: its curve chain feeds its Peak, so Tilt/Gain/Peak keep running, as does
+/// the Waveform's recording; restoring brings the curve back.
 fn w09() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
     let mut h = Harness::new(ws);
@@ -919,30 +920,26 @@ fn w09() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let shown = handle.metrics();
     check(
-        shown.active_spectrum_nodes == 4,
-        &format!("visible Spectrum runs Tilt/Center/Gain/Peak: {shown:?}"),
+        shown.active_spectrum_nodes == 3,
+        &format!("visible Spectrum runs Tilt/Gain/Peak: {shown:?}"),
     )?;
     // The viewport reports itself minimized: the pass draws nothing.
     h.window_mut(FIRST_WINDOW)?.minimized = true;
     let minimized = h.frame(vec![]);
     check(minimized.shapes.is_empty(), "a minimized window was drawn")?;
-    let hidden = wait_until(deadline(), "display-only work stopping", || {
-        Some(handle.metrics()).filter(|metrics| metrics.active_spectrum_nodes == 1)
-    })?;
+    let hidden = handle.metrics();
     driver
         .advance_frames(4800, deadline())
         .map_err(|e| e.to_string())?;
     let while_hidden = handle.metrics();
     check(
-        while_hidden.pcm_frames == hidden.pcm_frames + 4800
+        while_hidden.active_spectrum_nodes == 3
+            && while_hidden.pcm_frames == hidden.pcm_frames + 4800
             && while_hidden.spectrum_evaluations > hidden.spectrum_evaluations,
         &format!("minimizing stopped continuous analysis: {hidden:?} -> {while_hidden:?}"),
     )?;
     h.window_mut(FIRST_WINDOW)?.minimized = false;
     h.frame(vec![]);
-    wait_until(deadline(), "display work restarting", || {
-        (handle.metrics().active_spectrum_nodes == 4).then_some(())
-    })?;
     driver
         .advance_frames(4800, deadline())
         .map_err(|e| e.to_string())?;
@@ -953,7 +950,7 @@ fn w09() -> Result<Value, String> {
     )?;
     Ok(json!({
         "visible_spectrum_nodes": shown.active_spectrum_nodes,
-        "hidden_spectrum_nodes": hidden.active_spectrum_nodes,
+        "hidden_spectrum_nodes": while_hidden.active_spectrum_nodes,
         "hidden_pcm_frames": while_hidden.pcm_frames - hidden.pcm_frames,
     }))
 }

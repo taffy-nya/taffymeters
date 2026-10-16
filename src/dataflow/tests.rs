@@ -1213,11 +1213,10 @@ fn steady_state_worker_does_not_allocate_while_readers_keep_up() {
         [
             NodeSpec::Tilt { db_per_octave: 3.0 },
             NodeSpec::Smooth(SmoothConfig::new(10.0, 200.0).unwrap()),
-            NodeSpec::Center { db: 0.0 },
             NodeSpec::Gain { db: 0.0 },
         ],
     );
-    let peak_node = spectrum.add(fft, peak(1_000.0));
+    let peak_node = spectrum.add(curve, peak(1_000.0));
     spectrum.output(curve, Keep::Latest);
     spectrum.output(peak_node, Keep::Latest);
     let history_output = spectrum.output(fft, Keep::Seconds(2.0));

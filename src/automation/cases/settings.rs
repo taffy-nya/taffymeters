@@ -282,7 +282,7 @@ fn s01() -> Result<Value, String> {
     )?;
     let copied = handle.metrics();
     check(
-        copied.active_fft_nodes == 1 && copied.active_spectrum_nodes == 5,
+        copied.active_fft_nodes == 1 && copied.active_spectrum_nodes == 4,
         &format!("copy did not share the pure chain and keep private Peaks: {copied:?}"),
     )?;
 
@@ -336,6 +336,18 @@ fn s01() -> Result<Value, String> {
     check(
         live > 6.0,
         &format!("Tilt did not follow the slider during the drag: {live}"),
+    )?;
+    // Overlays start hidden; the peak curve is shown through its toggle.
+    h.in_settings(&[SettingsItem::ViewToggle("show_peak")])?;
+    let shown_peak = h.ws.observation().module(b).and_then(|m| {
+        m.view
+            .iter()
+            .find(|(key, _)| *key == "show_peak")
+            .map(|(_, value)| value.clone())
+    });
+    check(
+        shown_peak == Some(SettingValue::Bool(true)),
+        &format!("the Peak curve toggle did not show the peak curve: {shown_peak:?}"),
     )?;
     // While a slider is dragged the view keeps the previous result until the
     // changed nodes produce: the copy's 4096-point FFT restarts at every Floor step
@@ -1168,10 +1180,9 @@ fn s05() -> Result<Value, String> {
         {"input":null,"kind":"channel","params":"mono_average"},
         {"input":0,"kind":"fft","params":{"window_size":4_611_686_018_427_387_904_u64,"hop_size":1,"floor_dbfs":-160.0}},
         {"input":1,"kind":"tilt","params":{"db_per_octave":0.0}},
-        {"input":2,"kind":"center","params":{"db":0.0}},
-        {"input":3,"kind":"gain","params":{"db":0.0}},
-        {"input":1,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
-        "outputs":[{"node":4,"keep":"latest"},{"node":5,"keep":"latest"}]}});
+        {"input":2,"kind":"gain","params":{"db":0.0}},
+        {"input":3,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+        "outputs":[{"node":3,"keep":"latest"},{"node":4,"keep":"latest"}]}});
     let file = json!({"format_version":1,"name":"Imported","input":{"kind":"daw_bridge","pipe":"studio-a"},
         "theme":{"preset":"dark"},
         "windows":[{"outer_position":[120.0,140.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
@@ -1545,12 +1556,11 @@ fn s08() -> Result<Value, String> {
             {"input":null,"kind":"channel","params":"mono_average"},
             {"input":0,"kind":"fft","params":{"window_size":2048,"hop_size":512,"floor_dbfs":-160.0}},
             {"input":1,"kind":"tilt","params":{"db_per_octave":0.0}},
-            {"input":2,"kind":"center","params":{"db":0.0}},
-            {"input":3,"kind":"gain","params":{"db":0.0}},
-            {"input":1,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
-            "outputs":[{"node":4,"keep":"latest"},extra]}})
+            {"input":2,"kind":"gain","params":{"db":0.0}},
+            {"input":3,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+            "outputs":[{"node":3,"keep":"latest"},extra]}})
     };
-    let bound = json!({"node":5,"keep":"latest","binding":9});
+    let bound = json!({"node":4,"keep":"latest","binding":9});
     // The second window is always on top, the first (whose place Reset keeps) is
     // not. The second is smaller than an empty window may be, which its Module
     // allows.
@@ -1580,7 +1590,7 @@ fn s08() -> Result<Value, String> {
     settle(&h.ws, 3)?;
     let restored = handle.metrics().active_spectrum_nodes;
     check(
-        restored == 4,
+        restored == 3,
         &format!("the saved binding was not restored as one shared Peak: {restored}"),
     )?;
     let small = h.ws.observation().windows[1].id;

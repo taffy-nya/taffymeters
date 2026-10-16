@@ -50,16 +50,50 @@ impl SpectrumCoordinates {
         self.min_dbfs + fraction * (self.max_dbfs - self.min_dbfs)
     }
 
-    pub fn visible_bin_range(self, bin_hz: f32, bin_count: usize) -> std::ops::Range<usize> {
+    /// Bins strictly inside the shown frequency range; the curve's edge points come
+    /// from `spectrum_dbfs_at` at the range bounds.
+    pub fn interior_bin_range(self, bin_hz: f32, bin_count: usize) -> std::ops::Range<usize> {
         if bin_hz <= 0.0 || bin_count == 0 {
             return 0..0;
         }
-        let start = (self.min_frequency_hz / bin_hz).ceil().max(0.0) as usize;
-        let end = ((self.max_frequency_hz / bin_hz).floor() as usize)
-            .saturating_add(1)
-            .min(bin_count);
+        let start = (self.min_frequency_hz / bin_hz).floor().max(0.0) as usize + 1;
+        let end = ((self.max_frequency_hz / bin_hz).ceil().max(0.0) as usize).min(bin_count);
         start.min(end)..end
     }
+}
+
+/// A binned spectrum's level at `frequency_hz`, interpolated linearly in frequency
+/// between the two nearest bins; `None` outside the bins.
+pub fn spectrum_dbfs_at(bins: &[f32], bin_hz: f32, frequency_hz: f32) -> Option<f32> {
+    if bin_hz <= 0.0 || frequency_hz.is_nan() || frequency_hz < 0.0 {
+        return None;
+    }
+    let position = frequency_hz / bin_hz;
+    let index = position.floor() as usize;
+    let low = *bins.get(index)?;
+    let Some(&high) = bins.get(index + 1) else {
+        // Exactly on the last bin.
+        return (position == index as f32).then_some(low);
+    };
+    let t = position - index as f32;
+    Some(low + (high - low) * t)
+}
+
+/// A binned spectrum's level over `[low_hz, high_hz]` (one display column): the
+/// loudest bin inside it, so narrow peaks survive; a column between two bins takes
+/// the level interpolated at its log-axis center.
+pub fn spectrum_dbfs_between(bins: &[f32], bin_hz: f32, low_hz: f32, high_hz: f32) -> Option<f32> {
+    if bin_hz <= 0.0 || low_hz.is_nan() || high_hz.is_nan() || low_hz < 0.0 || high_hz < low_hz {
+        return None;
+    }
+    let first = (low_hz / bin_hz).ceil() as usize;
+    let end = ((high_hz / bin_hz).floor() as usize)
+        .saturating_add(1)
+        .min(bins.len());
+    if first < end {
+        return bins[first..end].iter().copied().max_by(f32::total_cmp);
+    }
+    spectrum_dbfs_at(bins, bin_hz, (low_hz * high_hz).sqrt())
 }
 
 pub const FREQUENCY_TICKS_HZ: &[f32] = &[

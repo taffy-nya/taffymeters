@@ -5,9 +5,10 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        spec_from_saved,
+        flag_setting, overlay_setting, spec_from_saved,
     },
     render::{ColoredRect, Point, Rect},
+    settings::{SettingValue, ViewSetting},
     snapshot::DataReader,
     theme::ColorRole,
 };
@@ -98,6 +99,7 @@ impl ModuleFactory for LevelMeterFactory {
             peak_holds: Vec::new(),
             last_result_version: 0,
             bars: Vec::with_capacity(12),
+            show_peak: false,
         }))
     }
 }
@@ -110,6 +112,7 @@ struct LevelMeterModule {
     peak_holds: Vec<MeterPeakHold>,
     last_result_version: u64,
     bars: Vec<ColoredRect>,
+    show_peak: bool,
 }
 
 impl Module for LevelMeterModule {
@@ -129,6 +132,18 @@ impl Module for LevelMeterModule {
             ColorRole::High,
             ColorRole::Text,
         ]
+    }
+
+    fn view_settings(&self) -> Vec<ViewSetting> {
+        vec![overlay_setting("show_peak", "Peak hold", self.show_peak)]
+    }
+
+    fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
+        if key != "show_peak" {
+            return Err(ModuleError::UnknownSetting(key.to_owned()));
+        }
+        self.show_peak = flag_setting(key, value)?;
+        Ok(())
     }
 
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
@@ -155,10 +170,14 @@ impl Module for LevelMeterModule {
         for channel in 0..shown_channels {
             let current_lufs = levels.momentary_lufs[channel].clamp(-60.0, 3.0);
             let current_peak_dbfs = amplitude_to_dbfs(levels.sample_peaks[channel]);
-            animating |= self.peak_holds[channel].update(
-                is_new_snapshot.then_some(current_peak_dbfs),
-                frame.monotonic_time,
-            );
+            // A hidden marker does not animate; shown again, it falls from where
+            // it was to the current level at once.
+            if self.show_peak {
+                animating |= self.peak_holds[channel].update(
+                    is_new_snapshot.then_some(current_peak_dbfs),
+                    frame.monotonic_time,
+                );
+            }
             let left = frame.rect.min.x + gap + channel as f32 * (width + gap);
             let bar = Rect {
                 min: Point {
@@ -185,6 +204,9 @@ impl Module for LevelMeterModule {
                 },
                 color: meter_color(frame.palette, normalized),
             });
+            if !self.show_peak {
+                continue;
+            }
             let peak = ((self.peak_holds[channel].value_dbfs + 60.0) / 63.0).clamp(0.0, 1.0);
             let peak_y = bar.max.y - bar.height() * peak;
             self.bars.push(ColoredRect {

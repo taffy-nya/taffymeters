@@ -10,7 +10,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption, number_setting,
+        StyleOption, flag_setting, number_setting, overlay_setting,
     },
     render::{Point, Stroke},
     settings::{SettingValue, ViewSetting},
@@ -66,6 +66,7 @@ impl ModuleFactory for OscilloscopeFactory {
             output,
             channel: ChannelSelection::MonoAverage,
             y_scale: 1.0,
+            show_guide: false,
             style: registry.create_oscilloscope_style(LINE_OSCILLOSCOPE_STYLE_ID)?,
             style_id: LINE_OSCILLOSCOPE_STYLE_ID,
         }))
@@ -80,6 +81,7 @@ struct OscilloscopeModule {
     output: OutputId,
     channel: ChannelSelection,
     y_scale: f32,
+    show_guide: bool,
     style: Box<dyn OscilloscopeStyle>,
     style_id: &'static str,
 }
@@ -115,6 +117,7 @@ impl Module for OscilloscopeModule {
         vec![
             channel_setting(self.channel),
             scale_setting(self.y_scale, OSCILLOSCOPE_SCALE),
+            overlay_setting("show_guide", "Center line", self.show_guide),
         ]
     }
 
@@ -123,6 +126,10 @@ impl Module for OscilloscopeModule {
             "channel" => self.set_channel(channel_value(key, value)?),
             "scale" => {
                 self.y_scale = number_setting(key, value, OSCILLOSCOPE_SCALE)?;
+                Ok(())
+            }
+            "show_guide" => {
+                self.show_guide = flag_setting(key, value)?;
                 Ok(())
             }
             _ => Err(ModuleError::UnknownSetting(key.to_owned())),
@@ -141,24 +148,26 @@ impl Module for OscilloscopeModule {
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };
-        let center_y = frame.rect.center().y;
-        frame.renderer.polyline(
-            frame.rect,
-            &[
-                Point {
-                    x: frame.rect.min.x,
-                    y: center_y,
+        if self.show_guide {
+            let center_y = frame.rect.center().y;
+            frame.renderer.polyline(
+                frame.rect,
+                &[
+                    Point {
+                        x: frame.rect.min.x,
+                        y: center_y,
+                    },
+                    Point {
+                        x: frame.rect.max.x,
+                        y: center_y,
+                    },
+                ],
+                Stroke {
+                    width: 1.0,
+                    color: frame.palette.color(ColorRole::Guide),
                 },
-                Point {
-                    x: frame.rect.max.x,
-                    y: center_y,
-                },
-            ],
-            Stroke {
-                width: 1.0,
-                color: frame.palette.color(ColorRole::Guide),
-            },
-        );
+            );
+        }
         self.style.draw(
             OscilloscopeStyleContext {
                 descriptor: self.reader.descriptor(),
@@ -217,8 +226,8 @@ mod tests {
         module
     }
 
-    /// Guide line plus one persistence trace.
-    const GUIDE_AND_ONE_TRACE: usize = 2;
+    /// One persistence trace (the center line is hidden by default).
+    const ONE_TRACE: usize = 1;
 
     #[test]
     fn reselecting_oscilloscope_channel_keeps_persistence_traces() {
@@ -228,14 +237,14 @@ mod tests {
 
         let mut target = RecordingTarget::default();
         draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.non_empty_polylines(), GUIDE_AND_ONE_TRACE);
+        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
 
         module.set_channel(ChannelSelection::MonoAverage).unwrap();
         target.clear();
         draw(module.as_mut(), &mut target, Duration::from_millis(50));
         assert_eq!(
             target.non_empty_polylines(),
-            GUIDE_AND_ONE_TRACE,
+            ONE_TRACE,
             "reselecting cleared a live trace"
         );
     }
@@ -248,7 +257,7 @@ mod tests {
 
         let mut target = RecordingTarget::default();
         draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.non_empty_polylines(), GUIDE_AND_ONE_TRACE);
+        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
 
         module.set_channel(ChannelSelection::Left).unwrap();
         assert_eq!(module.channel(), Some(ChannelSelection::Left));
@@ -259,8 +268,7 @@ mod tests {
         // must follow Left.
         let mono_y = TEST_RECT.center().y - 0.05 * TEST_RECT.height() * 0.5;
         let left_y = TEST_RECT.center().y - 0.2 * TEST_RECT.height() * 0.5;
-        assert!(target.non_empty_polylines() >= 1, "the guide line stays");
-        for trace in &target.polylines[1..] {
+        for trace in &target.polylines {
             assert!(
                 trace
                     .points
@@ -280,7 +288,7 @@ mod tests {
         fixture.feed(&repeat_frame(&[0.2, -0.1], BLOCK_FRAMES));
         target.clear();
         draw(module.as_mut(), &mut target, Duration::from_millis(100));
-        assert_eq!(target.non_empty_polylines(), GUIDE_AND_ONE_TRACE);
+        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
         let trace = target.polylines.last().unwrap();
         // Left is 0.2 (mono mix would be 0.05): y = center - 0.2 * height / 2.
         let expected_y = TEST_RECT.center().y - 0.2 * TEST_RECT.height() * 0.5;
@@ -301,7 +309,7 @@ mod tests {
 
         let mut target = RecordingTarget::default();
         draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.non_empty_polylines(), GUIDE_AND_ONE_TRACE);
+        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
 
         assert!(matches!(
             module.set_channel(ChannelSelection::Discrete(2)),
@@ -310,6 +318,6 @@ mod tests {
         assert_eq!(module.channel(), Some(ChannelSelection::MonoAverage));
         target.clear();
         draw(module.as_mut(), &mut target, Duration::from_millis(50));
-        assert_eq!(target.non_empty_polylines(), GUIDE_AND_ONE_TRACE);
+        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
     }
 }

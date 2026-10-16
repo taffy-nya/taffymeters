@@ -14,6 +14,7 @@ pub enum SettingValue {
     Number(f32),
     Choice(String),
     Channel(ChannelSelection),
+    Bool(bool),
 }
 
 impl SettingValue {
@@ -27,6 +28,13 @@ impl SettingValue {
     pub fn channel(&self) -> Option<ChannelSelection> {
         match self {
             Self::Channel(channel) => Some(*channel),
+            _ => None,
+        }
+    }
+
+    pub fn flag(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
             _ => None,
         }
     }
@@ -49,6 +57,8 @@ pub enum SettingKind {
     Choice(&'static [Choice]),
     /// One of the source's channels or the mono mix.
     Channel,
+    /// Shown or hidden: a Module's optional overlay (peak curve, guides, readout).
+    Toggle,
 }
 
 /// One view parameter a Module shows in its settings and saves.
@@ -78,7 +88,8 @@ impl ViewSetting {
             {
                 Some(value.clone())
             }
-            (SettingKind::Channel, SettingValue::Channel(_)) => Some(value.clone()),
+            (SettingKind::Channel, SettingValue::Channel(_))
+            | (SettingKind::Toggle, SettingValue::Bool(_)) => Some(value.clone()),
             _ => None,
         }
     }
@@ -94,7 +105,6 @@ pub enum NodeParam {
     Tilt,
     SmoothAttack,
     SmoothRelease,
-    Center,
     Gain,
     PeakHold,
     PeakDecay,
@@ -112,7 +122,6 @@ impl NodeParam {
             NodeSpec::Fft(_) => &[Self::FftWindow, Self::FftHop, Self::FftFloor],
             NodeSpec::Tilt { .. } => &[Self::Tilt],
             NodeSpec::Smooth(_) => &[Self::SmoothAttack, Self::SmoothRelease],
-            NodeSpec::Center { .. } => &[Self::Center],
             NodeSpec::Gain { .. } => &[Self::Gain],
             NodeSpec::Peak(_) => &[Self::PeakHold, Self::PeakDecay],
             NodeSpec::Levels => &[],
@@ -128,7 +137,6 @@ impl NodeParam {
             Self::Tilt => "Tilt",
             Self::SmoothAttack => "Smooth attack",
             Self::SmoothRelease => "Smooth release",
-            Self::Center => "Center",
             Self::Gain => "Gain",
             Self::PeakHold => "Peak hold",
             Self::PeakDecay => "Peak decay",
@@ -141,7 +149,7 @@ impl NodeParam {
             Self::FftFloor => (-240.0, -60.0, "dBFS"),
             Self::Tilt => (-12.0, 12.0, "dB/oct"),
             Self::SmoothAttack | Self::SmoothRelease => (0.0, 2_000.0, "ms"),
-            Self::Center | Self::Gain => (-60.0, 60.0, "dB"),
+            Self::Gain => (-60.0, 60.0, "dB"),
             Self::PeakHold => (0.0, 10_000.0, "ms"),
             Self::PeakDecay => (0.0, 240.0, "dB/s"),
             Self::Channel | Self::FftWindow | Self::FftHop => return None,
@@ -154,7 +162,7 @@ impl NodeParam {
             (Self::Tilt, NodeSpec::Tilt { db_per_octave }) => *db_per_octave,
             (Self::SmoothAttack, NodeSpec::Smooth(smooth)) => smooth.attack_ms,
             (Self::SmoothRelease, NodeSpec::Smooth(smooth)) => smooth.release_ms,
-            (Self::Center, NodeSpec::Center { db }) | (Self::Gain, NodeSpec::Gain { db }) => *db,
+            (Self::Gain, NodeSpec::Gain { db }) => *db,
             (Self::PeakHold, NodeSpec::Peak(peak)) => peak.hold_ms,
             (Self::PeakDecay, NodeSpec::Peak(peak)) => peak.decay_db_per_second,
             _ => return None,
@@ -184,7 +192,6 @@ impl NodeParam {
                 smooth.release_ms = value;
                 NodeSpec::Smooth(smooth)
             }
-            (Self::Center, NodeSpec::Center { .. }) => NodeSpec::Center { db: value },
             (Self::Gain, NodeSpec::Gain { .. }) => NodeSpec::Gain { db: value },
             (Self::PeakHold, NodeSpec::Peak(mut peak)) => {
                 peak.hold_ms = value;
@@ -259,7 +266,6 @@ pub fn node_label(node: &NodeSpec) -> &'static str {
         NodeSpec::Fft(_) => "FFT",
         NodeSpec::Tilt { .. } => "Tilt",
         NodeSpec::Smooth(_) => "Smooth",
-        NodeSpec::Center { .. } => "Center",
         NodeSpec::Gain { .. } => "Gain",
         NodeSpec::Peak(_) => "Peak",
         NodeSpec::Levels => "Levels",
@@ -393,13 +399,13 @@ mod tests {
     #[test]
     fn node_param_reads_nothing_from_a_node_of_another_kind() {
         let gain = NodeSpec::Gain { db: 6.0 };
-        let center = NodeSpec::Center { db: 3.0 };
+        let peak = NodeSpec::Peak(PeakConfig::new(1_000.0, 18.0).unwrap());
         let tilt = NodeSpec::Tilt { db_per_octave: 2.0 };
 
         assert_eq!(NodeParam::Gain.number(&gain), Some(6.0));
-        assert_eq!(NodeParam::Center.number(&center), Some(3.0));
-        assert_eq!(NodeParam::Gain.number(&center), None);
-        assert_eq!(NodeParam::Center.number(&gain), None);
+        assert_eq!(NodeParam::PeakHold.number(&peak), Some(1_000.0));
+        assert_eq!(NodeParam::Gain.number(&peak), None);
+        assert_eq!(NodeParam::PeakHold.number(&gain), None);
         assert_eq!(NodeParam::FftFloor.number(&tilt), None);
         assert_eq!(NodeParam::Tilt.number(&gain), None);
         assert_eq!(NodeParam::PeakHold.number(&NodeSpec::Levels), None);
@@ -410,10 +416,10 @@ mod tests {
 
     #[test]
     fn node_param_with_number_leaves_a_node_of_another_kind_unchanged() {
-        let center = NodeSpec::Center { db: 3.0 };
+        let tilt = NodeSpec::Tilt { db_per_octave: 3.0 };
 
-        assert_eq!(NodeParam::Gain.with_number(center, 1.0), None);
-        assert_eq!(NodeParam::Tilt.with_number(center, 1.0), None);
+        assert_eq!(NodeParam::Gain.with_number(tilt, 1.0), None);
+        assert_eq!(NodeParam::PeakHold.with_number(tilt, 1.0), None);
         assert_eq!(
             NodeParam::Channel.with_number(NodeSpec::Channel(ChannelSelection::Left), 1.0),
             None

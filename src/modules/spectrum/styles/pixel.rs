@@ -1,6 +1,7 @@
 use super::PIXEL_SPECTRUM_STYLE_ID;
 use crate::{
     modules::spectrum::style::{SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory},
+    plotting::spectrum_dbfs_between,
     render::{ColoredRect, Point, Rect, RenderTarget},
 };
 
@@ -33,11 +34,12 @@ impl SpectrumStyle for PixelSpectrumStyle {
         let columns = (context.rect.width() / cell).floor().max(1.0) as usize;
         for column in 0..columns {
             let x = context.rect.min.x + column as f32 * cell;
-            let frequency = context
-                .coordinates
-                .frequency_at_x(x + cell * 0.5, context.rect);
-            let bin = (frequency / context.snapshot.fft.bin_hz).round() as usize;
-            let Some(&dbfs) = context.snapshot.spectrum_dbfs.get(bin) else {
+            let Some(dbfs) = spectrum_dbfs_between(
+                context.snapshot.spectrum_dbfs,
+                context.snapshot.fft.bin_hz,
+                context.coordinates.frequency_at_x(x, context.rect),
+                context.coordinates.frequency_at_x(x + cell, context.rect),
+            ) else {
                 continue;
             };
             let top = context.coordinates.y_for_dbfs(dbfs, context.rect);

@@ -42,7 +42,7 @@ pub struct RuntimeMetrics {
     pub nodes: u64,
     pub active_channel_nodes: u64,
     pub active_fft_nodes: u64,
-    /// Active Tilt / Smooth / Center / Gain / Peak nodes.
+    /// Active Tilt / Smooth / Gain / Peak nodes.
     pub active_spectrum_nodes: u64,
     pub active_level_nodes: u64,
     /// Output rings (nodes some subscription reads).
@@ -116,7 +116,6 @@ enum SpecKey {
     },
     Tilt(u32),
     Smooth(u32, u32),
-    Center(u32),
     Gain(u32),
     Peak(u32, u32),
     Levels,
@@ -135,7 +134,6 @@ impl SpecKey {
             NodeSpec::Smooth(config) => {
                 Self::Smooth(config.attack_ms.to_bits(), config.release_ms.to_bits())
             }
-            NodeSpec::Center { db } => Self::Center(db.to_bits()),
             NodeSpec::Gain { db } => Self::Gain(db.to_bits()),
             NodeSpec::Peak(config) => Self::Peak(
                 config.hold_ms.to_bits(),
@@ -174,10 +172,6 @@ enum Kernel {
         config: SmoothConfig,
         state: SmoothState,
     },
-    Center {
-        db: f32,
-        out: Vec<f32>,
-    },
     Gain {
         db: f32,
         out: Vec<f32>,
@@ -199,7 +193,7 @@ impl Kernel {
     fn spectrum(&self) -> &[f32] {
         match self {
             Self::Fft(fft) => fft.bins_dbfs(),
-            Self::Tilt { out, .. } | Self::Center { out, .. } | Self::Gain { out, .. } => out,
+            Self::Tilt { out, .. } | Self::Gain { out, .. } => out,
             Self::Smooth { state, .. } => &state.values,
             Self::Peak { state, .. } => &state.values,
             _ => &[],
@@ -209,11 +203,7 @@ impl Kernel {
     fn is_spectrum_node(&self) -> bool {
         matches!(
             self,
-            Self::Tilt { .. }
-                | Self::Smooth { .. }
-                | Self::Center { .. }
-                | Self::Gain { .. }
-                | Self::Peak { .. }
+            Self::Tilt { .. } | Self::Smooth { .. } | Self::Gain { .. } | Self::Peak { .. }
         )
     }
 }
@@ -453,10 +443,6 @@ impl Engine {
             Some(NodeSpec::Smooth(config)) => Kernel::Smooth {
                 config,
                 state: SmoothState::default(),
-            },
-            Some(NodeSpec::Center { db }) => Kernel::Center {
-                db,
-                out: Vec::new(),
             },
             Some(NodeSpec::Gain { db }) => Kernel::Gain {
                 db,
@@ -1533,7 +1519,6 @@ impl Engine {
                 Kernel::Smooth { config, state } => {
                     state.process(input, context.processed_through_frame, sample_rate, *config);
                 }
-                Kernel::Center { db, out } => add_with_floor(out, input, -*db, floor),
                 Kernel::Gain { db, out } => add_with_floor(out, input, *db, floor),
                 Kernel::Peak { config, state } => {
                     state.process(input, context.processed_through_frame, sample_rate, *config);
