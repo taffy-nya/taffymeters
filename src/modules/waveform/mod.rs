@@ -6,7 +6,8 @@ use crate::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         number_setting, reference_gain,
     },
-    render::{ColoredRect, Point, Rect},
+    plotting::ColumnRing,
+    render::Color,
     settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
     theme::ColorRole,
@@ -60,8 +61,10 @@ impl ModuleFactory for WaveformFactory {
             channel: ChannelSelection::MonoAverage,
             seconds: DEFAULT_VISIBLE_SECONDS,
             y_scale: 1.0,
-            bars: Vec::with_capacity(2048),
             envelope: WaveformEnvelope::default(),
+            picture: ColumnRing::default(),
+            picture_key: None,
+            column: Vec::new(),
         }))
     }
 
@@ -80,8 +83,25 @@ struct WaveformModule {
     channel: ChannelSelection,
     seconds: f32,
     y_scale: f32,
-    bars: Vec<ColoredRect>,
     envelope: WaveformEnvelope,
+    /// One column per envelope bin, each rasterized once (the newest again while
+    /// it fills).
+    picture: ColumnRing,
+    /// What the pixels were rasterized for; any change redraws them from the
+    /// envelope.
+    picture_key: Option<PictureKey>,
+    /// Pixels of one column, reused while rasterizing.
+    column: Vec<Color>,
+}
+
+/// Inputs of the picture besides the envelope.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PictureKey {
+    columns: usize,
+    rows: usize,
+    frames_per_bin: u64,
+    gain_bits: u32,
+    colors: [Color; 3],
 }
 
 impl WaveformModule {
@@ -128,8 +148,8 @@ impl Module for WaveformModule {
         Ok(())
     }
     fn clear_visual_state(&mut self) {
-        self.bars.clear();
         self.envelope = WaveformEnvelope::default();
+        self.picture_key = None;
     }
 
     fn data(&self) -> Option<&DataController> {
@@ -206,15 +226,19 @@ impl Module for WaveformModule {
             descriptor.generation,
         );
         let envelope = &mut self.envelope;
+        let mut rebuild = false;
         if envelope.key != Some(key) || newest < envelope.through {
             *envelope = WaveformEnvelope {
                 key: Some(key),
                 ..WaveformEnvelope::default()
             };
+            rebuild = true;
         }
         let last_bin = newest.saturating_sub(1) / frames_per_bin;
         let first_bin = (last_bin + 1).saturating_sub(columns);
         let channels = descriptor.channel_count as usize;
+        // First bin that received samples in this draw.
+        let mut changed_from = None;
         for chunk in self.history.iter().filter_map(|entry| entry.frame.pcm()) {
             let chunk_end = chunk.start_frame.saturating_add(chunk.frame_count as u64);
             let start = chunk
@@ -224,6 +248,7 @@ impl Module for WaveformModule {
             if chunk_end <= start {
                 continue;
             }
+            changed_from.get_or_insert(start / frames_per_bin);
             let skip = (start - chunk.start_frame) as usize;
             for (offset, samples) in chunk
                 .interleaved
@@ -250,33 +275,59 @@ impl Module for WaveformModule {
         {
             envelope.bins.pop_front();
         }
-        self.bars.clear();
-        let center = frame.rect.center().y;
-        let half_height = frame.rect.height() * 0.5;
         // The Scale setting is relative to the workspace reference level.
         let gain = self.y_scale * reference_gain(frame.reference_dbfs);
-        for &(bin, minimum, maximum) in &envelope.bins {
-            let column = (bin - first_bin) as f32;
-            let top = center - (maximum * gain).clamp(-1.0, 1.0) * half_height;
-            let bottom = center - (minimum * gain).clamp(-1.0, 1.0) * half_height;
-            let amplitude = maximum.abs().max(minimum.abs()) * gain;
-            self.bars.push(ColoredRect {
-                rect: Rect {
-                    min: Point {
-                        x: frame.rect.min.x + column,
-                        y: top.min(bottom),
-                    },
-                    max: Point {
-                        x: frame.rect.min.x + column + 1.0,
-                        y: top.max(bottom).max(top.min(bottom) + 1.0),
-                    },
-                },
-                color: frame.palette.level(amplitude.clamp(0.0, 1.0)),
-            });
+        let picture_key = PictureKey {
+            columns: columns as usize,
+            rows: frame.rect.height().round().max(1.0) as usize,
+            frames_per_bin,
+            gain_bits: gain.to_bits(),
+            colors: [ColorRole::Low, ColorRole::Mid, ColorRole::High]
+                .map(|role| frame.palette.color(role)),
+        };
+        if rebuild || self.picture_key != Some(picture_key) {
+            self.picture_key = Some(picture_key);
+            self.picture.reset(picture_key.columns, picture_key.rows);
+            changed_from = Some(0);
         }
-        frame.renderer.fill_rects(frame.rect, &self.bars);
+        if let Some(from) = changed_from {
+            let start = envelope.bins.partition_point(|(bin, _, _)| *bin < from);
+            for &(bin, minimum, maximum) in envelope.bins.range(start..) {
+                rasterize_column(
+                    &mut self.column,
+                    picture_key.rows,
+                    minimum * gain,
+                    maximum * gain,
+                    frame.palette,
+                );
+                // Bins without samples (gaps) stay blank.
+                self.picture.write(bin, &self.column, false);
+            }
+        }
+        self.picture.draw(frame.renderer, frame.rect, frame.rect);
         ModuleResponse::default()
     }
+}
+
+/// One Waveform column: the bar from `maximum` down to `minimum` (scaled samples,
+/// ±1 at the edges), at least one row tall, edge rows by their coverage so the
+/// smooth filtering shows no steps.
+fn rasterize_column(
+    pixels: &mut Vec<Color>,
+    rows: usize,
+    minimum: f32,
+    maximum: f32,
+    palette: &crate::theme::Palette,
+) {
+    let half = rows as f32 * 0.5;
+    let top = half - maximum.clamp(-1.0, 1.0) * half;
+    let bottom = (half - minimum.clamp(-1.0, 1.0) * half).max(top + 1.0);
+    let color = palette.level(maximum.abs().max(minimum.abs()).clamp(0.0, 1.0));
+    pixels.clear();
+    pixels.extend((0..rows).map(|row| {
+        let coverage = (bottom.min(row as f32 + 1.0) - top.max(row as f32)).clamp(0.0, 1.0);
+        color.with_alpha((f32::from(color.alpha) * coverage).round() as u8)
+    }));
 }
 
 #[cfg(test)]
@@ -287,7 +338,7 @@ mod tests {
     use crate::{
         dataflow::SOURCE,
         modules::test_support::{
-            BLOCK_FRAMES, PcmFixture, RecordingTarget, TEST_RECT, draw, repeat_frame,
+            BLOCK_FRAMES, PcmFixture, RecordedImage, RecordingTarget, TEST_RECT, draw, repeat_frame,
         },
     };
 
@@ -323,11 +374,31 @@ mod tests {
             .unwrap();
     }
 
-    /// Vertical extent of a bar of constant sample `level` at full scale: the bar is
-    /// one point tall and `level` moves it up (positive) from the center line.
-    fn flat_bar_y(level: f32) -> f32 {
-        // The test frames use a full-scale reference: 1.0 reaches `REFERENCE_HEIGHT`.
-        TEST_RECT.center().y - level * crate::module::REFERENCE_HEIGHT * TEST_RECT.height() * 0.5
+    /// Picture row of the top of a bar of constant sample `level` (the test frames'
+    /// full-scale reference draws 1.0 at `REFERENCE_HEIGHT` of the half height).
+    fn level_row(level: f32) -> usize {
+        let half = TEST_RECT.height() * 0.5;
+        (half - level * crate::module::REFERENCE_HEIGHT * half).round() as usize
+    }
+
+    /// `(column, first row, last row)` of every column that shows a bar, by column.
+    fn bars(image: &RecordedImage) -> Vec<(usize, usize, usize)> {
+        image
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(x, column)| {
+                let first = column.iter().position(|pixel| pixel.alpha > 0)?;
+                let last = column.iter().rposition(|pixel| pixel.alpha > 0)?;
+                Some((x, first, last))
+            })
+            .collect()
+    }
+
+    fn drawn(module: &mut dyn Module, millis: u64) -> RecordedImage {
+        let mut target = RecordingTarget::default();
+        draw(module, &mut target, Duration::from_millis(millis));
+        target.images.pop().expect("the picture is drawn")
     }
 
     #[test]
@@ -368,68 +439,74 @@ mod tests {
     fn history_shorter_than_the_visible_span_is_drawn_from_the_left_edge() {
         let mut fixture = PcmFixture::new(2);
         let mut module = waveform(&fixture, None);
-        let mut target = RecordingTarget::default();
 
         // 1/30 s of a constant 0.5 in the default 4 s window: a thin sliver at the
         // left edge, not stretched across the Module.
         fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
-        draw(module.as_mut(), &mut target, Duration::ZERO);
-        let first = target.rects.clone();
-        assert!(!first.is_empty());
-        assert_eq!(first[0].rect.min.x, TEST_RECT.min.x);
+        let first = drawn(module.as_mut(), 0);
+        assert_eq!(first.rect, TEST_RECT);
+        assert_eq!(first.first_column, 0);
+        let first_bars = bars(&first);
+        assert!(!first_bars.is_empty());
         assert!(
-            first
-                .windows(2)
-                .all(|pair| pair[1].rect.min.x == pair[0].rect.max.x),
-            "bars are contiguous and increasing"
+            first_bars.iter().enumerate().all(|(i, bar)| bar.0 == i),
+            "bars are contiguous from the left edge: {first_bars:?}"
         );
-        let covered = first.last().unwrap().rect.max.x - TEST_RECT.min.x;
         assert!(
-            covered < TEST_RECT.width() * 0.25,
-            "{covered} of {} points covered by 1/30 s of a 4 s window",
-            TEST_RECT.width()
+            first_bars.len() < first.width / 4,
+            "{} of {} columns covered by 1/30 s of a 4 s window",
+            first_bars.len(),
+            first.width
         );
-        for bar in &first {
-            assert_eq!(bar.rect.min.y, flat_bar_y(0.5));
+        for bar in &first_bars {
+            assert_eq!((bar.1, bar.2), (level_row(0.5), level_row(0.5)));
         }
 
         // The next 1/30 s (constant -0.5) extends the picture to the right without
-        // disturbing what was already folded in. The block boundary falls inside a
-        // bar, so that bar holds both levels.
+        // touching what was already drawn. The block boundary falls inside a bar,
+        // so that bar holds both levels and is drawn again; nothing else is.
         fixture.feed(&repeat_frame(&[-0.5, -0.5], BLOCK_FRAMES));
-        target.clear();
-        draw(module.as_mut(), &mut target, Duration::from_millis(50));
-        let second = target.rects.clone();
-        assert!(second.len() > first.len(), "the picture grows to the right");
-        assert_eq!(second[0].rect.min.x, TEST_RECT.min.x);
+        let second = drawn(module.as_mut(), 50);
+        let second_bars = bars(&second);
         assert!(
-            second
-                .windows(2)
-                .all(|pair| pair[1].rect.min.x == pair[0].rect.max.x),
-            "bars stay contiguous"
+            second_bars.len() > first_bars.len(),
+            "the picture grows to the right"
         );
-        let settled = first.len() - 1;
-        assert_eq!(&second[..settled], &first[..settled], "earlier bars kept");
-        let both_levels = second
+        assert!(second_bars.iter().enumerate().all(|(i, bar)| bar.0 == i));
+        let settled = first_bars.len() - 1;
+        assert_eq!(
+            &second_bars[..settled],
+            &first_bars[..settled],
+            "earlier bars kept"
+        );
+        assert!(
+            second.changed.iter().all(|&x| x >= settled),
+            "{:?}",
+            second.changed
+        );
+        let both_levels = second_bars
             .iter()
-            .filter(|bar| bar.rect.min.y == flat_bar_y(0.5) && bar.rect.max.y == flat_bar_y(-0.5))
+            .filter(|bar| bar.1 == level_row(0.5) && bar.2 == level_row(-0.5) - 1)
             .count();
         assert_eq!(both_levels, 1, "one bar spans both halves");
-        assert_eq!(second.last().unwrap().rect.min.y, flat_bar_y(-0.5));
+        let last = second_bars.last().unwrap();
+        assert_eq!((last.1, last.2), (level_row(-0.5), level_row(-0.5)));
+
+        // Nothing new: nothing is drawn again.
+        assert!(drawn(module.as_mut(), 66).changed.is_empty());
     }
 
     #[test]
     fn changing_channel_redraws_the_envelope_from_the_new_channel() {
         let mut fixture = PcmFixture::new(2);
         let mut module = waveform(&fixture, None);
-        let mut target = RecordingTarget::default();
         fixture.feed(&repeat_frame(&[0.5, -0.5], BLOCK_FRAMES));
 
-        // Mono mix of +0.5 / -0.5 is silence.
-        draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.rects.len(), 4);
-        for bar in &target.rects {
-            assert_eq!(bar.rect.min.y, flat_bar_y(0.0));
+        // Mono mix of +0.5 / -0.5 is silence: a flat line at the center.
+        let silent = bars(&drawn(module.as_mut(), 0));
+        assert_eq!(silent.len(), 4);
+        for bar in &silent {
+            assert_eq!((bar.1, bar.2), (level_row(0.0), level_row(0.0)));
         }
 
         // No new audio arrived: the bars must still be rebuilt for the new channel.
@@ -438,28 +515,29 @@ mod tests {
             (ChannelSelection::Right, -0.5),
         ] {
             module.set_channel(channel).unwrap();
-            target.clear();
-            draw(module.as_mut(), &mut target, Duration::from_millis(50));
-            assert_eq!(target.rects.len(), 4, "{channel:?}");
-            for bar in &target.rects {
-                assert_eq!(bar.rect.min.y, flat_bar_y(level), "{channel:?}");
+            let shown = bars(&drawn(module.as_mut(), 50));
+            assert_eq!(shown.len(), 4, "{channel:?}");
+            for bar in &shown {
+                assert_eq!(
+                    (bar.1, bar.2),
+                    (level_row(level), level_row(level)),
+                    "{channel:?}"
+                );
             }
         }
     }
 
     #[test]
-    fn clearing_visual_state_rebuilds_the_same_bars_from_history() {
+    fn clearing_visual_state_rebuilds_the_same_picture_from_history() {
         let mut fixture = PcmFixture::new(2);
         let mut module = waveform(&fixture, None);
-        let mut target = RecordingTarget::default();
         fixture.feed(&repeat_frame(&[0.5, 0.5], 2 * BLOCK_FRAMES));
-        draw(module.as_mut(), &mut target, Duration::ZERO);
-        let before = target.rects.clone();
-        assert!(!before.is_empty());
+        let before = drawn(module.as_mut(), 0);
+        assert!(!bars(&before).is_empty());
 
         module.clear_visual_state();
-        target.clear();
-        draw(module.as_mut(), &mut target, Duration::from_millis(50));
-        assert_eq!(target.rects, before);
+        let after = drawn(module.as_mut(), 50);
+        assert_eq!(after.columns, before.columns);
+        assert_eq!(after.first_column, before.first_column);
     }
 }

@@ -9,10 +9,10 @@ use crate::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         number_setting, spec_from_saved,
     },
-    plotting::SpectrumCoordinates,
-    render::{ColoredRect, Point, Rect},
+    plotting::{ColumnRing, spectrum_dbfs_between},
+    render::Color,
     settings::{SettingKind, SettingValue, ViewSetting},
-    snapshot::{DataReader, HistoryView, ViewFrame},
+    snapshot::{DataReader, HistoryView},
     theme::ColorRole,
 };
 
@@ -25,6 +25,8 @@ const DEFAULT_VISIBLE_SECONDS: f32 = 6.0;
 /// Levels from this far below the reference up to it map to the color scale (the
 /// default Spectrum's range).
 const LEVEL_SPAN_DB: f32 = 90.0;
+/// Lowest frequency shown, at the bottom edge.
+const MIN_FREQUENCY_HZ: f32 = 20.0;
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
 
@@ -66,8 +68,11 @@ impl ModuleFactory for SpectrogramFactory {
             history_output: history,
             history: HistoryView::new(),
             visible_seconds: DEFAULT_VISIBLE_SECONDS,
-            cells: Vec::with_capacity(16_384),
-            band_bins: Vec::with_capacity(96),
+            picture: ColumnRing::default(),
+            picture_key: None,
+            rows: Vec::new(),
+            column: Vec::new(),
+            written_through: 0,
         }))
     }
 
@@ -101,10 +106,28 @@ struct SpectrogramModule {
     history_output: OutputId,
     history: HistoryView,
     visible_seconds: f32,
-    cells: Vec<ColoredRect>,
-    /// FFT bin range `[first, end)` of each band for one bin width, rebuilt per
-    /// draw and again where the columns' FFT changes.
-    band_bins: Vec<(usize, usize)>,
+    /// The picture: one column per FFT hop, each computed once, when its result
+    /// arrives.
+    picture: ColumnRing,
+    /// What the pixels were computed for; any change redraws them from the History.
+    picture_key: Option<PictureKey>,
+    /// Frequency span `[low, high)` in Hz of each picture row, top row first.
+    rows: Vec<(f32, f32)>,
+    /// Colors of one column, reused while filling.
+    column: Vec<Color>,
+    /// Frontier of the newest result in the picture.
+    written_through: u64,
+}
+
+/// Inputs of the picture besides the results.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PictureKey {
+    columns: usize,
+    rows: usize,
+    hop: u64,
+    max_frequency_bits: u32,
+    reference_bits: u32,
+    colors: [Color; 3],
 }
 
 impl SpectrogramModule {
@@ -146,7 +169,7 @@ impl Module for SpectrogramModule {
     }
 
     fn clear_visual_state(&mut self) {
-        self.cells.clear();
+        self.picture_key = None;
     }
 
     fn data(&self) -> Option<&DataController> {
@@ -197,174 +220,140 @@ impl Module for SpectrogramModule {
         }
         self.reader
             .sync_history(self.history_output, &mut self.history);
-        let Some(window_end) = self.history.newest_frontier() else {
+        let window_end = self.history.newest_frontier();
+        let history = self.history.frames();
+        let (Some(newest), Some(window_end)) = (
+            history.last().and_then(|entry| entry.frame.spectrum()),
+            window_end,
+        ) else {
             return ModuleResponse::default();
         };
-
-        let bands = (frame.rect.height() / 5.0).floor().clamp(16.0, 96.0) as usize;
         let sample_rate = self.reader.descriptor().sample_rate_hz as f32;
-        // The frequency axis is fixed; each column maps it with its own FFT. After
-        // an analysis change the earlier columns stay, with their FFT size, hop and
-        // floor, until they scroll out.
-        let axis = SpectrumCoordinates {
-            min_frequency_hz: 20.0,
-            max_frequency_hz: (sample_rate * 0.5).min(20_000.0),
-            min_dbfs: -160.0,
-            max_dbfs: 0.0,
-        };
         let window_frames = (self.visible_seconds * sample_rate).round().max(1.0) as u64;
-        let first_frontier = window_end.saturating_sub(window_frames);
-        let history = self.history.frames();
-        let first_visible =
-            history.partition_point(|entry| entry.frame.processed_through_frame < first_frontier);
-        let visible = &history[first_visible..];
-        let max_columns = (frame.rect.width() / 3.0).floor().max(1.0) as usize;
-        let column_step = visible.len().div_ceil(max_columns).max(1);
-        let band_height = frame.rect.height() / bands as f32;
-        // Each band shows the loudest bin it covers (sampling one bin per band missed
-        // narrow tones on the log axis).
-        let edge = |fraction: f32, bin_hz: f32| {
-            let x = frame.rect.min.x + fraction * frame.rect.width();
-            axis.frequency_at_x(x, frame.rect) / bin_hz
+        // Columns follow the newest result's hop; after an analysis change the
+        // earlier results fill the columns their time covers until they scroll out.
+        let hop = newest.fft.hop_size.max(1) as u64;
+        let max_frequency = (sample_rate * 0.5).min(20_000.0);
+        let key = PictureKey {
+            columns: window_frames.div_ceil(hop).max(1) as usize,
+            rows: frame.rect.height().round().max(1.0) as usize,
+            hop,
+            max_frequency_bits: max_frequency.to_bits(),
+            reference_bits: frame.reference_dbfs.to_bits(),
+            colors: [ColorRole::Low, ColorRole::Mid, ColorRole::High]
+                .map(|role| frame.palette.color(role)),
         };
-        let mut mapped_bin_hz = None;
-        self.cells.clear();
-        for group in visible.chunks(column_step) {
-            let Some(data) = group.last().and_then(|entry| entry.frame.spectrum()) else {
+        if self.picture_key != Some(key) || window_end < self.written_through {
+            self.picture_key = Some(key);
+            self.picture.reset(key.columns, key.rows);
+            self.rows.clear();
+            self.rows.extend((0..key.rows).map(|row| {
+                // Log frequency axis from 20 Hz, highest frequency at the top.
+                let at = |fraction: f32| {
+                    MIN_FREQUENCY_HZ * (max_frequency / MIN_FREQUENCY_HZ).powf(fraction)
+                };
+                let top = 1.0 - row as f32 / key.rows as f32;
+                let bottom = 1.0 - (row + 1) as f32 / key.rows as f32;
+                (at(bottom), at(top))
+            }));
+            self.written_through = window_end.saturating_sub(window_frames + hop);
+        }
+        let start = history
+            .partition_point(|entry| entry.frame.processed_through_frame <= self.written_through);
+        let top_dbfs = frame.reference_dbfs;
+        for entry in &history[start..] {
+            let Some(data) = entry.frame.spectrum() else {
                 continue;
             };
-            let fft = data.fft;
-            let Some((x0, x1, _)) =
-                history_column(group, frame.rect, window_end, window_frames, fft.hop_size)
-            else {
-                continue;
-            };
-            if mapped_bin_hz != Some(fft.bin_hz) {
-                mapped_bin_hz = Some(fft.bin_hz);
-                self.band_bins.clear();
-                self.band_bins.extend((0..bands).map(|band| {
-                    let first = edge(band as f32 / bands as f32, fft.bin_hz).floor() as usize;
-                    let end = (edge((band + 1) as f32 / bands as f32, fft.bin_hz).ceil() as usize)
-                        .max(first + 1);
-                    (first, end)
-                }));
-            }
-            let bins = &data.bins_dbfs;
-            let top_dbfs = frame.reference_dbfs;
-            for (band, &(first_bin, end_bin)) in self.band_bins.iter().enumerate() {
-                let y0 = frame.rect.max.y - (band + 1) as f32 * band_height;
-                let y1 = y0 + band_height + 0.5;
-                let end_bin = end_bin.min(bins.len());
-                let Some(dbfs) = bins
-                    .get(first_bin..end_bin)
-                    .and_then(|bins| bins.iter().copied().reduce(f32::max))
+            let column = entry.frame.processed_through_frame / hop;
+            self.column.clear();
+            self.column.extend(self.rows.iter().map(|&(low, high)| {
+                let Some(dbfs) = spectrum_dbfs_between(&data.bins_dbfs, data.fft.bin_hz, low, high)
                 else {
-                    continue;
+                    return Color::rgba(0, 0, 0, 0);
                 };
                 // Same levels as a default Spectrum: the reference at the top.
-                let normalized = ((dbfs - top_dbfs) / LEVEL_SPAN_DB + 1.0).clamp(0.0, 1.0);
-                if normalized <= 0.015 {
-                    continue;
-                }
-                self.cells.push(ColoredRect {
-                    rect: Rect {
-                        min: Point { x: x0, y: y0 },
-                        max: Point { x: x1, y: y1 },
-                    },
-                    color: frame.palette.heat(normalized),
-                });
-            }
+                frame.palette.heat((dbfs - top_dbfs) / LEVEL_SPAN_DB + 1.0)
+            }));
+            // Columns this result's time covers that no result wrote (a larger hop)
+            // take it too; a gap the History marks stays blank.
+            self.picture.write(column, &self.column, !entry.gap_before);
+            self.written_through = entry.frame.processed_through_frame;
         }
-        frame.renderer.fill_rects(frame.rect, &self.cells);
+        self.picture.draw(frame.renderer, frame.rect, frame.rect);
         ModuleResponse::default()
     }
 }
 
-fn history_column(
-    group: &[ViewFrame],
-    rect: Rect,
-    window_end: u64,
-    window_frames: u64,
-    hop_size: usize,
-) -> Option<(f32, f32, &ViewFrame)> {
-    if group.is_empty() || group.iter().any(|entry| entry.gap_before) {
-        return None;
-    }
-    let entry = group.last()?;
-    let represented_frames = (hop_size as u64).saturating_mul(group.len() as u64);
-    let column_start = entry
-        .frame
-        .processed_through_frame
-        .saturating_sub(represented_frames);
-    let x0 = x_for_frontier(rect, window_end, window_frames, column_start);
-    let x1 = x_for_frontier(
-        rect,
-        window_end,
-        window_frames,
-        entry.frame.processed_through_frame,
-    );
-    Some((x0, (x1 + 0.5).max(x0 + 1.0).min(rect.max.x), entry))
-}
-
-fn x_for_frontier(rect: Rect, window_end: u64, window_frames: u64, frontier: u64) -> f32 {
-    let age = window_end.saturating_sub(frontier).min(window_frames) as f32;
-    rect.max.x - age / window_frames.max(1) as f32 * rect.width()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
-    use crate::{
-        dataflow::{FftMetadata, WindowFunction},
-        snapshot::{Frame, FrameData, SpectrumData},
-    };
+    use crate::modules::test_support::{PcmFixture, RecordingTarget, TEST_RECT, draw};
 
-    fn history_frame(frontier: u64, gap_before: bool) -> ViewFrame {
-        ViewFrame {
-            frame: Arc::new(Frame {
-                result_version: frontier,
-                processed_through_frame: frontier,
-                source_sequence: 0,
-                discontinuity_count: 0,
-                discontinuity_before: gap_before,
-                data: FrameData::Spectrum(SpectrumData {
-                    fft: FftMetadata {
-                        window: WindowFunction::PeriodicHann,
-                        window_size: 2048,
-                        hop_size: 512,
-                        bin_hz: 48_000.0 / 2048.0,
-                        floor_dbfs: -160.0,
-                    },
-                    bins_dbfs: vec![-20.0],
-                }),
-            }),
-            gap_before,
-        }
+    /// `frames` of a 3 kHz sine at -12 dBFS, continuing from frame `start`.
+    fn tone(start: usize, frames: usize) -> Vec<f32> {
+        (start..start + frames)
+            .map(|frame| 0.25 * (std::f32::consts::TAU * 3_000.0 * frame as f32 / 48_000.0).sin())
+            .collect()
+    }
+
+    /// Image row whose frequency span contains `frequency_hz` (top row is highest).
+    fn row_of(frequency_hz: f32, rows: usize) -> usize {
+        let fraction = (frequency_hz / MIN_FREQUENCY_HZ).ln() / (20_000.0 / MIN_FREQUENCY_HZ).ln();
+        ((1.0 - fraction) * rows as f32) as usize
     }
 
     #[test]
-    fn history_columns_keep_fixed_source_time_positions_and_visible_gaps() {
-        let rect = Rect {
-            min: Point { x: 0.0, y: 0.0 },
-            max: Point { x: 600.0, y: 300.0 },
-        };
-        let window_end = 288_000;
-        let window_frames = 288_000;
-        let newest = history_frame(window_end, false);
-        let (x0, x1, _) = history_column(&[newest], rect, window_end, window_frames, 512).unwrap();
-        assert!(x0 > 598.0, "one hop must not fill the six-second window");
-        assert_eq!(x1, rect.max.x);
-        assert_eq!(
-            x_for_frontier(rect, window_end, window_frames, 144_000),
-            300.0
-        );
+    fn each_result_writes_one_column_once_and_the_picture_only_scrolls() {
+        let mut fixture = PcmFixture::new(1);
+        let mut module = SpectrogramFactory
+            .create(&fixture.services, &Registry::default(), None)
+            .unwrap();
+        let mut target = RecordingTarget::default();
+        // The first window and four hops: five results, at frontiers 2048..=4096,
+        // i.e. columns 4..=8 of 512 frames.
+        let mut fed = 2_048 + 4 * 512;
+        fixture.feed(&tone(0, fed));
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        let first = target.images.pop().expect("the picture is drawn");
+        assert_eq!(first.height, TEST_RECT.height() as usize);
+        // 6 s at 48 kHz in 512-frame hops.
+        assert_eq!(first.width, 563);
+        assert_eq!(first.rect, TEST_RECT);
+        assert_eq!(first.changed, vec![4, 5, 6, 7, 8]);
+        // Not yet full: the picture grows from the left edge.
+        assert_eq!(first.first_column, 0);
+        let newest = 8;
+        let rows = first.height;
+        let tone_row = &first.columns[newest][row_of(3_000.0, rows)];
+        let bass_row = &first.columns[newest][row_of(50.0, rows)];
+        assert!(tone_row.alpha > 200, "the 3 kHz tone shows: {tone_row:?}");
+        assert_eq!(bass_row.alpha, 0, "silence at 50 Hz stays background");
 
-        let after_gap = history_frame(window_end, true);
+        // Redrawn without new results: nothing uploads, nothing moves.
+        draw(module.as_mut(), &mut target, Duration::from_millis(16));
+        let again = target.images.pop().unwrap();
         assert!(
-            history_column(&[after_gap], rect, window_end, window_frames, 512).is_none(),
-            "a discontinuity must leave a visible blank column"
+            again.changed.is_empty(),
+            "redrawing rewrote {:?}",
+            again.changed
         );
+        assert_eq!(again.first_column, first.first_column);
+        assert_eq!(again.columns, first.columns);
+
+        // One more hop: exactly one new column, next to the previous one.
+        fixture.feed(&tone(fed, 512));
+        fed += 512;
+        draw(module.as_mut(), &mut target, Duration::from_millis(32));
+        let scrolled = target.images.pop().unwrap();
+        assert_eq!(scrolled.changed, vec![newest + 1]);
+        for (x, column) in scrolled.columns.iter().enumerate() {
+            if x != newest + 1 {
+                assert_eq!(column, &first.columns[x], "column {x} changed");
+            }
+        }
+        assert!(fed > 0);
     }
 }

@@ -164,11 +164,109 @@ pub struct Circle {
     pub color: Color,
 }
 
+/// An RGBA image a Module keeps and updates in place, stored column by column (views
+/// that scroll in time write one column per result). A render target uploads only
+/// the columns marked changed since it last drew the image; one it has not seen
+/// (first draw, another window) gets the whole image.
+pub struct Image {
+    id: u64,
+    width: usize,
+    height: usize,
+    /// Column-major: column `x` is `pixels[x * height..(x + 1) * height]`, top first.
+    pixels: Vec<Color>,
+    /// Bumped by `resize`: a target holding another revision uploads everything.
+    revision: u64,
+    /// Columns changed since the last upload, each once (`marked` flags them).
+    dirty: Vec<usize>,
+    marked: Vec<bool>,
+}
+
+impl Image {
+    pub fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+            revision: 0,
+            dirty: Vec::new(),
+            marked: Vec::new(),
+        }
+    }
+
+    /// Process-unique identity, for render targets that cache uploaded images.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Set the size and clear every pixel to transparent; the next draw uploads
+    /// the whole image.
+    pub fn resize(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+        self.pixels.clear();
+        self.pixels.resize(width * height, Color::rgba(0, 0, 0, 0));
+        self.revision += 1;
+        self.dirty.clear();
+        self.marked.clear();
+        self.marked.resize(width, false);
+    }
+
+    /// Column `x` (top first) to rewrite; it is uploaded on the next draw.
+    pub fn column_mut(&mut self, x: usize) -> &mut [Color] {
+        if !self.marked[x] {
+            self.marked[x] = true;
+            self.dirty.push(x);
+        }
+        &mut self.pixels[x * self.height..(x + 1) * self.height]
+    }
+
+    pub fn column(&self, x: usize) -> &[Color] {
+        &self.pixels[x * self.height..(x + 1) * self.height]
+    }
+
+    /// Columns changed since the last upload.
+    pub fn changed_columns(&self) -> &[usize] {
+        &self.dirty
+    }
+
+    /// A target uploaded the image: nothing is pending any more.
+    pub fn mark_uploaded(&mut self) {
+        for &x in &self.dirty {
+            self.marked[x] = false;
+        }
+        self.dirty.clear();
+    }
+}
+
+impl Default for Image {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub trait RenderTarget {
     fn polyline(&mut self, clip: Rect, points: &[Point], stroke: Stroke);
     fn fill_rects(&mut self, clip: Rect, rects: &[ColoredRect]);
     fn circles(&mut self, clip: Rect, circles: &[Circle]);
     fn text(&mut self, clip: Rect, position: Point, text: &str, style: TextStyle);
+    /// `image` stretched over `rect` with smooth (bilinear) filtering, read as a
+    /// horizontal ring: the left edge shows column `first_column`, the image wraps
+    /// around to `first_column - 1` at the right edge.
+    fn scrolling_image(&mut self, clip: Rect, rect: Rect, image: &mut Image, first_column: usize);
 }
 
 pub struct EguiRenderTarget<'a> {
@@ -239,6 +337,97 @@ impl RenderTarget for EguiRenderTarget<'_> {
             to_egui_color(style.color),
         );
     }
+
+    fn scrolling_image(&mut self, clip: Rect, rect: Rect, image: &mut Image, first_column: usize) {
+        use eframe::egui::{
+            Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Rect as UvRect, pos2,
+        };
+        let (width, height) = (image.width(), image.height());
+        if width == 0 || height == 0 {
+            return;
+        }
+        let ctx = self.painter.ctx().clone();
+        let pass = ctx.cumulative_pass_nr();
+        let cache_id = Id::new("taffymeters.images");
+        // Shared per context; the map itself is not copied per draw.
+        let cache = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<std::sync::Arc<std::sync::Mutex<ImageCache>>>(cache_id)
+                .clone()
+        });
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Textures of images no longer drawn (closed Modules) are released.
+        cache
+            .entries
+            .retain(|_, entry| pass.saturating_sub(entry.last_pass) < IMAGE_IDLE_PASSES);
+        // Repeat wraps the ring horizontally; linear filtering smooths both axes.
+        let options = TextureOptions::LINEAR_REPEAT;
+        let entry = match cache.entries.get_mut(&image.id()) {
+            Some(entry) if entry.revision == image.revision() => {
+                for &x in image.changed_columns() {
+                    let column = ColorImage::new(
+                        [1, height],
+                        image
+                            .column(x)
+                            .iter()
+                            .map(|&color| to_egui_color(color))
+                            .collect(),
+                    );
+                    entry.texture.set_partial([x, 0], column, options);
+                }
+                entry
+            }
+            _ => {
+                let mut pixels = Vec::with_capacity(width * height);
+                for y in 0..height {
+                    pixels.extend((0..width).map(|x| to_egui_color(image.column(x)[y])));
+                }
+                let texture = ctx.load_texture(
+                    format!("taffymeters.image.{}", image.id()),
+                    ColorImage::new([width, height], pixels),
+                    options,
+                );
+                cache.entries.insert(
+                    image.id(),
+                    CachedImage {
+                        texture,
+                        revision: image.revision(),
+                        last_pass: pass,
+                    },
+                );
+                cache.entries.get_mut(&image.id()).expect("just inserted")
+            }
+        };
+        entry.last_pass = pass;
+        let texture = entry.texture.id();
+        image.mark_uploaded();
+        // Sample texel centers at the edges: the left edge shows `first_column`, the
+        // right edge the column before it, the top and bottom rows unblended.
+        let (w, h) = (width as f32, height as f32);
+        let u0 = (first_column % width) as f32 / w + 0.5 / w;
+        let uv = UvRect::from_min_max(pos2(u0, 0.5 / h), pos2(u0 + 1.0 - 1.0 / w, 1.0 - 0.5 / h));
+        let mut mesh = Mesh::with_texture(texture);
+        mesh.add_rect_with_uv(to_egui_rect(rect), uv, Color32::WHITE);
+        self.painter
+            .with_clip_rect(to_egui_rect(clip))
+            .add(Shape::mesh(mesh));
+    }
+}
+
+/// Passes an uploaded image may go undrawn before its texture is released.
+const IMAGE_IDLE_PASSES: u64 = 600;
+
+/// Textures of the `Image`s drawn in one egui context, by image id.
+#[derive(Default)]
+struct ImageCache {
+    entries: std::collections::HashMap<u64, CachedImage>,
+}
+
+struct CachedImage {
+    texture: eframe::egui::TextureHandle,
+    revision: u64,
+    last_pass: u64,
 }
 
 fn to_egui_rect(rect: Rect) -> eframe::egui::Rect {

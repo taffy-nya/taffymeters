@@ -14,7 +14,7 @@ use crate::{
     },
     dataflow::Dataflow,
     module::{Module, ModuleFrame, ModuleResponse, ModuleServices},
-    render::{Circle, ColoredRect, Point, Rect, RenderTarget, Stroke, TextStyle},
+    render::{Circle, ColoredRect, Image, Point, Rect, RenderTarget, Stroke, TextStyle},
     theme::Palette,
 };
 
@@ -38,6 +38,18 @@ pub(crate) struct RecordedText {
     pub text: String,
 }
 
+/// One `scrolling_image` call: where, from which column, and what it uploaded.
+pub(crate) struct RecordedImage {
+    pub rect: Rect,
+    pub first_column: usize,
+    pub width: usize,
+    pub height: usize,
+    /// Columns the image marked changed since it was last drawn.
+    pub changed: Vec<usize>,
+    /// Column-major copy of the pixels, top first.
+    pub columns: Vec<Vec<crate::render::Color>>,
+}
+
 /// Keeps every draw call it receives.
 #[derive(Default)]
 pub(crate) struct RecordingTarget {
@@ -45,6 +57,7 @@ pub(crate) struct RecordingTarget {
     pub rects: Vec<ColoredRect>,
     pub circles: Vec<Circle>,
     pub texts: Vec<RecordedText>,
+    pub images: Vec<RecordedImage>,
 }
 
 impl RecordingTarget {
@@ -82,6 +95,20 @@ impl RenderTarget for RecordingTarget {
             position,
             text: text.to_owned(),
         });
+    }
+
+    fn scrolling_image(&mut self, _clip: Rect, rect: Rect, image: &mut Image, first_column: usize) {
+        self.images.push(RecordedImage {
+            rect,
+            first_column,
+            width: image.width(),
+            height: image.height(),
+            changed: image.changed_columns().to_vec(),
+            columns: (0..image.width())
+                .map(|x| image.column(x).to_vec())
+                .collect(),
+        });
+        image.mark_uploaded();
     }
 }
 
