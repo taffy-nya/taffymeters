@@ -7,7 +7,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        REFERENCE_HEADROOM_DB, number_setting, spec_from_saved,
+        number_setting, spec_from_saved,
     },
     plotting::SpectrumCoordinates,
     render::{ColoredRect, Point, Rect},
@@ -22,9 +22,9 @@ const HISTORY_SECONDS: f32 = 8.0;
 const MIN_VISIBLE_SECONDS: f32 = 0.5;
 /// Visible span a new Spectrogram shows.
 const DEFAULT_VISIBLE_SECONDS: f32 = 6.0;
-/// Levels from this far below the top (the reference plus its headroom) to the top
-/// map to the color scale.
-const LEVEL_SPAN_DB: f32 = 100.0;
+/// Levels from this far below the reference up to it map to the color scale (the
+/// default Spectrum's range).
+const LEVEL_SPAN_DB: f32 = 90.0;
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
 
@@ -76,12 +76,19 @@ impl ModuleFactory for SpectrogramFactory {
     }
 }
 
-/// The default analysis: Channel(Mono) → FFT, the FFT output kept as History.
+/// The default analysis: Channel(Mono) → FFT → Tilt (as the Spectrum's), the
+/// tilted spectrum kept as History.
 fn spectrogram_spec() -> (DataSpec, NodeRef, OutputId) {
     let mut spec = DataSpec::new();
     let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
     let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
-    let history = spec.output(fft, Keep::Seconds(HISTORY_SECONDS));
+    let tilt = spec.add(
+        fft,
+        NodeSpec::Tilt {
+            db_per_octave: super::DEFAULT_TILT_DB_PER_OCTAVE,
+        },
+    );
+    let history = spec.output(tilt, Keep::Seconds(HISTORY_SECONDS));
     (spec, channel, history)
 }
 
@@ -243,7 +250,7 @@ impl Module for SpectrogramModule {
                 }));
             }
             let bins = &data.bins_dbfs;
-            let top_dbfs = frame.reference_dbfs + REFERENCE_HEADROOM_DB;
+            let top_dbfs = frame.reference_dbfs;
             for (band, &(first_bin, end_bin)) in self.band_bins.iter().enumerate() {
                 let y0 = frame.rect.max.y - (band + 1) as f32 * band_height;
                 let y1 = y0 + band_height + 0.5;
@@ -254,7 +261,7 @@ impl Module for SpectrogramModule {
                 else {
                     continue;
                 };
-                // Same span as a default Spectrum: the reference sits near the top.
+                // Same levels as a default Spectrum: the reference at the top.
                 let normalized = ((dbfs - top_dbfs) / LEVEL_SPAN_DB + 1.0).clamp(0.0, 1.0);
                 if normalized <= 0.015 {
                     continue;

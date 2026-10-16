@@ -13,7 +13,8 @@ use crate::{
 };
 
 use crate::modules::pcm_view::{
-    channel_setting, channel_value, pcm_spec, scale_setting, subscribe_pcm,
+    SCALE_RANGE, channel_setting, channel_value, pcm_spec, scale_setting, subscribe_pcm,
+    wheel_scale,
 };
 
 /// Visible span a new Waveform shows.
@@ -23,7 +24,6 @@ const DEFAULT_VISIBLE_SECONDS: f32 = 4.0;
 const WAVEFORM_HISTORY_SECONDS: f32 = 10.0;
 /// Shortest Waveform span.
 const WAVEFORM_MIN_SECONDS: f32 = 0.25;
-const WAVEFORM_SCALE: (f32, f32) = (0.1, 20.0);
 
 pub const WAVEFORM_MODULE_ID: &str = "taffymeters.waveform";
 
@@ -161,7 +161,7 @@ impl Module for WaveformModule {
                 value: SettingValue::Number(self.seconds),
                 default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
             },
-            scale_setting(self.y_scale, WAVEFORM_SCALE),
+            scale_setting(self.y_scale),
         ]
     }
 
@@ -171,7 +171,7 @@ impl Module for WaveformModule {
             "visible_seconds" => {
                 self.seconds = number_setting(key, value, self.visible_range())?;
             }
-            "scale" => self.y_scale = number_setting(key, value, WAVEFORM_SCALE)?,
+            "scale" => self.y_scale = number_setting(key, value, SCALE_RANGE)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())
@@ -186,10 +186,7 @@ impl Module for WaveformModule {
                 let (min, max) = self.visible_range();
                 self.seconds = (self.seconds / frame.zoom_delta).clamp(min, max);
             }
-            if frame.scroll_delta_y.abs() > 0.01 {
-                self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp())
-                    .clamp(WAVEFORM_SCALE.0, WAVEFORM_SCALE.1);
-            }
+            self.y_scale = wheel_scale(self.y_scale, &frame);
         }
         self.reader.sync_history(self.output, &mut self.history);
         let Some(newest) = self.history.newest_frontier() else {

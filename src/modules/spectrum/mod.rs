@@ -9,7 +9,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        REFERENCE_HEADROOM_DB, StyleOption, flag_setting, number_setting, overlay_setting,
+        StyleOption, WHEEL_ZOOM_PER_POINT, flag_setting, number_setting, overlay_setting,
         spec_from_saved,
     },
     plotting::{SpectrumCoordinates, spectrum_dbfs_at},
@@ -47,8 +47,8 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(SpectrumModuleFactory)
 }
 
-/// The Spectrum's data: a shared raw FFT feeding the displayed curve, and the peak
-/// curve held from that displayed curve (so Tilt and Gain move both alike).
+/// The Spectrum's data: a shared raw FFT feeding the tilted, displayed curve, and
+/// the peak curve held from that displayed curve (so Tilt moves both alike).
 struct SpectrumData {
     spec: DataSpec,
     channel: NodeRef,
@@ -60,12 +60,11 @@ fn spectrum_data() -> SpectrumData {
     let mut spec = DataSpec::new();
     let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
     let fft = spec.add(channel, NodeSpec::Fft(FftConfig::default()));
-    let curve = spec.chain(
+    let curve = spec.add(
         fft,
-        [
-            NodeSpec::Tilt { db_per_octave: 0.0 },
-            NodeSpec::Gain { db: 0.0 },
-        ],
+        NodeSpec::Tilt {
+            db_per_octave: super::DEFAULT_TILT_DB_PER_OCTAVE,
+        },
     );
     let peak = spec.add(
         curve,
@@ -97,16 +96,14 @@ const COLOR_ROLES: &[ColorRole] = &[
 /// the source's Nyquist frequency caps it when drawing), the bottom edge relative
 /// to the workspace reference level, and the shown dB range above it.
 const MAX_FREQUENCY_RANGE: (f32, f32) = (80.0, 96_000.0);
-const BOTTOM_DB_RANGE: (f32, f32) = (-150.0, -10.0);
-const DB_RANGE: (f32, f32) = (24.0, 180.0);
-/// What a new Spectrum shows: up to 20 kHz, from 90 dB below the reference to
-/// 10 dB above it, so the reference sits at `REFERENCE_HEIGHT`.
+const BOTTOM_DB_RANGE: (f32, f32) = (-150.0, -30.0);
+const DB_RANGE: (f32, f32) = (30.0, 150.0);
+/// What a new Spectrum shows: up to 20 kHz, the 90 dB below the reference. A sine
+/// at the reference touches the top; tilted music, whose loudest bins sit about
+/// 20 dB below its sample peak, tops out near the height the linear views reach.
 const DEFAULT_MAX_FREQUENCY_HZ: f32 = 20_000.0;
-const DEFAULT_RANGE_DB: f32 = 100.0;
-const DEFAULT_BOTTOM_DB: f32 = REFERENCE_HEADROOM_DB - DEFAULT_RANGE_DB;
-/// Wheel zoom per scroll point: the range scales by `exp(-k · dy)`, the pace of the
-/// previous implementation's `1 + 0.001 · dy`.
-const WHEEL_ZOOM_PER_POINT: f32 = 0.001;
+const DEFAULT_RANGE_DB: f32 = 90.0;
+const DEFAULT_BOTTOM_DB: f32 = -DEFAULT_RANGE_DB;
 
 struct SpectrumModuleFactory;
 
@@ -736,22 +733,22 @@ mod tests {
     }
 
     #[test]
-    fn peak_curve_follows_gain_and_overlays_are_hidden_until_enabled() {
+    fn peak_curve_follows_tilt_and_overlays_are_hidden_until_enabled() {
         let mut fixture = runtime_fixture();
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
         let mut module = SpectrumModuleFactory
             .create_instance(&fixture.services, &registry, None)
             .unwrap();
-        let gain = module.controller.with_spec(|spec| {
+        let tilt = module.controller.with_spec(|spec| {
             spec.nodes()
-                .find(|(_, _, node)| matches!(node, NodeSpec::Gain { .. }))
-                .expect("the Spectrum has a Gain")
+                .find(|(_, _, node)| matches!(node, NodeSpec::Tilt { .. }))
+                .expect("the Spectrum has a Tilt")
                 .0
         });
         module
             .controller
-            .update(|spec| spec.set_node(gain, NodeSpec::Gain { db: 20.0 }))
+            .update(|spec| spec.set_node(tilt, NodeSpec::Tilt { db_per_octave: 9.0 }))
             .unwrap();
         let samples: Vec<f32> = (0..8_192)
             .flat_map(|frame| {
@@ -773,7 +770,7 @@ mod tests {
             std::thread::yield_now();
         };
         // 3 kHz is bin 128 of the 2048-point FFT. A steady tone holds the peak at
-        // the displayed (gained) level, not 20 dB below it at the raw level.
+        // the displayed (tilted, +14 dB there) level, not at the raw level.
         let main_db = main.spectrum().unwrap().bins_dbfs[128];
         let peak_db = peak.spectrum().unwrap().bins_dbfs[128];
         assert!(
@@ -813,10 +810,10 @@ mod tests {
             .unwrap();
         wait_for_subscriptions(&fixture.services.dataflow, 2);
 
-        // One shared Channel/FFT/Tilt/Gain chain, one private Peak each.
+        // One shared Channel/FFT/Tilt chain, one private Peak each.
         let shared_prefix = fixture.services.dataflow.metrics();
         assert_eq!(shared_prefix.active_fft_nodes, 1);
-        assert_eq!(shared_prefix.active_spectrum_nodes, 4);
+        assert_eq!(shared_prefix.active_spectrum_nodes, 3);
         assert_eq!(
             second.controller.spec().node(fft_node(&second)),
             Some(NodeSpec::Fft(FftConfig::default()))
@@ -890,8 +887,8 @@ mod tests {
         let shared = fixture.services.dataflow.metrics();
         assert_eq!(shared.fft_evaluations, 5, "one shared FFT");
         assert_eq!(
-            shared.spectrum_evaluations, 20,
-            "shared Tilt/Gain and two private Peaks per hop"
+            shared.spectrum_evaluations, 15,
+            "a shared Tilt and two private Peaks per hop"
         );
 
         let mut source: Vec<Box<SpectrumModule>> = vec![first, second];

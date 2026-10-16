@@ -282,7 +282,7 @@ fn s01() -> Result<Value, String> {
     )?;
     let copied = handle.metrics();
     check(
-        copied.active_fft_nodes == 1 && copied.active_spectrum_nodes == 4,
+        copied.active_fft_nodes == 1 && copied.active_spectrum_nodes == 3,
         &format!("copy did not share the pure chain and keep private Peaks: {copied:?}"),
     )?;
 
@@ -393,7 +393,7 @@ fn s01() -> Result<Value, String> {
         "FFT size did not change for the copy only (hop keeps its 1/4)",
     )?;
     check(
-        tilt_of(&spec_a) == 0.0 && tilt_of(&spec_b) > 6.0,
+        tilt_of(&spec_a) == crate::modules::DEFAULT_TILT_DB_PER_OCTAVE && tilt_of(&spec_b) > 6.0,
         &format!(
             "Tilt slider: original {}, copy {}",
             tilt_of(&spec_a),
@@ -1206,10 +1206,9 @@ fn s05() -> Result<Value, String> {
     let huge_fft = json!({"type_id":SPECTRUM_MODULE_ID,"data":{"nodes":[
         {"input":null,"kind":"channel","params":"mono_average"},
         {"input":0,"kind":"fft","params":{"window_size":4_611_686_018_427_387_904_u64,"hop_size":1,"floor_dbfs":-160.0}},
-        {"input":1,"kind":"tilt","params":{"db_per_octave":0.0}},
-        {"input":2,"kind":"gain","params":{"db":0.0}},
-        {"input":3,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
-        "outputs":[{"node":3,"keep":"latest"},{"node":4,"keep":"latest"}]}});
+        {"input":1,"kind":"tilt","params":{"db_per_octave":4.5}},
+        {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+        "outputs":[{"node":2,"keep":"latest"},{"node":3,"keep":"latest"}]}});
     let file = json!({"format_version":1,"name":"Imported","input":{"kind":"daw_bridge","pipe":"studio-a"},
         "theme":{"preset":"dark"},
         "windows":[{"outer_position":[120.0,140.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
@@ -1611,12 +1610,11 @@ fn s08() -> Result<Value, String> {
         json!({"type_id":SPECTRUM_MODULE_ID,"data":{"nodes":[
             {"input":null,"kind":"channel","params":"mono_average"},
             {"input":0,"kind":"fft","params":{"window_size":2048,"hop_size":512,"floor_dbfs":-160.0}},
-            {"input":1,"kind":"tilt","params":{"db_per_octave":0.0}},
-            {"input":2,"kind":"gain","params":{"db":0.0}},
-            {"input":3,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
-            "outputs":[{"node":3,"keep":"latest"},extra]}})
+            {"input":1,"kind":"tilt","params":{"db_per_octave":4.5}},
+            {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+            "outputs":[{"node":2,"keep":"latest"},extra]}})
     };
-    let bound = json!({"node":4,"keep":"latest","binding":9});
+    let bound = json!({"node":3,"keep":"latest","binding":9});
     // The second window is always on top, the first (whose place Reset keeps) is
     // not. The second is smaller than an empty window may be, which its Module
     // allows.
@@ -1646,7 +1644,7 @@ fn s08() -> Result<Value, String> {
     settle(&h.ws, 3)?;
     let restored = handle.metrics().active_spectrum_nodes;
     check(
-        restored == 3,
+        restored == 2,
         &format!("the saved binding was not restored as one shared Peak: {restored}"),
     )?;
     let small = h.ws.observation().windows[1].id;

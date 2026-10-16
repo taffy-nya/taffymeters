@@ -11,6 +11,11 @@ mod waveform;
 
 use crate::extensions::{Registry, RegistryError};
 
+/// Tilt new Spectrum and Spectrogram instances apply around 1 kHz. Music falls
+/// roughly 3–8 dB per octave per FFT bin; 4.5 dB/oct is the common analyzer
+/// default (FabFilter Pro-Q) and looks balanced without hiding the bass.
+pub(crate) const DEFAULT_TILT_DB_PER_OCTAVE: f32 = 4.5;
+
 pub use empty::EMPTY_MODULE_ID;
 pub use level_meter::LEVEL_METER_MODULE_ID;
 pub use oscilloscope::{

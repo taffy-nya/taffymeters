@@ -11,9 +11,7 @@ use crate::{
     theme::ColorRole,
 };
 
-use crate::modules::pcm_view::{scale_setting, subscribe_pcm};
-
-const STEREOMETER_SCALE: (f32, f32) = (0.5, 10.0);
+use crate::modules::pcm_view::{SCALE_RANGE, scale_setting, subscribe_pcm, wheel_scale};
 
 pub const STEREOMETER_MODULE_ID: &str = "taffymeters.stereometer";
 
@@ -76,14 +74,14 @@ impl Module for StereometerModule {
 
     fn view_settings(&self) -> Vec<ViewSetting> {
         vec![
-            scale_setting(self.scale, STEREOMETER_SCALE),
+            scale_setting(self.scale),
             overlay_setting("show_guides", "Axes", self.show_guides),
         ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
         match key {
-            "scale" => self.scale = number_setting(key, value, STEREOMETER_SCALE)?,
+            "scale" => self.scale = number_setting(key, value, SCALE_RANGE)?,
             "show_guides" => self.show_guides = flag_setting(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
@@ -91,14 +89,7 @@ impl Module for StereometerModule {
     }
 
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
-        if frame
-            .pointer
-            .is_some_and(|point| frame.rect.contains(point))
-            && frame.scroll_delta_y.abs() > 0.01
-        {
-            self.scale = (self.scale * (frame.scroll_delta_y * 0.002).exp())
-                .clamp(STEREOMETER_SCALE.0, STEREOMETER_SCALE.1);
-        }
+        self.scale = wheel_scale(self.scale, &frame);
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };

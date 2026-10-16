@@ -38,12 +38,14 @@ pub struct ModuleFrame<'a> {
 pub const DEFAULT_REFERENCE_DBFS: f32 = -12.0;
 /// Range of the reference level the settings offer.
 pub const REFERENCE_DBFS_RANGE: (f32, f32) = (-60.0, 0.0);
-/// Fraction of a view's height (of the half height for signed views) at which a
-/// signal at the reference level is drawn.
+/// Fraction of a linear view's height (of the half height for signed views) at
+/// which a sample at the reference level is drawn. dB views (Spectrum,
+/// Spectrogram) put the reference at their top instead: a tilted spectrum's
+/// loudest bins sit well below the sample peak.
 pub const REFERENCE_HEIGHT: f32 = 0.9;
-/// dB views show this much above the reference (the reference sits at
-/// `1 - 10/100` of a 100 dB span, i.e. `REFERENCE_HEIGHT`).
-pub const REFERENCE_HEADROOM_DB: f32 = 10.0;
+/// Wheel zoom of every view per scroll point: the zoomed quantity scales by
+/// `exp(k · dy)`, the pace of the previous implementation's `1 + 0.001 · dy`.
+pub const WHEEL_ZOOM_PER_POINT: f32 = 0.001;
 
 /// Linear view gain: a sample at the reference level reaches `REFERENCE_HEIGHT`
 /// of the (half) height.

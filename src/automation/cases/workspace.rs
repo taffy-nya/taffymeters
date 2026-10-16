@@ -907,8 +907,8 @@ fn w08() -> Result<Value, String> {
 }
 
 /// A minimized window stops only work that serves the display. The Spectrum has
-/// none: its curve chain feeds its Peak, so Tilt/Gain/Peak keep running, as does
-/// the Waveform's recording; restoring brings the curve back.
+/// none: its Tilt feeds its Peak, so both keep running, as does the Waveform's
+/// recording; restoring brings the curve back.
 fn w09() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
     let mut h = Harness::new(ws);
@@ -920,8 +920,8 @@ fn w09() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let shown = handle.metrics();
     check(
-        shown.active_spectrum_nodes == 3,
-        &format!("visible Spectrum runs Tilt/Gain/Peak: {shown:?}"),
+        shown.active_spectrum_nodes == 2,
+        &format!("visible Spectrum runs Tilt/Peak: {shown:?}"),
     )?;
     // The viewport reports itself minimized: the pass draws nothing.
     h.window_mut(FIRST_WINDOW)?.minimized = true;
@@ -933,7 +933,7 @@ fn w09() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let while_hidden = handle.metrics();
     check(
-        while_hidden.active_spectrum_nodes == 3
+        while_hidden.active_spectrum_nodes == 2
             && while_hidden.pcm_frames == hidden.pcm_frames + 4800
             && while_hidden.spectrum_evaluations > hidden.spectrum_evaluations,
         &format!("minimizing stopped continuous analysis: {hidden:?} -> {while_hidden:?}"),

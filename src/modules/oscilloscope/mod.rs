@@ -18,11 +18,11 @@ use crate::{
     theme::ColorRole,
 };
 
-use crate::modules::pcm_view::{channel_setting, channel_value, scale_setting, subscribe_pcm};
+use crate::modules::pcm_view::{
+    SCALE_RANGE, channel_setting, channel_value, scale_setting, subscribe_pcm, wheel_scale,
+};
 
 pub const OSCILLOSCOPE_MODULE_ID: &str = "taffymeters.oscilloscope";
-
-const OSCILLOSCOPE_SCALE: (f32, f32) = (0.2, 10.0);
 
 const OSCILLOSCOPE_STYLES: &[StyleOption] = &[
     StyleOption {
@@ -116,7 +116,7 @@ impl Module for OscilloscopeModule {
     fn view_settings(&self) -> Vec<ViewSetting> {
         vec![
             channel_setting(self.channel),
-            scale_setting(self.y_scale, OSCILLOSCOPE_SCALE),
+            scale_setting(self.y_scale),
             overlay_setting("show_guide", "Center line", self.show_guide),
         ]
     }
@@ -125,7 +125,7 @@ impl Module for OscilloscopeModule {
         match key {
             "channel" => self.set_channel(channel_value(key, value)?),
             "scale" => {
-                self.y_scale = number_setting(key, value, OSCILLOSCOPE_SCALE)?;
+                self.y_scale = number_setting(key, value, SCALE_RANGE)?;
                 Ok(())
             }
             "show_guide" => {
@@ -137,14 +137,7 @@ impl Module for OscilloscopeModule {
     }
 
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
-        if frame
-            .pointer
-            .is_some_and(|point| frame.rect.contains(point))
-            && frame.scroll_delta_y.abs() > 0.01
-        {
-            self.y_scale = (self.y_scale * (frame.scroll_delta_y * 0.002).exp())
-                .clamp(OSCILLOSCOPE_SCALE.0, OSCILLOSCOPE_SCALE.1);
-        }
+        self.y_scale = wheel_scale(self.y_scale, &frame);
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };

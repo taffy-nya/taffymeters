@@ -2,7 +2,7 @@
 
 use crate::{
     dataflow::{ChannelSelection, DataSpec, DataSubscription, Keep, OutputId, SOURCE},
-    module::{ModuleError, ModuleServices, spec_from_saved},
+    module::{ModuleError, ModuleFrame, ModuleServices, WHEEL_ZOOM_PER_POINT, spec_from_saved},
     settings::{SettingKind, SettingValue, ViewSetting},
 };
 
@@ -24,20 +24,38 @@ pub(super) fn subscribe_pcm(
     Ok((services.dataflow.subscribe(spec)?, output))
 }
 
+/// Scale of every PCM view, relative to the workspace reference level: 1× in the
+/// middle of a ±20 dB (logarithmic) range.
+pub(super) const SCALE_RANGE: (f32, f32) = (0.1, 10.0);
+
 /// Every PCM view starts at unit scale.
-pub(super) fn scale_setting(value: f32, range: (f32, f32)) -> ViewSetting {
+pub(super) fn scale_setting(value: f32) -> ViewSetting {
     ViewSetting {
         key: "scale",
         label: "Scale",
         section: "Display",
         kind: SettingKind::Number {
-            min: range.0,
-            max: range.1,
+            min: SCALE_RANGE.0,
+            max: SCALE_RANGE.1,
             unit: "×",
             logarithmic: true,
         },
         value: SettingValue::Number(value),
         default: SettingValue::Number(1.0),
+    }
+}
+
+/// `scale` after the wheel turned over the view (unchanged elsewhere).
+pub(super) fn wheel_scale(scale: f32, frame: &ModuleFrame<'_>) -> f32 {
+    if frame
+        .pointer
+        .is_some_and(|point| frame.rect.contains(point))
+        && frame.scroll_delta_y.abs() > 0.01
+    {
+        (scale * (frame.scroll_delta_y * WHEEL_ZOOM_PER_POINT).exp())
+            .clamp(SCALE_RANGE.0, SCALE_RANGE.1)
+    } else {
+        scale
     }
 }
 

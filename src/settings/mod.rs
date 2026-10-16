@@ -146,12 +146,14 @@ impl NodeParam {
     /// Range and unit of numeric parameters (`None` for choices).
     pub fn range(self) -> Option<(f32, f32, &'static str)> {
         Some(match self {
-            Self::FftFloor => (-240.0, -60.0, "dBFS"),
-            Self::Tilt => (-12.0, 12.0, "dB/oct"),
+            Self::FftFloor => (-200.0, -120.0, "dBFS"),
+            // Centered on the 4.5 dB/oct default: music already falls with
+            // frequency, so negative tilts are of little use.
+            Self::Tilt => (0.0, 9.0, "dB/oct"),
             Self::SmoothAttack | Self::SmoothRelease => (0.0, 2_000.0, "ms"),
             Self::Gain => (-60.0, 60.0, "dB"),
-            Self::PeakHold => (0.0, 10_000.0, "ms"),
-            Self::PeakDecay => (0.0, 240.0, "dB/s"),
+            Self::PeakHold => (0.0, 3_000.0, "ms"),
+            Self::PeakDecay => (0.0, 48.0, "dB/s"),
             Self::Channel | Self::FftWindow | Self::FftHop => return None,
         })
     }
@@ -461,9 +463,9 @@ mod tests {
         );
         let fft = NodeSpec::Fft(FftConfig::default());
         assert_eq!(
-            NodeParam::FftFloor.with_number(fft, -100.0),
+            NodeParam::FftFloor.with_number(fft, -140.0),
             Some(NodeSpec::Fft(FftConfig {
-                floor_dbfs: -100.0,
+                floor_dbfs: -140.0,
                 ..FftConfig::default()
             }))
         );
