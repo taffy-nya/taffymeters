@@ -136,6 +136,13 @@ impl ColumnRing {
     /// result covering several columns' time).
     pub fn write(&mut self, column: u64, pixels: &[Color], fill_skipped: bool) {
         let columns = self.image.width() as u64;
+        // A column older than the picture holds would overwrite a newer one.
+        if self
+            .newest
+            .is_some_and(|newest| column.saturating_add(columns) <= newest)
+        {
+            return;
+        }
         if let Some(newest) = self.newest
             && column > newest
         {
@@ -155,6 +162,23 @@ impl ColumnRing {
         self.newest = Some(self.newest.map_or(column, |newest| newest.max(column)));
     }
 
+    /// Move the newest edge on to absolute `column` without data (the source is
+    /// silent): the columns passed are cleared, so earlier content keeps scrolling
+    /// away.
+    pub fn advance(&mut self, column: u64) {
+        let Some(newest) = self.newest.filter(|&newest| column > newest) else {
+            return;
+        };
+        let columns = self.image.width() as u64;
+        let first = (newest + 1).max(column.saturating_sub(columns - 1));
+        for passed in first..=column {
+            self.image
+                .column_mut((passed % columns) as usize)
+                .fill(Color::rgba(0, 0, 0, 0));
+        }
+        self.newest = Some(column);
+    }
+
     /// Draw over `rect`, smoothly filtered, moving toward `flow`.
     pub fn draw(&mut self, renderer: &mut dyn RenderTarget, clip: Rect, rect: Rect, flow: Flow) {
         let Some(newest) = self.newest else {
@@ -170,6 +194,117 @@ impl ColumnRing {
             ((newest + 1) % columns) as usize,
             flow,
         );
+    }
+}
+
+/// How long the source may deliver nothing before a time view treats it as
+/// silent and keeps moving (results normally arrive every 10–35 ms).
+pub const SILENCE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Source time of a time view that keeps moving while the source delivers
+/// nothing: a system loopback sends no samples at all while nothing plays, so the
+/// source frontier stops. After `SILENCE_GRACE` the view's "now" runs on with the
+/// display clock; when samples arrive again, the silence shown stays as a gap and
+/// later frames are placed after it. Positions are source frames plus the silence
+/// inserted before them.
+#[derive(Default)]
+pub struct ViewClock {
+    /// Newest source frontier seen, and when (display time; moved on by the time
+    /// the source is paused, so a pause does not count as silence).
+    newest: Option<(u64, std::time::Duration)>,
+    /// Display time of the previous update.
+    last_update: std::time::Duration,
+    /// The source was paused at the previous update.
+    paused: bool,
+    /// Frames of silence shown after `newest`.
+    pending: u64,
+    /// `(frame, total)`: frames from `frame` on are placed `total` frames later.
+    gaps: Vec<(u64, u64)>,
+}
+
+impl ViewClock {
+    /// Take the source's newest `frontier` at display time `now`; returns the
+    /// view's current end position (exclusive).
+    pub fn update(
+        &mut self,
+        frontier: u64,
+        now: std::time::Duration,
+        sample_rate: f32,
+        paused: bool,
+    ) -> u64 {
+        match self.newest {
+            Some((seen, _)) if frontier > seen => {
+                if self.pending > 0 {
+                    self.gaps.push((seen, self.total() + self.pending));
+                    self.pending = 0;
+                }
+                self.newest = Some((frontier, now));
+            }
+            Some((seen, at)) if frontier == seen => {
+                if paused {
+                    // Frozen: the time since the previous update does not count.
+                    let held = now.saturating_sub(self.last_update);
+                    self.newest = Some((seen, at + held));
+                } else {
+                    let silent = now.saturating_sub(at).saturating_sub(SILENCE_GRACE);
+                    self.pending = (silent.as_secs_f64() * f64::from(sample_rate)) as u64;
+                }
+            }
+            // First data, or a source that started over.
+            _ => {
+                *self = Self {
+                    newest: Some((frontier, now)),
+                    ..Self::default()
+                }
+            }
+        }
+        self.last_update = now;
+        self.paused = paused;
+        self.frontier_position(frontier) + self.pending
+    }
+
+    /// When the view must be drawn again without new data: once the grace runs
+    /// out, then every frame while the silence pushes the newest data (ending at
+    /// position `data_end`) out of a picture `span` positions long; then never,
+    /// until data arrives. A paused source holds the picture still.
+    pub fn repaint_after(
+        &self,
+        now: std::time::Duration,
+        data_end: u64,
+        span: u64,
+    ) -> Option<std::time::Duration> {
+        let (frontier, at) = self.newest?;
+        if self.paused {
+            return None;
+        }
+        if self.pending == 0 {
+            let wait = (at + SILENCE_GRACE).saturating_sub(now);
+            return Some(wait.max(std::time::Duration::from_millis(1)));
+        }
+        let end = self.frontier_position(frontier) + self.pending;
+        (end.saturating_sub(data_end) < span).then_some(crate::module::FRAME_INTERVAL)
+    }
+
+    /// Position of source frame `frame`.
+    pub fn position(&self, frame: u64) -> u64 {
+        frame + self.offset(|gap| frame >= gap)
+    }
+
+    /// Position of a result frontier (the end of the frames it covers).
+    pub fn frontier_position(&self, frontier: u64) -> u64 {
+        frontier + self.offset(|gap| frontier > gap)
+    }
+
+    fn offset(&self, after: impl Fn(u64) -> bool) -> u64 {
+        self.gaps
+            .iter()
+            .rev()
+            .find(|(gap, _)| after(*gap))
+            .map_or(0, |(_, total)| *total)
+    }
+
+    fn total(&self) -> u64 {
+        self.gaps.last().map_or(0, |(_, total)| *total)
     }
 }
 

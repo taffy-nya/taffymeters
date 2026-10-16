@@ -1,12 +1,12 @@
 use crate::{
-    audio::SourceReader,
+    audio::{SourceReader, SourceState},
     dataflow::{ChannelSelection, DataController, DataSpec, DataSubscription, Keep, OutputId},
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         flow_setting, flow_value, number_setting, reference_gain,
     },
-    plotting::ColumnRing,
+    plotting::{ColumnRing, ViewClock},
     render::{Color, Flow},
     settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
@@ -66,6 +66,7 @@ impl ModuleFactory for WaveformFactory {
             picture: ColumnRing::default(),
             picture_key: None,
             column: Vec::new(),
+            clock: ViewClock::default(),
         }))
     }
 
@@ -94,6 +95,8 @@ struct WaveformModule {
     picture_key: Option<PictureKey>,
     /// Pixels of one column, reused while rasterizing.
     column: Vec<Color>,
+    /// Source time of the picture, running on while the source is silent.
+    clock: ViewClock,
 }
 
 /// Inputs of the picture besides the envelope.
@@ -226,6 +229,15 @@ impl Module for WaveformModule {
         let columns = along.floor().max(1.0) as u64;
         let span_frames = ((self.seconds * descriptor.sample_rate_hz as f32) as u64).max(1);
         let frames_per_bin = (span_frames / columns).max(1);
+        // A silent loopback delivers nothing: "now" runs on with the display clock
+        // so the picture keeps moving until its content has scrolled out.
+        let paused = self.source.source_status().state == SourceState::Paused;
+        let now_end = self.clock.update(
+            newest,
+            frame.monotonic_time,
+            descriptor.sample_rate_hz as f32,
+            paused,
+        );
         let key = (
             frames_per_bin,
             self.channel,
@@ -307,13 +319,24 @@ impl Module for WaveformModule {
                     maximum * gain,
                     frame.palette,
                 );
-                // Bins without samples (gaps) stay blank.
-                self.picture.write(bin, &self.column, false);
+                // Bins without samples (gaps) stay blank. Silence shown moves the
+                // bins on by whole columns.
+                let shift = self.clock.position(bin * frames_per_bin) - bin * frames_per_bin;
+                self.picture
+                    .write(bin + shift / frames_per_bin, &self.column, false);
             }
         }
+        let shift = now_end - newest;
+        self.picture.advance(last_bin + shift / frames_per_bin);
         self.picture
             .draw(frame.renderer, frame.rect, frame.rect, self.flow);
-        ModuleResponse::default()
+        ModuleResponse {
+            repaint_after: self.clock.repaint_after(
+                frame.monotonic_time,
+                self.clock.frontier_position(newest),
+                columns * frames_per_bin,
+            ),
+        }
     }
 }
 
@@ -590,6 +613,48 @@ mod tests {
             module
                 .set_view_setting("flow", &SettingValue::Choice("sideways".to_owned()))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn a_silent_source_keeps_the_picture_moving_until_it_has_scrolled_out() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        let screen =
+            |image: &RecordedImage, x: usize| (x + image.width - image.first_column) % image.width;
+        let at = |module: &mut dyn Module, millis: u64| {
+            let mut target = RecordingTarget::default();
+            let response = draw(module, &mut target, Duration::from_millis(millis));
+            (target.images.pop().unwrap(), response.repaint_after)
+        };
+        fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
+        let (start, wake) = at(module.as_mut(), 0);
+        let newest = bars(&start).last().unwrap().0;
+        assert_eq!(screen(&start, newest), start.width - 1);
+        assert!(wake.is_some_and(|wake| wake <= crate::plotting::SILENCE_GRACE));
+
+        // Nothing arrives for a second: the picture moves on by the time past the
+        // grace (4 s over 400 columns: 100 columns a second), still animating.
+        let (moved, wake) = at(module.as_mut(), 1_000);
+        let shift = start.width - 1 - screen(&moved, newest);
+        assert!((84..=86).contains(&shift), "moved {shift} columns");
+        assert_eq!(wake, Some(crate::module::FRAME_INTERVAL));
+
+        // Once everything has scrolled out the picture is empty and stays still.
+        let (gone, wake) = at(module.as_mut(), 5_000);
+        assert!(bars(&gone).is_empty());
+        assert_eq!(wake, None);
+
+        // Audio again: it enters at the right edge, after the silence shown.
+        fixture.feed(&repeat_frame(&[-0.5, -0.5], BLOCK_FRAMES));
+        let (back, _) = at(module.as_mut(), 5_050);
+        let shown = bars(&back);
+        assert!(!shown.is_empty());
+        assert_eq!(screen(&back, shown.last().unwrap().0), back.width - 1);
+        assert!(
+            shown
+                .iter()
+                .all(|bar| (bar.1, bar.2) == (level_row(-0.5), level_row(-0.5)))
         );
     }
 }

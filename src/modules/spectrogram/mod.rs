@@ -1,5 +1,5 @@
 use crate::{
-    audio::SourceReader,
+    audio::{SourceReader, SourceState},
     dataflow::{
         ChannelSelection, DataController, DataSpec, DataSubscription, FftConfig, Keep, NodeRef,
         NodeSpec, OutputId, SOURCE,
@@ -9,7 +9,7 @@ use crate::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         flow_setting, flow_value, number_setting, spec_from_saved,
     },
-    plotting::{ColumnRing, spectrum_dbfs_between},
+    plotting::{ColumnRing, ViewClock, spectrum_dbfs_between},
     render::{Color, Flow},
     settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
@@ -81,6 +81,7 @@ impl ModuleFactory for SpectrogramFactory {
             rows: Vec::new(),
             column: Vec::new(),
             written_through: 0,
+            clock: ViewClock::default(),
         }))
     }
 
@@ -127,6 +128,8 @@ struct SpectrogramModule {
     column: Vec<Color>,
     /// Frontier of the newest result in the picture.
     written_through: u64,
+    /// Source time of the picture, running on while the source is silent.
+    clock: ViewClock,
 }
 
 /// Inputs of the picture besides the results.
@@ -266,6 +269,12 @@ impl Module for SpectrogramModule {
             return ModuleResponse::default();
         };
         let sample_rate = self.reader.descriptor().sample_rate_hz as f32;
+        // A silent loopback delivers nothing: "now" runs on with the display clock
+        // so the picture keeps moving until its content has scrolled out.
+        let paused = self.source.source_status().state == SourceState::Paused;
+        let now_end = self
+            .clock
+            .update(window_end, frame.monotonic_time, sample_rate, paused);
         let window_frames = (self.visible_seconds * sample_rate).round().max(1.0) as u64;
         // Columns follow the newest result's hop; after an analysis change the
         // earlier results fill the columns their time covers until they scroll out.
@@ -306,7 +315,10 @@ impl Module for SpectrogramModule {
             let Some(data) = entry.frame.spectrum() else {
                 continue;
             };
-            let column = entry.frame.processed_through_frame / hop;
+            let column = self
+                .clock
+                .frontier_position(entry.frame.processed_through_frame)
+                / hop;
             self.column.clear();
             self.column.extend(self.rows.iter().map(|&(low, high)| {
                 let Some(dbfs) = spectrum_dbfs_between(&data.bins_dbfs, data.fft.bin_hz, low, high)
@@ -321,9 +333,16 @@ impl Module for SpectrogramModule {
             self.picture.write(column, &self.column, !entry.gap_before);
             self.written_through = entry.frame.processed_through_frame;
         }
+        self.picture.advance(now_end / hop);
         self.picture
             .draw(frame.renderer, frame.rect, frame.rect, self.flow);
-        ModuleResponse::default()
+        ModuleResponse {
+            repaint_after: self.clock.repaint_after(
+                frame.monotonic_time,
+                self.clock.frontier_position(window_end),
+                key.columns as u64 * hop,
+            ),
+        }
     }
 }
 
@@ -431,5 +450,30 @@ mod tests {
             spec,
             "the analysis is untouched"
         );
+    }
+
+    #[test]
+    fn a_silent_source_keeps_the_picture_moving_until_it_has_scrolled_out() {
+        let mut fixture = PcmFixture::new(1);
+        let mut module = SpectrogramFactory
+            .create(&fixture.services, &Registry::default(), None)
+            .unwrap();
+        fixture.feed(&tone(0, 2_048 + 4 * 512));
+        let mut target = RecordingTarget::default();
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        let start = target.images.pop().unwrap();
+
+        // A second without results: about 0.85 s past the grace, 80 hops of 512.
+        let wake = draw(module.as_mut(), &mut target, Duration::from_secs(1)).repaint_after;
+        let moved = target.images.pop().unwrap();
+        let shift = (moved.first_column + moved.width - start.first_column) % moved.width;
+        assert!((78..=81).contains(&shift), "moved {shift} columns");
+        assert_eq!(wake, Some(crate::module::FRAME_INTERVAL));
+
+        // After the visible six seconds nothing is left and drawing stops.
+        let wake = draw(module.as_mut(), &mut target, Duration::from_secs(8)).repaint_after;
+        let gone = target.images.pop().unwrap();
+        assert!(gone.columns.iter().flatten().all(|pixel| pixel.alpha == 0));
+        assert_eq!(wake, None);
     }
 }
