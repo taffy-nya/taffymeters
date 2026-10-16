@@ -75,12 +75,15 @@ impl SmoothState {
     }
 }
 
-/// Per-bin maximum held for `hold_ms`, then decaying linearly in dB/s toward the
-/// current value, in source time.
+/// Per element maximum held for `hold_ms`, then falling from rest at a constant
+/// acceleration toward the current value, in source time. The fall is integrated
+/// exactly, so the result does not depend on how often the input arrives.
 #[derive(Default)]
 pub(crate) struct PeakState {
     pub(crate) values: Vec<f32>,
     hold_until: Vec<u64>,
+    /// Current fall speed in dB/s; zero while held.
+    velocities: Vec<f32>,
     last_frame: Option<u64>,
 }
 
@@ -97,23 +100,36 @@ impl PeakState {
             self.values.extend_from_slice(input);
             self.hold_until.clear();
             self.hold_until.resize(input.len(), processed_through_frame);
+            self.velocities.clear();
+            self.velocities.resize(input.len(), 0.0);
         }
         let last_frame = self.last_frame.unwrap_or(processed_through_frame);
         let hold_frames = (config.hold_ms * sample_rate_hz as f32 / 1_000.0).round() as u64;
-        for ((peak, hold_until), sample) in self
+        let acceleration = config.fall_db_per_second_squared;
+        for (((peak, hold_until), velocity), sample) in self
             .values
             .iter_mut()
             .zip(self.hold_until.iter_mut())
+            .zip(self.velocities.iter_mut())
             .zip(input.iter().copied())
         {
             if sample >= *peak {
                 *peak = sample;
+                *velocity = 0.0;
                 *hold_until = processed_through_frame.saturating_add(hold_frames);
             } else if processed_through_frame > *hold_until {
-                let decay_start = last_frame.max(*hold_until);
-                let elapsed_seconds = processed_through_frame.saturating_sub(decay_start) as f32
+                let fall_start = last_frame.max(*hold_until);
+                let elapsed = processed_through_frame.saturating_sub(fall_start) as f32
                     / sample_rate_hz as f32;
-                *peak = (*peak - config.decay_db_per_second * elapsed_seconds).max(sample);
+                let fallen = *peak - (*velocity + 0.5 * acceleration * elapsed) * elapsed;
+                if fallen <= sample {
+                    // Landed on the signal: follow it from rest.
+                    *peak = sample;
+                    *velocity = 0.0;
+                } else {
+                    *peak = fallen;
+                    *velocity += acceleration * elapsed;
+                }
             }
         }
         self.last_frame = Some(processed_through_frame);
@@ -122,6 +138,7 @@ impl PeakState {
     pub(crate) fn reset(&mut self) {
         self.values.clear();
         self.hold_until.clear();
+        self.velocities.clear();
         self.last_frame = None;
     }
 }
@@ -152,15 +169,49 @@ mod tests {
     }
 
     #[test]
-    fn peak_holds_then_decays_by_source_time() {
+    fn peak_holds_then_falls_with_constant_acceleration_in_source_time() {
+        // 1 s hold, 10 dB/s²; time in frames at 1 kHz.
         let config = PeakConfig::new(1_000.0, 10.0).unwrap();
-        let mut state = PeakState::default();
-        state.process(&[-10.0], 0, 1_000, config);
-        state.process(&[-50.0], 500, 1_000, config);
-        assert_eq!(state.values[0], -10.0, "held");
-        state.process(&[-50.0], 2_000, 1_000, config);
+        let mut stepped = PeakState::default();
+        stepped.process(&[-10.0], 0, 1_000, config);
+        stepped.process(&[-90.0], 500, 1_000, config);
+        assert_eq!(stepped.values[0], -10.0, "held");
+        // 1 s after the hold: ½·10·1² = 5 dB.
+        stepped.process(&[-90.0], 2_000, 1_000, config);
         assert!(
-            (state.values[0] - -20.0).abs() < 1e-4,
+            (stepped.values[0] - -15.0).abs() < 1e-4,
+            "{}",
+            stepped.values[0]
+        );
+        // 2 s after the hold: ½·10·2² = 20 dB, the same in one step or two.
+        stepped.process(&[-90.0], 3_000, 1_000, config);
+        let mut single = PeakState::default();
+        single.process(&[-10.0], 0, 1_000, config);
+        single.process(&[-90.0], 3_000, 1_000, config);
+        assert!(
+            (stepped.values[0] - -30.0).abs() < 1e-4,
+            "{}",
+            stepped.values[0]
+        );
+        assert!(
+            (single.values[0] - -30.0).abs() < 1e-4,
+            "{}",
+            single.values[0]
+        );
+    }
+
+    #[test]
+    fn a_falling_peak_lands_on_the_signal_and_falls_again_from_rest() {
+        let config = PeakConfig::new(0.0, 10.0).unwrap();
+        let mut state = PeakState::default();
+        state.process(&[0.0], 0, 1_000, config);
+        // Falls 20 dB in 2 s; the signal at −5 dB stops it there.
+        state.process(&[-5.0], 2_000, 1_000, config);
+        assert_eq!(state.values[0], -5.0);
+        // From rest again: 5 dB in the next second, not 5 + 20.
+        state.process(&[-90.0], 3_000, 1_000, config);
+        assert!(
+            (state.values[0] - -10.0).abs() < 1e-4,
             "{}",
             state.values[0]
         );

@@ -17,7 +17,7 @@ use crate::extensions::{Registry, RegistryError};
 pub(crate) const DEFAULT_TILT_DB_PER_OCTAVE: f32 = 4.5;
 
 pub use empty::EMPTY_MODULE_ID;
-pub use level_meter::LEVEL_METER_MODULE_ID;
+pub use level_meter::{LEVEL_METER_MODULE_ID, LOUDNESS_METER_MODULE_ID};
 pub use oscilloscope::{
     LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID, PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
 };

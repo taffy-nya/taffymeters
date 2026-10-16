@@ -13,8 +13,8 @@ use crate::{
     LiveAudio, LiveAudioConfig,
     audio::synthetic::SyntheticConfig,
     modules::{
-        EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, OSCILLOSCOPE_MODULE_ID, SPECTROGRAM_MODULE_ID,
-        STEREOMETER_MODULE_ID, WAVEFORM_MODULE_ID,
+        EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, LOUDNESS_METER_MODULE_ID, OSCILLOSCOPE_MODULE_ID,
+        SPECTROGRAM_MODULE_ID, STEREOMETER_MODULE_ID, WAVEFORM_MODULE_ID,
     },
     workspace::Workspace,
 };
@@ -32,12 +32,14 @@ const DRAW_EVERY_FRAMES: u64 = 800;
 const WARMUP_FRAMES: u64 = 528_000;
 const MEASURED_FRAMES: u64 = 1_440_000;
 
-const ALL_SEVEN: [&str; 6] = [
+/// Every built-in type besides the Spectrum the workspace starts with.
+const ALL_OTHER_TYPES: [&str; 7] = [
     SPECTROGRAM_MODULE_ID,
     OSCILLOSCOPE_MODULE_ID,
     WAVEFORM_MODULE_ID,
     STEREOMETER_MODULE_ID,
     LEVEL_METER_MODULE_ID,
+    LOUDNESS_METER_MODULE_ID,
     EMPTY_MODULE_ID,
 ];
 
@@ -50,18 +52,18 @@ pub(super) fn suite(report: &mut Report) {
             replace_first(ws, SPECTROGRAM_MODULE_ID)?;
             add_module(ws, SPECTROGRAM_MODULE_ID).map(drop)
         }),
-        ("P03", "all seven Module types", |ws| {
-            for type_id in ALL_SEVEN {
+        ("P03", "all eight Module types", |ws| {
+            for type_id in ALL_OTHER_TYPES {
                 add_module(ws, type_id)?;
             }
             Ok(())
         }),
-        ("P04", "all seven Module types, four times", |ws| {
+        ("P04", "all eight Module types, four times", |ws| {
             for round in 0..4 {
                 if round > 0 {
                     add_module(ws, crate::modules::SPECTRUM_MODULE_ID)?;
                 }
-                for type_id in ALL_SEVEN {
+                for type_id in ALL_OTHER_TYPES {
                     add_module(ws, type_id)?;
                 }
             }

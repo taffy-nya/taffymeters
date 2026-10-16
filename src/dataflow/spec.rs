@@ -48,32 +48,33 @@ impl SmoothConfig {
     }
 }
 
+/// Peak hold, then a fall at constant acceleration (dB/s²) starting from rest.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PeakConfig {
     pub hold_ms: f32,
-    pub decay_db_per_second: f32,
+    pub fall_db_per_second_squared: f32,
 }
 
 impl PeakConfig {
-    pub fn new(hold_ms: f32, decay_db_per_second: f32) -> Result<Self, SpecError> {
+    pub fn new(hold_ms: f32, fall_db_per_second_squared: f32) -> Result<Self, SpecError> {
         let value = Self {
             hold_ms,
-            decay_db_per_second,
+            fall_db_per_second_squared,
         };
         value.validated()
     }
 
     fn validated(self) -> Result<Self, SpecError> {
         if !self.hold_ms.is_finite()
-            || !self.decay_db_per_second.is_finite()
+            || !self.fall_db_per_second_squared.is_finite()
             || self.hold_ms < 0.0
-            || self.decay_db_per_second < 0.0
+            || self.fall_db_per_second_squared < 0.0
         {
             return Err(SpecError::InvalidPeakTime);
         }
         Ok(Self {
             hold_ms: canonical_zero(self.hold_ms),
-            decay_db_per_second: canonical_zero(self.decay_db_per_second),
+            fall_db_per_second_squared: canonical_zero(self.fall_db_per_second_squared),
         })
     }
 }
@@ -93,11 +94,16 @@ pub enum NodeSpec {
     Smooth(SmoothConfig),
     /// Spectrum + `db`.
     Gain { db: f32 },
-    /// Per-bin peak hold, then linear decay in dB/s (stateful).
+    /// Per element (spectrum bin or Levels channel) peak hold, then a fall at
+    /// constant acceleration, in source time (stateful). Reads and produces the
+    /// kind of its input.
     Peak(PeakConfig),
-    /// Source PCM → per channel 400 ms K-weighted loudness and the sample peak of
-    /// each publication interval (stateful).
+    /// Source PCM → per channel the sample peak of each publication interval, in
+    /// dBFS (stateful: the interval starts at the reader's start).
     Levels,
+    /// Source PCM → 400 ms K-weighted momentary loudness of the whole programme
+    /// (BS.1770, every channel weighted 1), in LUFS (stateful).
+    Loudness,
 }
 
 /// Kind of data a node produces.
@@ -107,31 +113,33 @@ pub(crate) enum SignalKind {
     Mono,
     Spectrum,
     Levels,
+    Loudness,
 }
 
 impl NodeSpec {
-    pub(crate) fn input_kind(&self) -> SignalKind {
-        match self {
-            Self::Channel(_) | Self::Levels => SignalKind::Pcm,
-            Self::Fft(_) => SignalKind::Mono,
-            Self::Tilt { .. } | Self::Smooth(_) | Self::Gain { .. } | Self::Peak(_) => {
-                SignalKind::Spectrum
+    /// Kind this node produces from an input of kind `input`, or `None` when it
+    /// cannot read that kind.
+    pub(crate) fn output_kind(&self, input: SignalKind) -> Option<SignalKind> {
+        match (self, input) {
+            (Self::Channel(_), SignalKind::Pcm) => Some(SignalKind::Mono),
+            (Self::Levels, SignalKind::Pcm) => Some(SignalKind::Levels),
+            (Self::Loudness, SignalKind::Pcm) => Some(SignalKind::Loudness),
+            (Self::Fft(_), SignalKind::Mono) => Some(SignalKind::Spectrum),
+            (Self::Tilt { .. } | Self::Smooth(_) | Self::Gain { .. }, SignalKind::Spectrum) => {
+                Some(SignalKind::Spectrum)
             }
-        }
-    }
-
-    pub(crate) fn output_kind(&self) -> SignalKind {
-        match self {
-            Self::Channel(_) => SignalKind::Mono,
-            Self::Levels => SignalKind::Levels,
-            _ => SignalKind::Spectrum,
+            (Self::Peak(_), SignalKind::Spectrum | SignalKind::Levels) => Some(input),
+            _ => None,
         }
     }
 
     /// Stateful nodes are private per subscription unless an explicit binding
     /// covers them; pure nodes are shared whenever their key matches.
     pub fn is_stateful(&self) -> bool {
-        matches!(self, Self::Smooth(_) | Self::Peak(_) | Self::Levels)
+        matches!(
+            self,
+            Self::Smooth(_) | Self::Peak(_) | Self::Levels | Self::Loudness
+        )
     }
 
     fn validated(self, descriptor: &AudioDescriptor) -> Result<Self, SpecError> {
@@ -161,7 +169,7 @@ impl NodeSpec {
                 db: finite(db, SpecError::InvalidGain)?,
             },
             Self::Peak(config) => Self::Peak(config.validated()?),
-            Self::Levels => self,
+            Self::Levels | Self::Loudness => self,
         })
     }
 }
@@ -409,14 +417,16 @@ impl DataSpec {
             return Err(SpecError::NoOutputs);
         }
         let mut nodes = Vec::with_capacity(self.nodes.len());
+        let mut kinds = Vec::with_capacity(self.nodes.len());
         for (index, node) in self.nodes.iter().enumerate() {
-            let input_kind = match node.input.index() {
-                None => SignalKind::Pcm,
-                Some(input) => self.nodes[input].spec.output_kind(),
-            };
-            if node.spec.input_kind() != input_kind {
+            let input_kind = node
+                .input
+                .index()
+                .map_or(SignalKind::Pcm, |input| kinds[input]);
+            let Some(kind) = node.spec.output_kind(input_kind) else {
                 return Err(SpecError::KindMismatch { node: index });
-            }
+            };
+            kinds.push(kind);
             nodes.push(SpecNode {
                 input: node.input,
                 spec: node.spec.validated(descriptor)?,
@@ -429,10 +439,7 @@ impl DataSpec {
         for output in &validated.outputs {
             let Some(kind) = (match output.node.index() {
                 None => Some(SignalKind::Pcm),
-                Some(index) => validated
-                    .nodes
-                    .get(index)
-                    .map(|node| node.spec.output_kind()),
+                Some(index) => kinds.get(index).copied(),
             }) else {
                 return Err(SpecError::UnknownNode);
             };
@@ -443,7 +450,7 @@ impl DataSpec {
                 if !seconds.is_finite() || seconds <= 0.0 {
                     return Err(SpecError::InvalidKeep);
                 }
-                if validated.history_bytes(output.node, seconds, descriptor)
+                if validated.history_bytes(output.node, kind, seconds, descriptor)
                     > HISTORY_BUDGET_BYTES as f64
                 {
                     return Err(SpecError::HistoryTooLarge);
@@ -482,7 +489,13 @@ impl DataSpec {
     /// Upper estimate of the memory one History keeps: per retained result its
     /// payload plus the frame allocation, metadata and ring entry, with one extra
     /// result kept at the window boundary.
-    fn history_bytes(&self, node: NodeRef, seconds: f32, descriptor: &AudioDescriptor) -> f64 {
+    fn history_bytes(
+        &self,
+        node: NodeRef,
+        kind: SignalKind,
+        seconds: f32,
+        descriptor: &AudioDescriptor,
+    ) -> f64 {
         let sample_rate = f64::from(descriptor.sample_rate_hz);
         let channels = f64::from(descriptor.channel_count);
         let float = std::mem::size_of::<f32>() as f64;
@@ -496,15 +509,13 @@ impl DataSpec {
             }
             current = self.nodes[index].input.index();
         }
-        let kind = node.index().map_or(SignalKind::Pcm, |index| {
-            self.nodes[index].spec.output_kind()
-        });
         let (results_per_second, payload) = match (kind, fft) {
             (SignalKind::Spectrum, Some(fft)) => (
                 sample_rate / fft.hop_size as f64,
                 (fft.window_size / 2 + 1) as f64 * float,
             ),
-            (SignalKind::Levels, _) => (time_rate, 2.0 * channels * float),
+            (SignalKind::Levels, _) => (time_rate, channels * float),
+            (SignalKind::Loudness, _) => (time_rate, float),
             _ => (
                 time_rate,
                 (sample_rate / time_rate).ceil() * channels * float,
@@ -515,7 +526,8 @@ impl DataSpec {
     }
 }
 
-/// Time-domain results (PCM chunks, Levels) are published at most this often.
+/// Time-domain results (PCM chunks, Levels, Loudness) are published at most this
+/// often.
 pub(crate) const TIME_PUBLICATIONS_PER_SECOND: usize = 30;
 
 /// Storage of one retained result besides its payload: the frame and its
@@ -558,7 +570,7 @@ impl fmt::Display for SpecError {
             Self::NoOutputs => f.write_str("a data spec needs at least one output"),
             Self::UnknownNode => f.write_str("an output refers to an unknown node"),
             Self::UnsupportedOutput => {
-                f.write_str("an output must be the source, a spectrum or Levels node")
+                f.write_str("an output must be the source, a spectrum, Levels or Loudness node")
             }
             Self::KindMismatch { node } => {
                 write!(f, "node {node} cannot read the data of its input")
@@ -570,7 +582,7 @@ impl fmt::Display for SpecError {
                 f.write_str("smooth attack/release must be finite and non-negative")
             }
             Self::InvalidGain => f.write_str("gain must be finite"),
-            Self::InvalidPeakTime => f.write_str("peak hold/decay must be finite and non-negative"),
+            Self::InvalidPeakTime => f.write_str("peak hold/fall must be finite and non-negative"),
             Self::InvalidKeep => f.write_str("history duration must be finite and positive"),
             Self::HistoryTooLarge => write!(
                 f,
@@ -647,13 +659,37 @@ mod tests {
     fn levels_history_is_accepted_up_to_the_budget_and_rejected_one_frame_beyond() {
         let descriptor = stereo_48k();
         let mut spec = DataSpec::new();
-        let node = spec.add(SOURCE, NodeSpec::Levels);
+        let levels = spec.add(SOURCE, NodeSpec::Levels);
+        // A Peak over Levels keeps one value per channel, like Levels.
+        let node = spec.add(levels, NodeSpec::Peak(PeakConfig::new(0.0, 1.0).unwrap()));
         assert_history_boundary(
             spec,
             node,
             &descriptor,
             TIME_PUBLICATIONS_PER_SECOND as f64,
-            2.0 * f64::from(descriptor.channel_count) * 4.0,
+            f64::from(descriptor.channel_count) * 4.0,
+        );
+    }
+
+    #[test]
+    fn peak_reads_spectra_and_levels_and_other_spectrum_nodes_read_only_spectra() {
+        let descriptor = stereo_48k();
+        let peak = NodeSpec::Peak(PeakConfig::new(0.0, 1.0).unwrap());
+        let validate = |input: NodeSpec, node: NodeSpec| {
+            let mut spec = DataSpec::new();
+            let input = spec.add(SOURCE, input);
+            let node = spec.add(input, node);
+            spec.output(node, Keep::Latest);
+            spec.validated(&descriptor).map(|_| ())
+        };
+        assert_eq!(validate(NodeSpec::Levels, peak), Ok(()));
+        assert_eq!(
+            validate(NodeSpec::Levels, NodeSpec::Gain { db: 1.0 }),
+            Err(SpecError::KindMismatch { node: 1 })
+        );
+        assert_eq!(
+            validate(NodeSpec::Loudness, peak),
+            Err(SpecError::KindMismatch { node: 1 })
         );
     }
 

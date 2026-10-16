@@ -500,6 +500,11 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
         ("waveform", WAVEFORM_MODULE_ID, None),
         ("stereometer", crate::modules::STEREOMETER_MODULE_ID, None),
         ("level-meter", LEVEL_METER_MODULE_ID, None),
+        (
+            "loudness-meter",
+            crate::modules::LOUDNESS_METER_MODULE_ID,
+            None,
+        ),
         ("empty", EMPTY_MODULE_ID, None),
     ];
     let images = output.join("images");

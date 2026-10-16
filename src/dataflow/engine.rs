@@ -13,7 +13,7 @@ use std::{
 
 use crate::{
     audio::{AudioBlock, AudioDescriptor, SourceId},
-    snapshot::{AudioChunk, Frame, FrameData, LevelsData, SpectrumData},
+    snapshot::{AudioChunk, Frame, FrameData, LevelsData, LoudnessData, SpectrumData},
 };
 
 use super::{
@@ -26,7 +26,7 @@ use super::{
         TIME_PUBLICATIONS_PER_SECOND,
     },
     store::{Ring, Route, RouteOutput, SharedStore, lock},
-    time::LevelAnalyzer,
+    time::{LEVELS_FLOOR_DBFS, LoudnessAnalyzer, accumulate_peaks, peak_dbfs},
 };
 
 /// Frames kept for reuse per output ring.
@@ -42,8 +42,9 @@ pub struct RuntimeMetrics {
     pub nodes: u64,
     pub active_channel_nodes: u64,
     pub active_fft_nodes: u64,
-    /// Active Tilt / Smooth / Gain / Peak nodes.
+    /// Active Tilt / Smooth / Gain / Peak nodes after an FFT.
     pub active_spectrum_nodes: u64,
+    /// Active Levels and Loudness nodes and the Peak nodes after Levels.
     pub active_level_nodes: u64,
     /// Output rings (nodes some subscription reads).
     pub rings: u64,
@@ -52,7 +53,7 @@ pub struct RuntimeMetrics {
     pub spectrum_evaluations: u64,
     /// Source frames merged into PCM chunks.
     pub pcm_frames: u64,
-    /// Source frames analyzed, summed over Levels nodes.
+    /// Source frames analyzed, summed over Levels and Loudness nodes.
     pub level_frames: u64,
     /// Frames pushed into output rings.
     pub publications: u64,
@@ -119,6 +120,7 @@ enum SpecKey {
     Gain(u32),
     Peak(u32, u32),
     Levels,
+    Loudness,
 }
 
 impl SpecKey {
@@ -137,9 +139,10 @@ impl SpecKey {
             NodeSpec::Gain { db } => Self::Gain(db.to_bits()),
             NodeSpec::Peak(config) => Self::Peak(
                 config.hold_ms.to_bits(),
-                config.decay_db_per_second.to_bits(),
+                config.fall_db_per_second_squared.to_bits(),
             ),
             NodeSpec::Levels => Self::Levels,
+            NodeSpec::Loudness => Self::Loudness,
         }
     }
 }
@@ -181,30 +184,56 @@ enum Kernel {
         state: PeakState,
     },
     Levels {
-        analyzer: LevelAnalyzer,
-        momentary_lufs: Vec<f32>,
-        block_peaks: Vec<f32>,
+        /// Largest absolute sample per channel since the last publication.
         interval_peaks: Vec<f32>,
+        /// The last published interval, per channel in dBFS.
+        dbfs: Vec<f32>,
+        start_frame: u64,
+    },
+    Loudness {
+        analyzer: LoudnessAnalyzer,
         start_frame: u64,
     },
 }
 
 impl Kernel {
-    fn spectrum(&self) -> &[f32] {
+    /// The dB vector a spectrum or Levels node produced last.
+    fn values(&self) -> &[f32] {
         match self {
             Self::Fft(fft) => fft.bins_dbfs(),
             Self::Tilt { out, .. } | Self::Gain { out, .. } => out,
             Self::Smooth { state, .. } => &state.values,
             Self::Peak { state, .. } => &state.values,
+            Self::Levels { dbfs, .. } => dbfs,
             _ => &[],
         }
     }
 
-    fn is_spectrum_node(&self) -> bool {
-        matches!(
-            self,
-            Self::Tilt { .. } | Self::Smooth { .. } | Self::Gain { .. } | Self::Peak { .. }
-        )
+    /// Forget what a Levels or Loudness node measured; with `start`, its results
+    /// only cover audio from that source frame on.
+    fn reset_time_domain(&mut self, start: Option<u64>) {
+        let start_frame = match self {
+            Self::Levels {
+                interval_peaks,
+                dbfs,
+                start_frame,
+            } => {
+                interval_peaks.fill(0.0);
+                dbfs.fill(LEVELS_FLOOR_DBFS);
+                start_frame
+            }
+            Self::Loudness {
+                analyzer,
+                start_frame,
+            } => {
+                analyzer.reset();
+                start_frame
+            }
+            _ => return,
+        };
+        if let Some(start) = start {
+            *start_frame = start;
+        }
     }
 }
 
@@ -271,7 +300,9 @@ pub(super) struct Applied {
 struct Plan {
     source: Option<NodeId>,
     channels: Vec<NodeId>,
-    levels: Vec<NodeId>,
+    /// Active Levels nodes with their active descendants in pre-order.
+    levels: Vec<(NodeId, Vec<NodeId>)>,
+    loudness: Vec<NodeId>,
     /// Active FFT nodes with their active descendants in pre-order.
     ffts: Vec<(NodeId, Vec<NodeId>)>,
 }
@@ -453,10 +484,12 @@ impl Engine {
                 state: PeakState::default(),
             },
             Some(NodeSpec::Levels) => Kernel::Levels {
-                analyzer: LevelAnalyzer::new(sample_rate, channels),
-                momentary_lufs: vec![-60.0; channels],
-                block_peaks: vec![0.0; channels],
                 interval_peaks: vec![0.0; channels],
+                dbfs: vec![LEVELS_FLOOR_DBFS; channels],
+                start_frame: self.current_frontier,
+            },
+            Some(NodeSpec::Loudness) => Kernel::Loudness {
+                analyzer: LoudnessAnalyzer::new(sample_rate, channels),
                 start_frame: self.current_frontier,
             },
         };
@@ -902,19 +935,7 @@ impl Engine {
             match &mut node.kernel {
                 Kernel::Smooth { state, .. } => state.reset(),
                 Kernel::Peak { state, .. } => state.reset(),
-                Kernel::Levels {
-                    analyzer,
-                    momentary_lufs,
-                    interval_peaks,
-                    start_frame,
-                    ..
-                } => {
-                    analyzer.reset();
-                    momentary_lufs.fill(-60.0);
-                    interval_peaks.fill(0.0);
-                    *start_frame = frontier;
-                }
-                _ => {}
+                kernel => kernel.reset_time_domain(Some(frontier)),
             }
             node.accept_from = frontier + window;
         }
@@ -1041,6 +1062,7 @@ impl Engine {
         }
         self.build_plan();
         let time_demand = !self.plan.levels.is_empty()
+            || !self.plan.loudness.is_empty()
             || self
                 .plan
                 .source
@@ -1079,18 +1101,7 @@ impl Engine {
                 }
                 node.accept_from = frontier + window;
             }
-            Kernel::Levels {
-                analyzer,
-                momentary_lufs,
-                interval_peaks,
-                start_frame,
-                ..
-            } if reactivated => {
-                analyzer.reset();
-                momentary_lufs.fill(-60.0);
-                interval_peaks.fill(0.0);
-                *start_frame = frontier;
-            }
+            kernel if reactivated => kernel.reset_time_domain(Some(frontier)),
             _ => {}
         }
         if reactivated && let Some(ring) = &mut node.ring {
@@ -1129,24 +1140,32 @@ impl Engine {
             match node.kernel {
                 Kernel::Source { .. } => plan.source = Some(id),
                 Kernel::Channel { .. } if node.active => plan.channels.push(id),
-                Kernel::Levels { .. } if node.active => plan.levels.push(id),
+                Kernel::Levels { .. } if node.active => {
+                    plan.levels.push((id, self.active_descendants(node)));
+                }
+                Kernel::Loudness { .. } if node.active => plan.loudness.push(id),
                 Kernel::Fft(_) if node.active => {
-                    let mut order = Vec::new();
-                    let mut stack: Vec<NodeId> = node.children.iter().rev().copied().collect();
-                    while let Some(child) = stack.pop() {
-                        let child_node = self.node(child);
-                        if !child_node.active {
-                            continue;
-                        }
-                        order.push(child);
-                        stack.extend(child_node.children.iter().rev().copied());
-                    }
-                    plan.ffts.push((id, order));
+                    plan.ffts.push((id, self.active_descendants(node)));
                 }
                 _ => {}
             }
         }
         self.plan = plan;
+    }
+
+    /// Active descendants of `node` in pre-order, so inputs run before readers.
+    fn active_descendants(&self, node: &Node) -> Vec<NodeId> {
+        let mut order = Vec::new();
+        let mut stack: Vec<NodeId> = node.children.iter().rev().copied().collect();
+        while let Some(child) = stack.pop() {
+            let child_node = self.node(child);
+            if !child_node.active {
+                continue;
+            }
+            order.push(child);
+            stack.extend(child_node.children.iter().rev().copied());
+        }
+        order
     }
 
     fn recompute_ring_keeps(&mut self) {
@@ -1246,9 +1265,12 @@ impl Engine {
             match node.kernel {
                 Kernel::Channel { .. } => channels += 1,
                 Kernel::Fft(_) => ffts += 1,
-                Kernel::Levels { .. } => levels += 1,
-                ref kernel if kernel.is_spectrum_node() => spectrum += 1,
-                _ => {}
+                Kernel::Levels { .. } | Kernel::Loudness { .. } => levels += 1,
+                Kernel::Tilt { .. } | Kernel::Smooth { .. } | Kernel::Gain { .. } => spectrum += 1,
+                // A Peak counts with the chain it follows.
+                Kernel::Peak { .. } if node.fft.is_some() => spectrum += 1,
+                Kernel::Peak { .. } => levels += 1,
+                Kernel::Source { .. } => {}
             }
         }
         let metrics = &self.metrics;
@@ -1297,15 +1319,8 @@ impl Engine {
                 Kernel::Fft(fft) => fft.reset(),
                 Kernel::Smooth { state, .. } => state.reset(),
                 Kernel::Peak { state, .. } => state.reset(),
-                Kernel::Levels {
-                    analyzer,
-                    momentary_lufs,
-                    interval_peaks,
-                    ..
-                } => {
-                    analyzer.reset();
-                    momentary_lufs.fill(-60.0);
-                    interval_peaks.fill(0.0);
+                kernel @ (Kernel::Levels { .. } | Kernel::Loudness { .. }) => {
+                    kernel.reset_time_domain(None);
                 }
                 Kernel::Source {
                     pending,
@@ -1399,12 +1414,25 @@ impl Engine {
 
         let mut level_frames = 0;
         for index in 0..self.plan.levels.len() {
-            let id = self.plan.levels[index];
+            let id = self.plan.levels[index].0;
             if let Kernel::Levels {
-                analyzer,
-                momentary_lufs,
-                block_peaks,
                 interval_peaks,
+                start_frame,
+                ..
+            } = &mut self.node_mut(id).kernel
+            {
+                if end <= *start_frame {
+                    continue;
+                }
+                let first = (start.max(*start_frame) - start) as usize;
+                accumulate_peaks(&samples[first * channels..], interval_peaks);
+                level_frames += (frame_count - first) as u64;
+            }
+        }
+        for index in 0..self.plan.loudness.len() {
+            let id = self.plan.loudness[index];
+            if let Kernel::Loudness {
+                analyzer,
                 start_frame,
             } = &mut self.node_mut(id).kernel
             {
@@ -1412,10 +1440,7 @@ impl Engine {
                     continue;
                 }
                 let first = (start.max(*start_frame) - start) as usize;
-                analyzer.process(&samples[first * channels..], momentary_lufs, block_peaks);
-                for (interval, block) in interval_peaks.iter_mut().zip(block_peaks.iter()) {
-                    *interval = interval.max(*block);
-                }
+                analyzer.process(&samples[first * channels..]);
                 level_frames += (frame_count - first) as u64;
             }
         }
@@ -1449,8 +1474,11 @@ impl Engine {
                 discontinuity_count: self.discontinuity_count,
             };
             for index in 0..self.plan.levels.len() {
-                let id = self.plan.levels[index];
-                self.stage_levels(id, &context);
+                self.run_levels(index, &context);
+            }
+            for index in 0..self.plan.loudness.len() {
+                let id = self.plan.loudness[index];
+                self.stage_loudness(id, &context);
             }
         }
 
@@ -1491,7 +1519,7 @@ impl Engine {
     fn run_hop(&mut self, fft_index: usize, context: &StageContext) {
         let fft_id = self.plan.ffts[fft_index].0;
         self.node_mut(fft_id).produced = true;
-        self.stage_spectrum(fft_id, context);
+        self.stage_values(fft_id, context);
         let sample_rate = self.descriptor.sample_rate_hz;
         let mut evaluations = 0;
         for order_index in 0..self.plan.ffts[fft_index].1.len() {
@@ -1502,7 +1530,7 @@ impl Engine {
             if !node.produced {
                 continue;
             }
-            let input = parent.kernel.spectrum();
+            let input = parent.kernel.values();
             let fft = node.fft.expect("spectrum nodes follow an FFT");
             let floor = fft.floor_dbfs;
             match &mut node.kernel {
@@ -1527,11 +1555,54 @@ impl Engine {
             }
             node.accept_from = 0;
             evaluations += 1;
-            self.stage_spectrum(id, context);
+            self.stage_values(id, context);
         }
         self.metrics
             .spectrum_evaluations
             .fetch_add(evaluations, Ordering::Relaxed);
+    }
+
+    /// Publish one Levels interval in dBFS and run it through the Levels node's
+    /// active descendants (Peak nodes), staging their outputs.
+    fn run_levels(&mut self, levels_index: usize, context: &StageContext) {
+        let levels_id = self.plan.levels[levels_index].0;
+        let node = self.node_mut(levels_id);
+        let Kernel::Levels {
+            interval_peaks,
+            dbfs,
+            start_frame,
+        } = &mut node.kernel
+        else {
+            unreachable!("planned Levels node");
+        };
+        node.produced = context.processed_through_frame > *start_frame;
+        if !node.produced {
+            return;
+        }
+        for (value, peak) in dbfs.iter_mut().zip(interval_peaks.iter()) {
+            *value = peak_dbfs(*peak);
+        }
+        interval_peaks.fill(0.0);
+        self.stage_values(levels_id, context);
+        let sample_rate = self.descriptor.sample_rate_hz;
+        for order_index in 0..self.plan.levels[levels_index].1.len() {
+            let id = self.plan.levels[levels_index].1[order_index];
+            let parent = self.node(id).input.expect("Levels readers have an input");
+            let (parent, node) = parent_and_child(&mut self.nodes, parent, id);
+            node.produced = parent.produced && context.processed_through_frame >= node.accept_from;
+            if !node.produced {
+                continue;
+            }
+            let input = parent.kernel.values();
+            match &mut node.kernel {
+                Kernel::Peak { config, state } => {
+                    state.process(input, context.processed_through_frame, sample_rate, *config);
+                }
+                _ => unreachable!("only Peak nodes follow Levels"),
+            }
+            node.accept_from = 0;
+            self.stage_values(id, context);
+        }
     }
 
     fn next_version(&mut self) -> u64 {
@@ -1539,19 +1610,22 @@ impl Engine {
         self.result_version
     }
 
-    fn stage_spectrum(&mut self, id: NodeId, context: &StageContext) {
+    /// Stage the dB vector of a spectrum node (a Spectrum frame) or of a Levels
+    /// chain node (a Levels frame).
+    fn stage_values(&mut self, id: NodeId, context: &StageContext) {
         if self.node(id).ring.is_none() {
             return;
         }
         let version = self.next_version();
         let node = self.node_mut(id);
-        let fft = node.fft.expect("spectrum outputs follow an FFT");
+        let fft = node.fft;
         let ring = node.ring.as_mut().expect("checked ring");
-        let mut frame = take_frame(&mut ring.pool, || {
-            FrameData::Spectrum(SpectrumData {
+        let mut frame = take_frame(&mut ring.pool, || match fft {
+            Some(fft) => FrameData::Spectrum(SpectrumData {
                 fft,
                 bins_dbfs: Vec::new(),
-            })
+            }),
+            None => FrameData::Levels(LevelsData::default()),
         });
         let target = Arc::get_mut(&mut frame).expect("pooled frames are unshared");
         target.result_version = version;
@@ -1559,45 +1633,44 @@ impl Engine {
         target.source_sequence = context.source_sequence;
         target.discontinuity_count = context.discontinuity_count;
         target.discontinuity_before = std::mem::take(&mut ring.gap_pending);
-        if let FrameData::Spectrum(data) = &mut target.data {
-            data.fft = fft;
-            data.bins_dbfs.clear();
-            data.bins_dbfs.extend_from_slice(node.kernel.spectrum());
-        }
+        let values = match &mut target.data {
+            FrameData::Spectrum(data) => {
+                data.fft = fft.expect("spectrum frames belong to an FFT chain");
+                &mut data.bins_dbfs
+            }
+            FrameData::Levels(data) => &mut data.dbfs,
+            _ => unreachable!("a node ring holds one kind of frame"),
+        };
+        values.clear();
+        values.extend_from_slice(node.kernel.values());
         self.staged.push((id, frame));
     }
 
-    fn stage_levels(&mut self, id: NodeId, context: &StageContext) {
-        let version = self.next_version();
-        let node = self.node_mut(id);
-        let Kernel::Levels {
-            momentary_lufs,
-            interval_peaks,
+    fn stage_loudness(&mut self, id: NodeId, context: &StageContext) {
+        let node = self.node(id);
+        let Kernel::Loudness {
+            analyzer,
             start_frame,
-            ..
-        } = &mut node.kernel
+        } = &node.kernel
         else {
-            return;
+            unreachable!("planned Loudness node");
         };
-        if context.processed_through_frame <= *start_frame {
+        if context.processed_through_frame <= *start_frame || node.ring.is_none() {
             return;
         }
-        let Some(ring) = node.ring.as_mut() else {
-            interval_peaks.fill(0.0);
-            return;
-        };
-        let mut frame = take_frame(&mut ring.pool, || FrameData::Levels(LevelsData::default()));
+        let momentary_lufs = analyzer.lufs();
+        let version = self.next_version();
+        let ring = self.node_mut(id).ring.as_mut().expect("checked ring");
+        let mut frame = take_frame(&mut ring.pool, || {
+            FrameData::Loudness(LoudnessData::default())
+        });
         let target = Arc::get_mut(&mut frame).expect("pooled frames are unshared");
         target.result_version = version;
         target.processed_through_frame = context.processed_through_frame;
         target.source_sequence = context.source_sequence;
         target.discontinuity_count = context.discontinuity_count;
         target.discontinuity_before = std::mem::take(&mut ring.gap_pending);
-        if let FrameData::Levels(data) = &mut target.data {
-            data.momentary_lufs.clone_from(momentary_lufs);
-            data.sample_peaks.clone_from(interval_peaks);
-        }
-        interval_peaks.fill(0.0);
+        target.data = FrameData::Loudness(LoudnessData { momentary_lufs });
         self.staged.push((id, frame));
     }
 

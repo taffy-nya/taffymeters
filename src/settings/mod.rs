@@ -107,7 +107,7 @@ pub enum NodeParam {
     SmoothRelease,
     Gain,
     PeakHold,
-    PeakDecay,
+    PeakFall,
 }
 
 /// Window sizes the settings offer.
@@ -123,11 +123,14 @@ impl NodeParam {
             NodeSpec::Tilt { .. } => &[Self::Tilt],
             NodeSpec::Smooth(_) => &[Self::SmoothAttack, Self::SmoothRelease],
             NodeSpec::Gain { .. } => &[Self::Gain],
-            NodeSpec::Peak(_) => &[Self::PeakHold, Self::PeakDecay],
-            NodeSpec::Levels => &[],
+            NodeSpec::Peak(_) => &[Self::PeakHold, Self::PeakFall],
+            NodeSpec::Levels | NodeSpec::Loudness => &[],
         }
     }
 
+    /// Row label; prefixed with the node's label unless it already starts with it
+    /// (the Peak parameters read "Peak hold", or "Bar hold" on a node the Module
+    /// names "Bar").
     pub fn label(self) -> &'static str {
         match self {
             Self::Channel => "Channel",
@@ -138,8 +141,8 @@ impl NodeParam {
             Self::SmoothAttack => "Smooth attack",
             Self::SmoothRelease => "Smooth release",
             Self::Gain => "Gain",
-            Self::PeakHold => "Peak hold",
-            Self::PeakDecay => "Peak decay",
+            Self::PeakHold => "hold",
+            Self::PeakFall => "fall",
         }
     }
 
@@ -153,7 +156,7 @@ impl NodeParam {
             Self::SmoothAttack | Self::SmoothRelease => (0.0, 2_000.0, "ms"),
             Self::Gain => (-60.0, 60.0, "dB"),
             Self::PeakHold => (0.0, 3_000.0, "ms"),
-            Self::PeakDecay => (0.0, 48.0, "dB/s"),
+            Self::PeakFall => (0.0, 300.0, "dB/s²"),
             Self::Channel | Self::FftWindow | Self::FftHop => return None,
         })
     }
@@ -166,7 +169,7 @@ impl NodeParam {
             (Self::SmoothRelease, NodeSpec::Smooth(smooth)) => smooth.release_ms,
             (Self::Gain, NodeSpec::Gain { db }) => *db,
             (Self::PeakHold, NodeSpec::Peak(peak)) => peak.hold_ms,
-            (Self::PeakDecay, NodeSpec::Peak(peak)) => peak.decay_db_per_second,
+            (Self::PeakFall, NodeSpec::Peak(peak)) => peak.fall_db_per_second_squared,
             _ => return None,
         })
     }
@@ -199,8 +202,8 @@ impl NodeParam {
                 peak.hold_ms = value;
                 NodeSpec::Peak(peak)
             }
-            (Self::PeakDecay, NodeSpec::Peak(mut peak)) => {
-                peak.decay_db_per_second = value;
+            (Self::PeakFall, NodeSpec::Peak(mut peak)) => {
+                peak.fall_db_per_second_squared = value;
                 NodeSpec::Peak(peak)
             }
             _ => return None,
@@ -271,6 +274,7 @@ pub fn node_label(node: &NodeSpec) -> &'static str {
         NodeSpec::Gain { .. } => "Gain",
         NodeSpec::Peak(_) => "Peak",
         NodeSpec::Levels => "Levels",
+        NodeSpec::Loudness => "Loudness",
     }
 }
 
@@ -456,9 +460,9 @@ mod tests {
             Some(NodeSpec::Smooth(SmoothConfig::new(10.0, 2_000.0).unwrap()))
         );
         assert_eq!(NodeParam::PeakHold.number(&peak), Some(500.0));
-        assert_eq!(NodeParam::PeakDecay.number(&peak), Some(20.0));
+        assert_eq!(NodeParam::PeakFall.number(&peak), Some(20.0));
         assert_eq!(
-            NodeParam::PeakDecay.with_number(peak, 30.0),
+            NodeParam::PeakFall.with_number(peak, 30.0),
             Some(NodeSpec::Peak(PeakConfig::new(500.0, 30.0).unwrap()))
         );
         let fft = NodeSpec::Fft(FftConfig::default());

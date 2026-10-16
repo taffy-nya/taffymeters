@@ -599,6 +599,7 @@ fn c06() -> Result<Value, String> {
     for type_id in [
         crate::modules::STEREOMETER_MODULE_ID,
         LEVEL_METER_MODULE_ID,
+        crate::modules::LOUDNESS_METER_MODULE_ID,
         EMPTY_MODULE_ID,
     ] {
         let id = add_module(&mut h.ws, type_id)?;

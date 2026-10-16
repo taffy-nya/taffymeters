@@ -1207,7 +1207,7 @@ fn s05() -> Result<Value, String> {
         {"input":null,"kind":"channel","params":"mono_average"},
         {"input":0,"kind":"fft","params":{"window_size":4_611_686_018_427_387_904_u64,"hop_size":1,"floor_dbfs":-160.0}},
         {"input":1,"kind":"tilt","params":{"db_per_octave":4.5}},
-        {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+        {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"fall_db_per_second_squared":30.0}}],
         "outputs":[{"node":2,"keep":"latest"},{"node":3,"keep":"latest"}]}});
     let file = json!({"format_version":1,"name":"Imported","input":{"kind":"daw_bridge","pipe":"studio-a"},
         "theme":{"preset":"dark"},
@@ -1611,7 +1611,7 @@ fn s08() -> Result<Value, String> {
             {"input":null,"kind":"channel","params":"mono_average"},
             {"input":0,"kind":"fft","params":{"window_size":2048,"hop_size":512,"floor_dbfs":-160.0}},
             {"input":1,"kind":"tilt","params":{"db_per_octave":4.5}},
-            {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"decay_db_per_second":18.0}}],
+            {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"fall_db_per_second_squared":30.0}}],
             "outputs":[{"node":2,"keep":"latest"},extra]}})
     };
     let bound = json!({"node":3,"keep":"latest","binding":9});

@@ -404,6 +404,10 @@ impl Workspace {
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
+        let node_name = self.modules[&instance_id]
+            .module
+            .node_label(entry.node)
+            .unwrap_or_else(|| node_label(&entry.spec));
         let node = entry.node;
         let default_spec = defaults.and_then(|defaults| defaults.node(node));
         let mut edit = |spec: NodeSpec| {
@@ -469,10 +473,10 @@ impl Workspace {
                     else {
                         continue;
                     };
-                    let label = if param.label().starts_with(node_label(&spec)) {
+                    let label = if param.label().starts_with(node_name) {
                         param.label().to_owned()
                     } else {
-                        format!("{} {}", node_label(&spec), param.label())
+                        format!("{node_name} {}", param.label())
                     };
                     if let Some(value) = number_row(
                         ui,

@@ -31,10 +31,15 @@ pub struct SpectrumData {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LevelsData {
-    /// Per channel, 400 ms K-weighted loudness.
-    pub momentary_lufs: Vec<f32>,
-    /// Per channel, the largest absolute sample of the publication interval.
-    pub sample_peaks: Vec<f32>,
+    /// Per channel in dBFS: the sample peak of the publication interval, or after
+    /// a Peak node its held and falling value.
+    pub dbfs: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LoudnessData {
+    /// 400 ms K-weighted loudness of the whole programme.
+    pub momentary_lufs: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +48,7 @@ pub enum FrameData {
     Spectrum(SpectrumData),
     Pcm(AudioChunk),
     Levels(LevelsData),
+    Loudness(LoudnessData),
 }
 
 /// One result of one output.
@@ -78,6 +84,13 @@ impl Frame {
     pub fn levels(&self) -> Option<&LevelsData> {
         match &self.data {
             FrameData::Levels(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn loudness(&self) -> Option<&LoudnessData> {
+        match &self.data {
+            FrameData::Loudness(data) => Some(data),
             _ => None,
         }
     }

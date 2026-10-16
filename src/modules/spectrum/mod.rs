@@ -70,7 +70,7 @@ fn spectrum_data() -> SpectrumData {
         curve,
         NodeSpec::Peak(PeakConfig {
             hold_ms: 1_000.0,
-            decay_db_per_second: 18.0,
+            fall_db_per_second_squared: 30.0,
         }),
     );
     let main = spec.output(curve, Keep::Latest);

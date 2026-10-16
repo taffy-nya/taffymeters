@@ -1,0 +1,103 @@
+//! Loudness Meter: one bar of the programme's 400 ms K-weighted momentary
+//! loudness (BS.1770), on the absolute LUFS scale shared with the Level Meter.
+
+use crate::{
+    dataflow::{DataController, DataSpec, DataSubscription, Keep, NodeSpec, OutputId, SOURCE},
+    extensions::{Registry, RegistryError},
+    module::{
+        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
+        spec_from_saved,
+    },
+    render::ColoredRect,
+    snapshot::DataReader,
+    theme::ColorRole,
+};
+
+use super::{bar_track, push_bar};
+
+pub const LOUDNESS_METER_MODULE_ID: &str = "taffymeters.loudness_meter";
+
+fn loudness_data() -> (DataSpec, OutputId) {
+    let mut spec = DataSpec::new();
+    let loudness = spec.add(SOURCE, NodeSpec::Loudness);
+    let output = spec.output(loudness, Keep::Latest);
+    (spec, output)
+}
+
+pub(super) struct LoudnessMeterFactory;
+
+impl ModuleFactory for LoudnessMeterFactory {
+    fn type_id(&self) -> &'static str {
+        LOUDNESS_METER_MODULE_ID
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Loudness Meter"
+    }
+
+    fn create(
+        &self,
+        services: &ModuleServices,
+        _registry: &Registry,
+        data: Option<&DataSpec>,
+    ) -> Result<Box<dyn Module>, RegistryError> {
+        let (spec, output) = loudness_data();
+        let spec = spec_from_saved(spec, data)?;
+        let subscription = services
+            .dataflow
+            .subscribe(spec)
+            .map_err(ModuleError::from)?;
+        Ok(Box::new(LoudnessMeterModule {
+            controller: subscription.controller(),
+            reader: subscription.reader(),
+            _subscription: subscription,
+            output,
+            rects: Vec::with_capacity(2),
+        }))
+    }
+}
+
+struct LoudnessMeterModule {
+    controller: DataController,
+    reader: DataReader,
+    _subscription: DataSubscription,
+    output: OutputId,
+    rects: Vec<ColoredRect>,
+}
+
+impl Module for LoudnessMeterModule {
+    fn data(&self) -> Option<&DataController> {
+        Some(&self.controller)
+    }
+
+    fn output_label(&self, output: OutputId) -> Option<&'static str> {
+        (output == self.output).then_some("Loudness")
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[
+            ColorRole::Surface,
+            ColorRole::Low,
+            ColorRole::Mid,
+            ColorRole::High,
+        ]
+    }
+
+    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
+        let Some(result) = self.reader.latest(self.output) else {
+            return ModuleResponse::default();
+        };
+        let Some(loudness) = result.loudness() else {
+            return ModuleResponse::default();
+        };
+        self.rects.clear();
+        push_bar(
+            &mut self.rects,
+            frame.palette,
+            bar_track(frame.rect, 0, 1),
+            loudness.momentary_lufs,
+        );
+        frame.renderer.fill_rects(frame.rect, &self.rects);
+        ModuleResponse::default()
+    }
+}

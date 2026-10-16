@@ -406,7 +406,7 @@ fn shared_updates_change_every_member_at_once_and_local_updates_fork() {
             peak_node,
             NodeSpec::Peak(PeakConfig {
                 hold_ms: f32::NAN,
-                decay_db_per_second: 1.0,
+                fall_db_per_second_squared: 1.0,
             }),
         )
     });
@@ -829,6 +829,13 @@ fn levels_spec() -> (DataSpec, OutputId) {
     (spec, output)
 }
 
+fn loudness_spec() -> (DataSpec, OutputId) {
+    let mut spec = DataSpec::new();
+    let loudness = spec.add(SOURCE, NodeSpec::Loudness);
+    let output = spec.output(loudness, Keep::Latest);
+    (spec, output)
+}
+
 #[test]
 fn time_demand_matrix_only_does_requested_work() {
     let (mut capture, dataflow, _) = fixture(2, 128, 16);
@@ -868,7 +875,8 @@ fn time_demand_matrix_only_does_requested_work() {
     feed(&mut capture, &dataflow, &stereo(6_400, 1_600));
     let frame = latest_at(&levels.reader(), output, 8_000);
     let data = frame.levels().unwrap();
-    assert!(data.momentary_lufs[0] > -60.0 && data.sample_peaks[0] > 0.4);
+    // 20·log10(0.4) ≈ −8 dBFS.
+    assert!(data.dbfs[0] > -8.0, "{:?}", data.dbfs);
     let after = dataflow.metrics();
     assert_eq!(
         after.pcm_frames, before_levels.pcm_frames,
@@ -901,10 +909,10 @@ fn small_blocks_merge_into_one_shared_chunk_with_the_interval_peak() {
     );
     assert_eq!(chunk.pcm().unwrap().interleaved, samples);
     let level = latest_at(&levels.reader(), levels_output, 1_600);
-    assert_eq!(
-        level.levels().unwrap().sample_peaks[0],
-        0.9,
-        "interval peak, not last block"
+    let peak = level.levels().unwrap().dbfs[0];
+    assert!(
+        (peak - 20.0 * 0.9_f32.log10()).abs() < 1e-4,
+        "interval peak, not last block: {peak} dBFS"
     );
     let metrics = settle(&dataflow, "publications", |m| m.publications == 2);
     assert_eq!(metrics.pcm_frames, 1_600);
@@ -935,20 +943,20 @@ fn private_joins_do_not_inherit_earlier_history_or_levels() {
         "A keeps every frame, before and after B joined"
     );
 
-    let (levels_spec, levels_output) = levels_spec();
-    let loud = dataflow.subscribe(levels_spec.clone());
+    let (loudness_spec, loudness_output) = loudness_spec();
+    let loud = dataflow.subscribe(loudness_spec.clone());
     feed(&mut capture, &dataflow, &stereo(4_000, 1_600));
-    latest_at(&loud.reader(), levels_output, 4_800);
-    let quiet = dataflow.subscribe(levels_spec);
+    latest_at(&loud.reader(), loudness_output, 4_800);
+    let quiet = dataflow.subscribe(loudness_spec);
     feed(&mut capture, &dataflow, &vec![0.0; 2 * 2_400]);
-    let loud_level = latest_at(&loud.reader(), levels_output, 8_000);
-    let quiet_level = latest_at(&quiet.reader(), levels_output, 8_000);
+    let loud_level = latest_at(&loud.reader(), loudness_output, 8_000);
+    let quiet_level = latest_at(&quiet.reader(), loudness_output, 8_000);
     assert!(
-        loud_level.levels().unwrap().momentary_lufs[0] > -60.0,
+        loud_level.loudness().unwrap().momentary_lufs > -60.0,
         "A keeps earlier energy"
     );
     assert_eq!(
-        quiet_level.levels().unwrap().momentary_lufs[0],
+        quiet_level.loudness().unwrap().momentary_lufs,
         -60.0,
         "B hears only silence"
     );
