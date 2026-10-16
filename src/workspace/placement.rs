@@ -163,12 +163,20 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// Advance time-based state shared by all windows (detach timeouts). Every pass
-    /// that runs (the host's logic, each drawn window, the settings window) ticks,
-    /// so the clock also moves while the windows involved are minimized.
+    /// Advance time-based state shared by all windows (detach timeouts, the status
+    /// badge's messages). Every pass that runs (the host's logic, each drawn window,
+    /// the settings window) ticks, so the clock also moves while the windows involved
+    /// are minimized.
     pub(crate) fn tick(&mut self, display_time: Duration) {
         self.display_time = self.display_time.max(display_time);
         let now = self.display_time;
+        if self
+            .control_error
+            .as_ref()
+            .is_some_and(|(_, at)| now.saturating_sub(*at) >= super::MESSAGE_LIFETIME)
+        {
+            self.control_error = None;
+        }
         let expired: Vec<WindowId> = self
             .windows
             .iter()
@@ -184,7 +192,7 @@ impl Workspace {
             .collect();
         for id in expired {
             self.windows.remove(&id);
-            self.control_error = Some("detach canceled: the new window did not open".into());
+            self.set_control_error("detach canceled: the new window did not open".into());
         }
     }
 

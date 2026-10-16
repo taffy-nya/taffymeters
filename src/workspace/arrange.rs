@@ -195,7 +195,7 @@ impl Workspace {
         let current = self.window_of(pending.instance_id);
         if current != Some(pending.source) || !self.modules.contains_key(&pending.instance_id) {
             self.windows.remove(&window_id);
-            self.control_error = Some("detach canceled: the module is no longer there".into());
+            self.set_control_error("detach canceled: the module is no longer there".into());
             return;
         }
         let source = self

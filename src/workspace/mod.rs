@@ -54,6 +54,8 @@ pub(crate) const EMPTY_WINDOW_MIN_SIZE: Vec2 = vec2(140.0, 48.0);
 const DETACH_OFFSET_POINTS: f32 = 32.0;
 /// Display time a detached window may take to show its first frame.
 pub(crate) const DETACH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Display time the status badge shows an operation error or a new notice.
+pub(crate) const MESSAGE_LIFETIME: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ModuleInstanceId(pub(crate) u64);
@@ -440,7 +442,9 @@ pub struct Workspace {
     next_split_id: u64,
     next_group_id: u64,
     modules_created: u64,
-    control_error: Option<String>,
+    /// The last operation's error and when it occurred; the badge drops it after
+    /// `MESSAGE_LIFETIME`.
+    control_error: Option<(String, Duration)>,
     /// Shared repaint clock of animating windows (real time).
     frame_clock: Option<std::time::Instant>,
     /// Name under which the workspace saves.
@@ -452,8 +456,11 @@ pub struct Workspace {
     /// Colors of the window chrome (global roles).
     chrome: Palette,
     input: InputConfig,
-    /// Restore and save problems shown to the user until cleared.
+    /// Restore and save problems, listed in the settings until cleared.
     notices: Vec<String>,
+    /// The status badge shows the notices until this display time (a new notice
+    /// extends it by `MESSAGE_LIFETIME`).
+    notices_shown_until: Duration,
     /// File number of each binding of this workspace (restored or saved).
     binding_numbers: HashMap<SharedAnalysisId, u64>,
     /// The settings window, while open.
@@ -487,6 +494,7 @@ impl Workspace {
             next_group_id: 1,
             modules_created: 0,
             control_error: None,
+            notices_shown_until: Duration::ZERO,
             frame_clock: None,
             name: crate::persistence::DEFAULT_WORKSPACE.to_owned(),
             store: None,
@@ -585,7 +593,38 @@ impl Workspace {
     fn push_notice(&mut self, notice: String) {
         if !self.notices.contains(&notice) {
             self.notices.push(notice);
+            self.notices_shown_until = self.display_time + MESSAGE_LIFETIME;
         }
+    }
+
+    fn set_control_error(&mut self, message: String) {
+        self.control_error = Some((message, self.display_time));
+    }
+
+    /// The operation error and notices the status badge shows now.
+    pub(crate) fn badge_messages(&self) -> impl Iterator<Item = &str> {
+        let notices = if self.display_time < self.notices_shown_until {
+            self.notices.as_slice()
+        } else {
+            &[]
+        };
+        self.control_error
+            .iter()
+            .map(|(message, _)| message.as_str())
+            .chain(notices.iter().map(String::as_str))
+    }
+
+    /// Display time until the badge next drops a message, if it shows one.
+    pub(crate) fn badge_change_in(&self) -> Option<Duration> {
+        let error_until = self
+            .control_error
+            .as_ref()
+            .map(|(_, at)| *at + MESSAGE_LIFETIME);
+        let notices_until = (!self.notices.is_empty()
+            && self.display_time < self.notices_shown_until)
+            .then_some(self.notices_shown_until);
+        let until = error_until.into_iter().chain(notices_until).min()?;
+        Some(until.saturating_sub(self.display_time))
     }
 
     fn window_of(&self, instance: ModuleInstanceId) -> Option<WindowId> {
@@ -648,7 +687,7 @@ impl Workspace {
         self.sync_visibility();
         match &result {
             Ok(_) => self.control_error = None,
-            Err(error) => self.control_error = Some(error.to_string()),
+            Err(error) => self.set_control_error(error.to_string()),
         }
         result
     }

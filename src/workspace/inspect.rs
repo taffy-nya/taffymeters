@@ -142,7 +142,10 @@ impl Workspace {
             modules,
             move_source: self.move_source,
             source_status: self.services.source.source_status(),
-            control_error: self.control_error.clone(),
+            control_error: self
+                .control_error
+                .as_ref()
+                .map(|(message, _)| message.clone()),
             modules_created: self.modules_created,
             name: self.name.clone(),
             notices: self.notices.clone(),

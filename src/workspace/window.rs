@@ -404,6 +404,14 @@ impl Workspace {
         if pending_detach || self.source_status().state != SourceState::Running {
             ctx.request_repaint_after_for(STATE_POLL, egui::ViewportId::ROOT);
         }
+        // The status badge drops an error or the notices after a while, with or
+        // without new data.
+        if let Some(change) = self.badge_change_in() {
+            ctx.request_repaint_after_for(
+                change.max(Duration::from_millis(1)),
+                egui::ViewportId::ROOT,
+            );
+        }
         self.send_window_commands(window_id, &ctx);
         true
     }
@@ -1074,17 +1082,11 @@ impl Workspace {
         if status.state != SourceState::Running {
             text = source_status_text(&status);
         }
-        if let Some(error) = &self.control_error {
+        for message in self.badge_messages() {
             if !text.is_empty() {
                 text.push_str(" | ");
             }
-            text.push_str(error);
-        }
-        for notice in &self.notices {
-            if !text.is_empty() {
-                text.push_str(" | ");
-            }
-            text.push_str(notice);
+            text.push_str(message);
         }
         if text.is_empty() || !self.windows.contains_key(&window_id) {
             return;

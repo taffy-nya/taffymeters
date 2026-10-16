@@ -1235,6 +1235,35 @@ fn s05() -> Result<Value, String> {
             &format!("no notice about {expected}: {notices}"),
         )?;
     }
+    // The badge shows the notices and an operation error for a while, then drops
+    // them; the notices stay listed in the settings until cleared.
+    let placeholder = o.modules[0].instance_id;
+    let rejected = h.ws.apply_action(WorkspaceAction::SplitModule {
+        instance_id: placeholder,
+        side: Side::Right,
+    });
+    h.frame_all()?;
+    let shown = h.ws.badge_messages().count();
+    check(
+        rejected.is_err() && shown == o.notices.len() + 1,
+        &format!(
+            "badge shows {shown} of the error and {} notices",
+            o.notices.len()
+        ),
+    )?;
+    h.display_time += crate::workspace::MESSAGE_LIFETIME;
+    h.frame_all()?;
+    let after = h.ws.observation();
+    check(
+        h.ws.badge_messages().next().is_none()
+            && after.control_error.is_none()
+            && after.notices == o.notices,
+        &format!(
+            "badge kept {:?}; notices {:?}",
+            h.ws.badge_messages().collect::<Vec<_>>(),
+            after.notices
+        ),
+    )?;
     let oscilloscope = o.modules[2].instance_id;
     check(
         o.modules[2].active_style == Some(LINE_OSCILLOSCOPE_STYLE_ID),
