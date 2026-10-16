@@ -129,16 +129,16 @@ pub(crate) enum SettingsItem {
     TypeStyle(&'static str),
 }
 
-/// Quick colors offered next to the full picker.
+/// Quick colors offered next to the full picker: Catppuccin Mocha accents.
 pub(crate) const SWATCHES: [Color; 8] = [
-    Color::rgb(92, 230, 199),
-    Color::rgb(100, 190, 255),
-    Color::rgb(165, 90, 245),
-    Color::rgb(255, 70, 120),
-    Color::rgb(255, 170, 60),
-    Color::rgb(250, 230, 90),
-    Color::rgb(120, 220, 100),
-    Color::rgb(240, 240, 240),
+    Color::rgb(0x94, 0xe2, 0xd5), // teal
+    Color::rgb(0x74, 0xc7, 0xec), // sapphire
+    Color::rgb(0xcb, 0xa6, 0xf7), // mauve
+    Color::rgb(0xf3, 0x8b, 0xa8), // red
+    Color::rgb(0xfa, 0xb3, 0x87), // peach
+    Color::rgb(0xf9, 0xe2, 0xaf), // yellow
+    Color::rgb(0xa6, 0xe3, 0xa1), // green
+    Color::rgb(0xcd, 0xd6, 0xf4), // text
 ];
 
 /// Roles a Module type style can set.

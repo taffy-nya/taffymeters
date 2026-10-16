@@ -32,6 +32,12 @@ const STATE_POLL: Duration = Duration::from_millis(250);
 /// Poll interval while a native move may still be in progress.
 const MOVE_POLL: Duration = Duration::from_millis(50);
 
+/// Catppuccin Mocha colors of chrome that has no theme role.
+const MOCHA_CRUST: Color32 = Color32::from_rgb(0x09, 0x09, 0x0d);
+const MOCHA_RED: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
+const MOCHA_YELLOW: Color32 = Color32::from_rgb(0xf9, 0xe2, 0xaf);
+const MOCHA_PEACH: Color32 = Color32::from_rgb(0xfa, 0xb3, 0x87);
+
 /// egui color of a theme color.
 pub(crate) fn color32(color: crate::render::Color) -> Color32 {
     Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
@@ -78,7 +84,7 @@ fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
     let [red, green, blue, _] = accent.to_array();
     let luma = 0.299 * f32::from(red) + 0.587 * f32::from(green) + 0.114 * f32::from(blue);
     let on_accent = if luma > 140.0 {
-        Color32::from_rgb(10, 14, 18)
+        MOCHA_CRUST
     } else {
         Color32::WHITE
     };
@@ -111,6 +117,10 @@ fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
     widgets.active.bg_stroke = line(1.0, accent);
     widgets.active.fg_stroke = line(2.0, text);
     visuals.selection.bg_fill = accent;
+    if palette.dark {
+        visuals.error_fg_color = MOCHA_RED;
+        visuals.warn_fg_color = MOCHA_YELLOW;
+    }
     visuals.selection.stroke = line(1.0, on_accent);
     visuals.hyperlink_color = accent;
     visuals.weak_text_color = Some(muted);
@@ -940,7 +950,7 @@ impl Workspace {
                 Align2::CENTER_CENTER,
                 "Opening…",
                 FontId::proportional(14.0),
-                Color32::GRAY,
+                color32(self.chrome.color(ColorRole::Muted)),
             );
             return;
         }
@@ -1094,16 +1104,12 @@ impl Workspace {
             return;
         }
         let painter = ui.painter_at(rect);
-        let galley = painter.layout_no_wrap(
-            text,
-            FontId::proportional(12.0),
-            Color32::from_rgb(255, 190, 120),
-        );
+        let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), MOCHA_PEACH);
         let origin = pos2(rect.min.x + 8.0, rect.max.y - galley.size().y - 8.0);
         painter.rect_filled(
             Rect::from_min_size(origin, galley.size()).expand(4.0),
             3.0,
-            Color32::from_black_alpha(200),
+            MOCHA_CRUST.gamma_multiply_u8(200),
         );
         painter.galley(origin, galley, Color32::WHITE);
     }

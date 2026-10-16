@@ -172,20 +172,21 @@ impl Preset {
 
     pub fn palette(self) -> Palette {
         let (colors, dark) = match self {
+            // Catppuccin Mocha, with darker surfaces and backgrounds.
             Self::Dark => (
                 [
-                    Color::rgb(13, 18, 24),
-                    Color::rgba(20, 28, 34, 220),
-                    Color::rgb(46, 56, 68),
-                    Color::rgb(90, 160, 230),
-                    Color::rgb(235, 240, 245),
-                    Color::rgb(150, 160, 170),
-                    Color::rgba(110, 130, 145, 90),
-                    Color::rgb(92, 230, 199),
-                    Color::rgba(255, 210, 100, 180),
-                    Color::rgb(80, 180, 240),
-                    Color::rgb(165, 90, 245),
-                    Color::rgb(255, 70, 120),
+                    Color::rgb(0x0f, 0x0f, 0x15),       // base
+                    Color::rgb(0x1b, 0x1b, 0x24),       // surface0
+                    Color::rgb(0x30, 0x30, 0x3d),       // surface2
+                    Color::rgb(0x89, 0xb4, 0xfa),       // blue
+                    Color::rgb(0xcd, 0xd6, 0xf4),       // text
+                    Color::rgb(0x9f, 0xa6, 0xc0),       // subtext0
+                    Color::rgba(0x79, 0x7f, 0x95, 110), // overlay1
+                    Color::rgb(0x94, 0xe2, 0xd5),       // teal
+                    Color::rgba(0xf9, 0xe2, 0xaf, 180), // yellow
+                    Color::rgb(0x74, 0xc7, 0xec),       // sapphire
+                    Color::rgb(0xcb, 0xa6, 0xf7),       // mauve
+                    Color::rgb(0xf3, 0x8b, 0xa8),       // red
                 ],
                 true,
             ),
