@@ -365,8 +365,9 @@ mod tests {
         assert_eq!(first.width, 563);
         assert_eq!(first.rect, TEST_RECT);
         assert_eq!(first.changed, vec![4, 5, 6, 7, 8]);
-        // Not yet full: the picture grows from the left edge.
-        assert_eq!(first.first_column, 0);
+        // Right after start the newest column is at the right edge already: the
+        // left edge shows the slot after it.
+        assert_eq!(first.first_column, 9);
         let newest = 8;
         let rows = first.height;
         let tone_row = &first.columns[newest][row_of(3_000.0, rows)];

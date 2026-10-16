@@ -444,21 +444,26 @@ mod tests {
     }
 
     #[test]
-    fn history_shorter_than_the_visible_span_is_drawn_from_the_left_edge() {
+    fn history_shorter_than_the_visible_span_enters_at_the_right_edge() {
         let mut fixture = PcmFixture::new(2);
         let mut module = waveform(&fixture, None);
+        // Screen position (0 = left edge) of picture column `x`.
+        let screen =
+            |image: &RecordedImage, x: usize| (x + image.width - image.first_column) % image.width;
 
-        // 1/30 s of a constant 0.5 in the default 4 s window: a thin sliver at the
-        // left edge, not stretched across the Module.
+        // 1/30 s of a constant 0.5 in the default 4 s window right after start: a
+        // thin sliver at the right edge (where the newest audio enters), not
+        // stretched across the Module nor growing from the left edge.
         fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
         let first = drawn(module.as_mut(), 0);
         assert_eq!(first.rect, TEST_RECT);
-        assert_eq!(first.first_column, 0);
         let first_bars = bars(&first);
         assert!(!first_bars.is_empty());
-        assert!(
-            first_bars.iter().enumerate().all(|(i, bar)| bar.0 == i),
-            "bars are contiguous from the left edge: {first_bars:?}"
+        let positions: Vec<usize> = first_bars.iter().map(|bar| screen(&first, bar.0)).collect();
+        let expected: Vec<usize> = (first.width - first_bars.len()..first.width).collect();
+        assert_eq!(
+            positions, expected,
+            "bars are contiguous up to the right edge"
         );
         assert!(
             first_bars.len() < first.width / 4,
@@ -478,9 +483,13 @@ mod tests {
         let second_bars = bars(&second);
         assert!(
             second_bars.len() > first_bars.len(),
-            "the picture grows to the right"
+            "the picture grows, newest on the right"
         );
         assert!(second_bars.iter().enumerate().all(|(i, bar)| bar.0 == i));
+        assert_eq!(
+            screen(&second, second_bars.last().unwrap().0),
+            second.width - 1
+        );
         let settled = first_bars.len() - 1;
         assert_eq!(
             &second_bars[..settled],

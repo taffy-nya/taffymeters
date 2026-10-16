@@ -101,9 +101,10 @@ pub fn spectrum_dbfs_between(bins: &[f32], bin_hz: f32, low_hz: f32, high_hz: f3
 /// onto a ring of image columns. A column is computed once, when its data
 /// arrives (the newest one again while it fills), and only changed columns are
 /// uploaded; drawing never recomputes or moves earlier pixels, so nothing
-/// shimmers. The picture moves in `Flow`'s direction: until the ring is full it
-/// grows from the edge it moves toward, then the newest column stays at the edge
-/// opposite.
+/// shimmers. The picture moves in `Flow`'s direction with the newest column at
+/// the edge opposite, from the first column on: right after start, when only a
+/// few columns exist, the rest of the picture is empty rather than the columns
+/// growing from the far edge.
 #[derive(Default)]
 pub struct ColumnRing {
     image: Image,
@@ -159,13 +160,14 @@ impl ColumnRing {
         let Some(newest) = self.newest else {
             return;
         };
+        // The oldest edge shows the slot after the newest; slots not yet written
+        // are transparent.
         let columns = self.image.width() as u64;
-        let first = (newest + 1).saturating_sub(columns);
         renderer.scrolling_image(
             clip,
             rect,
             &mut self.image,
-            (first % columns) as usize,
+            ((newest + 1) % columns) as usize,
             flow,
         );
     }
@@ -186,7 +188,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn column_ring_scrolls_once_full_and_fills_or_clears_skipped_columns() {
+    fn column_ring_keeps_the_newest_column_at_its_edge_and_fills_or_clears_skipped_columns() {
         use crate::modules::test_support::RecordingTarget;
         let color = |value: u8| [Color::rgb(value, 0, 0); 2];
         let rect = Rect {
@@ -201,40 +203,42 @@ mod tests {
             target.images.pop().unwrap()
         };
 
-        // Absolute columns 10, 11: not yet full, shown from the left edge
-        // (ring slots 2 and 3 hold them, slot 0 is the left edge).
-        ring.write(10, &color(10), true);
-        ring.write(11, &color(11), true);
-        let growing = drawn(&mut ring);
-        assert_eq!(growing.first_column, 0);
-        assert_eq!(growing.changed, vec![2, 3]);
+        // Right after start, absolute columns 1 and 2 only: the newest is at the
+        // right edge already (the left edge shows the slot after it, still empty).
+        ring.write(1, &color(1), true);
+        ring.write(2, &color(2), true);
+        let started = drawn(&mut ring);
+        assert_eq!(started.first_column, 3);
+        assert_eq!(started.changed, vec![1, 2]);
+        assert_eq!(started.columns[3], [Color::rgba(0, 0, 0, 0); 2]);
+        assert_eq!(started.columns[0], [Color::rgba(0, 0, 0, 0); 2]);
 
-        // Column 14 after 11: 12 and 13 take 14's pixels (one result covering
-        // their time). Full now: oldest shown is 11 (slot 3) at the left edge.
-        ring.write(14, &color(14), true);
+        // Column 5 after 2: 3 and 4 take 5's pixels (one result covering their
+        // time); the oldest shown is 2 (slot 2) at the left edge.
+        ring.write(5, &color(5), true);
         let full = drawn(&mut ring);
-        assert_eq!(full.first_column, 3);
-        assert_eq!(full.columns[0], color(14)); // 12
-        assert_eq!(full.columns[1], color(14)); // 13
-        assert_eq!(full.columns[2], color(14)); // 14
-        assert_eq!(full.columns[3], color(11));
+        assert_eq!(full.first_column, 2);
+        assert_eq!(full.columns[3], color(5)); // 3
+        assert_eq!(full.columns[0], color(5)); // 4
+        assert_eq!(full.columns[1], color(5)); // 5
+        assert_eq!(full.columns[2], color(2));
 
         // A gap: the skipped columns are cleared, and only the written ones upload.
-        ring.write(17, &color(17), false);
+        ring.write(8, &color(8), false);
         let gapped = drawn(&mut ring);
-        assert_eq!(gapped.first_column, 2);
-        assert_eq!(gapped.columns[3], [Color::rgba(0, 0, 0, 0); 2]); // 15
-        assert_eq!(gapped.columns[0], [Color::rgba(0, 0, 0, 0); 2]); // 16
-        assert_eq!(gapped.columns[1], color(17));
-        assert_eq!(gapped.columns[2], color(14));
+        assert_eq!(gapped.first_column, 1);
+        assert_eq!(gapped.columns[2], [Color::rgba(0, 0, 0, 0); 2]); // 6
+        assert_eq!(gapped.columns[3], [Color::rgba(0, 0, 0, 0); 2]); // 7
+        assert_eq!(gapped.columns[0], color(8));
+        assert_eq!(gapped.columns[1], color(5));
         let mut changed = gapped.changed.clone();
         changed.sort_unstable();
-        assert_eq!(changed, vec![0, 1, 3]);
+        assert_eq!(changed, vec![0, 2, 3]);
 
         // Drawing again uploads nothing and moves nothing.
         let again = drawn(&mut ring);
         assert!(again.changed.is_empty());
-        assert_eq!(again.first_column, 2);
+        assert_eq!(again.first_column, 1);
     }
 
     #[test]
