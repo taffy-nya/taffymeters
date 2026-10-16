@@ -7,8 +7,8 @@ use crate::{
         OutputId,
     },
     extensions::{Registry, RegistryError},
-    render::{Point, Rect, RenderTarget, Size},
-    settings::{SettingKind, SettingValue, ViewSetting},
+    render::{Flow, Point, Rect, RenderTarget, Size},
+    settings::{Choice, SettingKind, SettingValue, ViewSetting},
     theme::{ColorRole, Palette},
 };
 
@@ -198,6 +198,48 @@ pub fn overlay_setting(key: &'static str, label: &'static str, shown: bool) -> V
         value: SettingValue::Bool(shown),
         default: SettingValue::Bool(false),
     }
+}
+
+/// Choices of a time view's `flow` setting: the direction the picture moves.
+const FLOW_CHOICES: &[Choice] = &[
+    Choice {
+        id: "left",
+        label: "Left",
+    },
+    Choice {
+        id: "right",
+        label: "Right",
+    },
+    Choice {
+        id: "up",
+        label: "Up",
+    },
+    Choice {
+        id: "down",
+        label: "Down",
+    },
+];
+
+/// The direction a time-scrolling view (Waveform, Spectrogram) moves; new
+/// instances move left, newest at the right edge.
+pub fn flow_setting(flow: Flow) -> ViewSetting {
+    ViewSetting {
+        key: "flow",
+        label: "Flow",
+        section: "Display",
+        kind: SettingKind::Choice(FLOW_CHOICES),
+        value: SettingValue::Choice(flow.id().to_owned()),
+        default: SettingValue::Choice(Flow::default().id().to_owned()),
+    }
+}
+
+/// A view setting value as a flow direction.
+pub fn flow_value(key: &str, value: &SettingValue) -> Result<Flow, ModuleError> {
+    match value {
+        SettingValue::Choice(id) => Flow::from_id(id),
+        _ => None,
+    }
+    .ok_or_else(|| ModuleError::InvalidSetting(key.to_owned()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

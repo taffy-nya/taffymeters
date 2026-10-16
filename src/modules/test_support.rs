@@ -14,7 +14,7 @@ use crate::{
     },
     dataflow::Dataflow,
     module::{Module, ModuleFrame, ModuleResponse, ModuleServices},
-    render::{Circle, ColoredRect, Image, Point, Rect, RenderTarget, Stroke, TextStyle},
+    render::{Circle, ColoredRect, Flow, Image, Point, Rect, RenderTarget, Stroke, TextStyle},
     theme::Palette,
 };
 
@@ -42,6 +42,7 @@ pub(crate) struct RecordedText {
 pub(crate) struct RecordedImage {
     pub rect: Rect,
     pub first_column: usize,
+    pub flow: Flow,
     pub width: usize,
     pub height: usize,
     /// Columns the image marked changed since it was last drawn.
@@ -97,10 +98,18 @@ impl RenderTarget for RecordingTarget {
         });
     }
 
-    fn scrolling_image(&mut self, _clip: Rect, rect: Rect, image: &mut Image, first_column: usize) {
+    fn scrolling_image(
+        &mut self,
+        _clip: Rect,
+        rect: Rect,
+        image: &mut Image,
+        first_column: usize,
+        flow: Flow,
+    ) {
         self.images.push(RecordedImage {
             rect,
             first_column,
+            flow,
             width: image.width(),
             height: image.height(),
             changed: image.changed_columns().to_vec(),

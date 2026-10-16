@@ -4,10 +4,10 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        number_setting, reference_gain,
+        flow_setting, flow_value, number_setting, reference_gain,
     },
     plotting::ColumnRing,
-    render::Color,
+    render::{Color, Flow},
     settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
     theme::ColorRole,
@@ -61,6 +61,7 @@ impl ModuleFactory for WaveformFactory {
             channel: ChannelSelection::MonoAverage,
             seconds: DEFAULT_VISIBLE_SECONDS,
             y_scale: 1.0,
+            flow: Flow::default(),
             envelope: WaveformEnvelope::default(),
             picture: ColumnRing::default(),
             picture_key: None,
@@ -83,6 +84,7 @@ struct WaveformModule {
     channel: ChannelSelection,
     seconds: f32,
     y_scale: f32,
+    flow: Flow,
     envelope: WaveformEnvelope,
     /// One column per envelope bin, each rasterized once (the newest again while
     /// it fills).
@@ -182,6 +184,7 @@ impl Module for WaveformModule {
                 default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
             },
             scale_setting(self.y_scale),
+            flow_setting(self.flow),
         ]
     }
 
@@ -192,6 +195,7 @@ impl Module for WaveformModule {
                 self.seconds = number_setting(key, value, self.visible_range())?;
             }
             "scale" => self.y_scale = number_setting(key, value, SCALE_RANGE)?,
+            "flow" => self.flow = flow_value(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())
@@ -216,7 +220,10 @@ impl Module for WaveformModule {
         let Ok(channel) = self.channel.resolve(descriptor) else {
             return ModuleResponse::default();
         };
-        let columns = frame.rect.width().floor().max(1.0) as u64;
+        // One column per point along the time axis, the bar across it (positive
+        // up, or right when the picture moves vertically).
+        let (along, across) = self.flow.extents(frame.rect);
+        let columns = along.floor().max(1.0) as u64;
         let span_frames = ((self.seconds * descriptor.sample_rate_hz as f32) as u64).max(1);
         let frames_per_bin = (span_frames / columns).max(1);
         let key = (
@@ -279,7 +286,7 @@ impl Module for WaveformModule {
         let gain = self.y_scale * reference_gain(frame.reference_dbfs);
         let picture_key = PictureKey {
             columns: columns as usize,
-            rows: frame.rect.height().round().max(1.0) as usize,
+            rows: across.round().max(1.0) as usize,
             frames_per_bin,
             gain_bits: gain.to_bits(),
             colors: [ColorRole::Low, ColorRole::Mid, ColorRole::High]
@@ -304,7 +311,8 @@ impl Module for WaveformModule {
                 self.picture.write(bin, &self.column, false);
             }
         }
-        self.picture.draw(frame.renderer, frame.rect, frame.rect);
+        self.picture
+            .draw(frame.renderer, frame.rect, frame.rect, self.flow);
         ModuleResponse::default()
     }
 }
@@ -539,5 +547,40 @@ mod tests {
         let after = drawn(module.as_mut(), 50);
         assert_eq!(after.columns, before.columns);
         assert_eq!(after.first_column, before.first_column);
+    }
+
+    #[test]
+    fn a_vertical_flow_lays_time_along_the_height_and_the_bar_across_the_width() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        module
+            .set_view_setting("flow", &SettingValue::Choice("up".to_owned()))
+            .unwrap();
+        fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
+        let picture = drawn(module.as_mut(), 0);
+        assert_eq!(picture.flow, Flow::Up);
+        assert_eq!(
+            (picture.width, picture.height),
+            (TEST_RECT.height() as usize, TEST_RECT.width() as usize),
+            "one column per point of height, a row per point of width"
+        );
+        // 1/30 s in 4 s over 200 columns: two columns, each a bar at +0.5 of the
+        // half width from the middle.
+        let half = TEST_RECT.width() * 0.5;
+        let row = (half - 0.5 * crate::module::REFERENCE_HEIGHT * half).round() as usize;
+        let shown = bars(&picture);
+        assert_eq!(
+            shown.iter().map(|bar| bar.0).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(
+            shown.iter().all(|bar| (bar.1, bar.2) == (row, row)),
+            "{shown:?}"
+        );
+        assert!(
+            module
+                .set_view_setting("flow", &SettingValue::Choice("sideways".to_owned()))
+                .is_err()
+        );
     }
 }

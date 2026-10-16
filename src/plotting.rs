@@ -1,4 +1,4 @@
-use crate::render::{Color, Image, Point, Rect, RenderTarget};
+use crate::render::{Color, Flow, Image, Point, Rect, RenderTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectrumCoordinates {
@@ -101,8 +101,9 @@ pub fn spectrum_dbfs_between(bins: &[f32], bin_hz: f32, low_hz: f32, high_hz: f3
 /// onto a ring of image columns. A column is computed once, when its data
 /// arrives (the newest one again while it fills), and only changed columns are
 /// uploaded; drawing never recomputes or moves earlier pixels, so nothing
-/// shimmers. Until the ring is full the picture grows from the left edge, then
-/// the newest column stays at the right edge.
+/// shimmers. The picture moves in `Flow`'s direction: until the ring is full it
+/// grows from the edge it moves toward, then the newest column stays at the edge
+/// opposite.
 #[derive(Default)]
 pub struct ColumnRing {
     image: Image,
@@ -153,14 +154,20 @@ impl ColumnRing {
         self.newest = Some(self.newest.map_or(column, |newest| newest.max(column)));
     }
 
-    /// Draw over `rect`, smoothly filtered.
-    pub fn draw(&mut self, renderer: &mut dyn RenderTarget, clip: Rect, rect: Rect) {
+    /// Draw over `rect`, smoothly filtered, moving toward `flow`.
+    pub fn draw(&mut self, renderer: &mut dyn RenderTarget, clip: Rect, rect: Rect, flow: Flow) {
         let Some(newest) = self.newest else {
             return;
         };
         let columns = self.image.width() as u64;
         let first = (newest + 1).saturating_sub(columns);
-        renderer.scrolling_image(clip, rect, &mut self.image, (first % columns) as usize);
+        renderer.scrolling_image(
+            clip,
+            rect,
+            &mut self.image,
+            (first % columns) as usize,
+            flow,
+        );
     }
 }
 
@@ -190,7 +197,7 @@ mod tests {
         ring.reset(4, 2);
         let mut target = RecordingTarget::default();
         let mut drawn = |ring: &mut ColumnRing| {
-            ring.draw(&mut target, rect, rect);
+            ring.draw(&mut target, rect, rect, Flow::Left);
             target.images.pop().unwrap()
         };
 

@@ -7,10 +7,10 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        number_setting, spec_from_saved,
+        flow_setting, flow_value, number_setting, spec_from_saved,
     },
     plotting::{ColumnRing, spectrum_dbfs_between},
-    render::Color,
+    render::{Color, Flow},
     settings::{SettingKind, SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
     theme::ColorRole,
@@ -75,6 +75,7 @@ impl ModuleFactory for SpectrogramFactory {
             history: HistoryView::new(),
             visible_seconds: DEFAULT_VISIBLE_SECONDS,
             gain_db: 0.0,
+            flow: Flow::default(),
             picture: ColumnRing::default(),
             picture_key: None,
             rows: Vec::new(),
@@ -114,6 +115,7 @@ struct SpectrogramModule {
     history: HistoryView,
     visible_seconds: f32,
     gain_db: f32,
+    flow: Flow,
     /// The picture: one column per FFT hop, each computed once, when its result
     /// arrives.
     picture: ColumnRing,
@@ -222,6 +224,7 @@ impl Module for SpectrogramModule {
                 value: SettingValue::Number(self.gain_db),
                 default: SettingValue::Number(0.0),
             },
+            flow_setting(self.flow),
         ]
     }
 
@@ -231,6 +234,7 @@ impl Module for SpectrogramModule {
                 self.visible_seconds = number_setting(key, value, self.visible_range())?;
             }
             "gain_db" => self.gain_db = number_setting(key, value, GAIN_DB_RANGE)?,
+            "flow" => self.flow = flow_value(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())
@@ -269,7 +273,9 @@ impl Module for SpectrogramModule {
         let max_frequency = (sample_rate * 0.5).min(20_000.0);
         let key = PictureKey {
             columns: window_frames.div_ceil(hop).max(1) as usize,
-            rows: frame.rect.height().round().max(1.0) as usize,
+            // Rows across the time axis: frequencies, highest at the top (on the
+            // right when the picture moves vertically).
+            rows: self.flow.extents(frame.rect).1.round().max(1.0) as usize,
             hop,
             max_frequency_bits: max_frequency.to_bits(),
             top_bits: (frame.reference_dbfs - self.gain_db).to_bits(),
@@ -315,7 +321,8 @@ impl Module for SpectrogramModule {
             self.picture.write(column, &self.column, !entry.gap_before);
             self.written_through = entry.frame.processed_through_frame;
         }
-        self.picture.draw(frame.renderer, frame.rect, frame.rect);
+        self.picture
+            .draw(frame.renderer, frame.rect, frame.rect, self.flow);
         ModuleResponse::default()
     }
 }

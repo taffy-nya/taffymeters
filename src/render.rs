@@ -258,15 +258,80 @@ impl Default for Image {
     }
 }
 
+/// Direction a time-scrolling picture moves: new content enters on the opposite
+/// edge. An `Image` stores time along its columns and the cross axis along each
+/// column (index 0 first); horizontal flows show index 0 at the top, vertical ones
+/// turn the picture a quarter clockwise, index 0 on the right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Flow {
+    /// Newest at the right edge.
+    #[default]
+    Left,
+    /// Newest at the left edge.
+    Right,
+    /// Newest at the bottom edge.
+    Up,
+    /// Newest at the top edge.
+    Down,
+}
+
+impl Flow {
+    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|flow| flow.id() == id)
+    }
+
+    pub fn is_vertical(self) -> bool {
+        matches!(self, Self::Up | Self::Down)
+    }
+
+    /// Lengths of `rect` along the time axis and across it.
+    pub fn extents(self, rect: Rect) -> (f32, f32) {
+        if self.is_vertical() {
+            (rect.height(), rect.width())
+        } else {
+            (rect.width(), rect.height())
+        }
+    }
+
+    /// Picture coordinates `(time, cross)` of the top-left, top-right, bottom-left
+    /// and bottom-right corners, each 0 (oldest / index 0) or 1 (newest / last).
+    pub fn corners(self) -> [(f32, f32); 4] {
+        match self {
+            Self::Left => [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)],
+            Self::Right => [(1.0, 0.0), (0.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+            Self::Up => [(0.0, 1.0), (0.0, 0.0), (1.0, 1.0), (1.0, 0.0)],
+            Self::Down => [(1.0, 1.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)],
+        }
+    }
+}
+
 pub trait RenderTarget {
     fn polyline(&mut self, clip: Rect, points: &[Point], stroke: Stroke);
     fn fill_rects(&mut self, clip: Rect, rects: &[ColoredRect]);
     fn circles(&mut self, clip: Rect, circles: &[Circle]);
     fn text(&mut self, clip: Rect, position: Point, text: &str, style: TextStyle);
     /// `image` stretched over `rect` with smooth (bilinear) filtering, read as a
-    /// horizontal ring: the left edge shows column `first_column`, the image wraps
-    /// around to `first_column - 1` at the right edge.
-    fn scrolling_image(&mut self, clip: Rect, rect: Rect, image: &mut Image, first_column: usize);
+    /// ring of time columns: the oldest edge (the one `flow` moves toward) shows
+    /// column `first_column`, the newest edge the column before it.
+    fn scrolling_image(
+        &mut self,
+        clip: Rect,
+        rect: Rect,
+        image: &mut Image,
+        first_column: usize,
+        flow: Flow,
+    );
 }
 
 pub struct EguiRenderTarget<'a> {
@@ -338,9 +403,16 @@ impl RenderTarget for EguiRenderTarget<'_> {
         );
     }
 
-    fn scrolling_image(&mut self, clip: Rect, rect: Rect, image: &mut Image, first_column: usize) {
+    fn scrolling_image(
+        &mut self,
+        clip: Rect,
+        rect: Rect,
+        image: &mut Image,
+        first_column: usize,
+        flow: Flow,
+    ) {
         use eframe::egui::{
-            Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Rect as UvRect, pos2,
+            Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Vertex, pos2,
         };
         let (width, height) = (image.width(), image.height());
         if width == 0 || height == 0 {
@@ -402,13 +474,33 @@ impl RenderTarget for EguiRenderTarget<'_> {
         entry.last_pass = pass;
         let texture = entry.texture.id();
         image.mark_uploaded();
-        // Sample texel centers at the edges: the left edge shows `first_column`, the
-        // right edge the column before it, the top and bottom rows unblended.
+        // Sample texel centers at the edges: the oldest edge shows `first_column`,
+        // the newest the column before it, the first and last rows unblended.
         let (w, h) = (width as f32, height as f32);
         let u0 = (first_column % width) as f32 / w + 0.5 / w;
-        let uv = UvRect::from_min_max(pos2(u0, 0.5 / h), pos2(u0 + 1.0 - 1.0 / w, 1.0 - 0.5 / h));
+        let (u1, v0, v1) = (u0 + 1.0 - 1.0 / w, 0.5 / h, 1.0 - 0.5 / h);
         let mut mesh = Mesh::with_texture(texture);
-        mesh.add_rect_with_uv(to_egui_rect(rect), uv, Color32::WHITE);
+        let positions = [
+            rect.min,
+            Point {
+                x: rect.max.x,
+                y: rect.min.y,
+            },
+            Point {
+                x: rect.min.x,
+                y: rect.max.y,
+            },
+            rect.max,
+        ];
+        for (position, (time, cross)) in positions.into_iter().zip(flow.corners()) {
+            mesh.vertices.push(Vertex {
+                pos: pos2(position.x, position.y),
+                uv: pos2(u0 + (u1 - u0) * time, v0 + (v1 - v0) * cross),
+                color: Color32::WHITE,
+            });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(2, 1, 3);
         self.painter
             .with_clip_rect(to_egui_rect(clip))
             .add(Shape::mesh(mesh));
@@ -444,6 +536,32 @@ fn to_egui_color(color: Color) -> eframe::egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_flow_puts_the_newest_column_on_the_edge_opposite_its_motion() {
+        // Corners: top-left, top-right, bottom-left, bottom-right; (time, cross).
+        let edge = |flow: Flow, corners: [usize; 2]| {
+            let all = flow.corners();
+            corners.map(|corner| all[corner])
+        };
+        let (newest, oldest) = (1.0, 0.0);
+        // Left: newest on the right, index 0 at the top.
+        assert!(edge(Flow::Left, [1, 3]).iter().all(|c| c.0 == newest));
+        assert!(edge(Flow::Left, [0, 2]).iter().all(|c| c.0 == oldest));
+        assert!(edge(Flow::Left, [0, 1]).iter().all(|c| c.1 == 0.0));
+        // Right: newest on the left, index 0 still at the top.
+        assert!(edge(Flow::Right, [0, 2]).iter().all(|c| c.0 == newest));
+        assert!(edge(Flow::Right, [0, 1]).iter().all(|c| c.1 == 0.0));
+        // Up: newest at the bottom; turned clockwise, index 0 on the right.
+        assert!(edge(Flow::Up, [2, 3]).iter().all(|c| c.0 == newest));
+        assert!(edge(Flow::Up, [1, 3]).iter().all(|c| c.1 == 0.0));
+        // Down: newest at the top, index 0 on the right.
+        assert!(edge(Flow::Down, [0, 1]).iter().all(|c| c.0 == newest));
+        assert!(edge(Flow::Down, [1, 3]).iter().all(|c| c.1 == 0.0));
+        for flow in Flow::ALL {
+            assert_eq!(Flow::from_id(flow.id()), Some(flow));
+        }
+    }
 
     #[test]
     fn opaque_color_serializes_to_the_short_hex_form_and_round_trips() {
