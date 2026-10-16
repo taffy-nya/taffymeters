@@ -207,6 +207,10 @@ pub(crate) enum WorkspaceAction {
     SetTextSize {
         size: Option<f32>,
     },
+    /// Display reference level in dBFS; `None` follows the default.
+    SetReferenceLevel {
+        dbfs: Option<f32>,
+    },
     SaveWorkspace,
     SaveWorkspaceAs {
         name: String,
@@ -456,6 +460,8 @@ pub struct Workspace {
     /// Colors of the window chrome (global roles).
     chrome: Palette,
     input: InputConfig,
+    /// Display reference level this workspace sets (`None`: the default).
+    reference_dbfs: Option<f32>,
     /// Restore and save problems, listed in the settings until cleared.
     notices: Vec<String>,
     /// The status badge shows the notices until this display time (a new notice
@@ -502,6 +508,7 @@ impl Workspace {
             chrome: theme.global_palette(),
             theme,
             input: InputConfig::default(),
+            reference_dbfs: None,
             notices: Vec::new(),
             binding_numbers: HashMap::new(),
             settings: None,
@@ -793,6 +800,7 @@ impl Workspace {
                 Ok(ActionOutcome::Applied)
             }
             WorkspaceAction::SetTextSize { size } => self.set_text_size(size),
+            WorkspaceAction::SetReferenceLevel { dbfs } => self.set_reference_level(dbfs),
             WorkspaceAction::SaveWorkspace => {
                 self.save()?;
                 Ok(ActionOutcome::Applied)
@@ -873,6 +881,23 @@ impl Workspace {
         self.theme.text_size = size.map(|size| size.clamp(min, max));
         self.refresh_palettes();
         Ok(ActionOutcome::Applied)
+    }
+
+    fn set_reference_level(&mut self, dbfs: Option<f32>) -> Result<ActionOutcome, WorkspaceError> {
+        if dbfs.is_some_and(|dbfs| !dbfs.is_finite()) {
+            return Err(WorkspaceError::Unsupported("a non-finite reference level"));
+        }
+        let (min, max) = crate::module::REFERENCE_DBFS_RANGE;
+        self.reference_dbfs = dbfs.map(|dbfs| dbfs.clamp(min, max));
+        Ok(ActionOutcome::Applied)
+    }
+
+    /// The reference level every Module draws against (see `ModuleFrame`).
+    pub(crate) fn reference_dbfs(&self) -> f32 {
+        let (min, max) = crate::module::REFERENCE_DBFS_RANGE;
+        self.reference_dbfs
+            .unwrap_or(crate::module::DEFAULT_REFERENCE_DBFS)
+            .clamp(min, max)
     }
 
     fn quit(&mut self) -> Result<ActionOutcome, WorkspaceError> {

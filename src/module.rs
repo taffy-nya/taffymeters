@@ -25,7 +25,30 @@ pub struct ModuleFrame<'a> {
     pub zoom_delta: f32,
     /// Colors resolved for this instance (theme, type style, instance overrides).
     pub palette: &'a Palette,
+    /// The workspace's reference level: where the user's signal usually peaks.
+    /// Views place it at `REFERENCE_HEIGHT`, so every Module fills a similar
+    /// height whatever the input's loudness. Display only: readouts stay dBFS.
+    pub reference_dbfs: f32,
     pub renderer: &'a mut dyn RenderTarget,
+}
+
+/// Reference level of a workspace that sets none: measured on the system loopback
+/// at the user's usual listening volume (music peaks: p50 −20, p90 −15, p99 −12.7,
+/// max −11 dBFS over 60 s), so everyday peaks stay within the views.
+pub const DEFAULT_REFERENCE_DBFS: f32 = -12.0;
+/// Range of the reference level the settings offer.
+pub const REFERENCE_DBFS_RANGE: (f32, f32) = (-60.0, 0.0);
+/// Fraction of a view's height (of the half height for signed views) at which a
+/// signal at the reference level is drawn.
+pub const REFERENCE_HEIGHT: f32 = 0.9;
+/// dB views show this much above the reference (the reference sits at
+/// `1 - 10/100` of a 100 dB span, i.e. `REFERENCE_HEIGHT`).
+pub const REFERENCE_HEADROOM_DB: f32 = 10.0;
+
+/// Linear view gain: a sample at the reference level reaches `REFERENCE_HEIGHT`
+/// of the (half) height.
+pub fn reference_gain(reference_dbfs: f32) -> f32 {
+    REFERENCE_HEIGHT / 10.0_f32.powf(reference_dbfs / 20.0)
 }
 
 /// Repaint interval an animating Module requests: the default 60 fps display rate.

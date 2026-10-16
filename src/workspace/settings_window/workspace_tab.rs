@@ -5,7 +5,9 @@ use eframe::egui::{self, Align, Layout};
 
 use super::{
     SettingsItem, SettingsWindow,
-    widgets::{button, card, danger_button, header, record, trailing, warning},
+    widgets::{
+        Number, button, card, danger_button, differs, header, number_row, record, trailing, warning,
+    },
 };
 use crate::{
     audio::SourceState,
@@ -124,6 +126,25 @@ impl Workspace {
                 controls,
             ) {
                 actions.push(WorkspaceAction::TogglePause);
+            }
+            // Where the input usually peaks: every Module draws it at the same
+            // height, so one setting adapts all views to the input's loudness.
+            let default = crate::module::DEFAULT_REFERENCE_DBFS;
+            if let Some(dbfs) = number_row(
+                ui,
+                Number {
+                    label: "Reference level",
+                    key: SettingsItem::ReferenceLevel,
+                    current: self.reference_dbfs(),
+                    range: crate::module::REFERENCE_DBFS_RANGE,
+                    unit: "dBFS",
+                    logarithmic: false,
+                    default: Some(default),
+                },
+                controls,
+            ) {
+                let dbfs = differs(dbfs, default).then_some(dbfs);
+                actions.push(WorkspaceAction::SetReferenceLevel { dbfs });
             }
         });
         if !self.notices.is_empty() {

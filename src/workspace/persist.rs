@@ -334,6 +334,7 @@ impl Workspace {
         }
         self.theme = ThemeSettings::dark();
         self.input = InputConfig::default();
+        self.reference_dbfs = None;
         self.refresh_palettes();
         let mut window = WindowState::new(
             Layout::with_leaf(first),
@@ -378,6 +379,7 @@ impl Workspace {
             ));
         }
         self.input = file.input;
+        self.reference_dbfs = file.reference_dbfs;
         let mut bindings: HashMap<u64, SharedAnalysisId> = HashMap::new();
         let mut groups: HashMap<u32, u64> = HashMap::new();
         for window_file in &file.windows {
@@ -675,6 +677,7 @@ impl Workspace {
             format_version: FORMAT_VERSION,
             name: self.name.clone(),
             input: self.input.clone(),
+            reference_dbfs: self.reference_dbfs,
             theme: self.theme.clone(),
             windows,
         }

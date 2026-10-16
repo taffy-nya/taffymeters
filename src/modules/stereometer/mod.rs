@@ -3,7 +3,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        flag_setting, number_setting, overlay_setting,
+        REFERENCE_HEIGHT, flag_setting, number_setting, overlay_setting, reference_gain,
     },
     render::{Circle, Point, Stroke, TextStyle},
     settings::{SettingValue, ViewSetting},
@@ -116,7 +116,7 @@ impl Module for StereometerModule {
             return ModuleResponse::default();
         }
         let center = frame.rect.center();
-        let radius = frame.rect.width().min(frame.rect.height()) * 0.45;
+        let radius = frame.rect.width().min(frame.rect.height()) * 0.5 * REFERENCE_HEIGHT;
         if self.show_guides {
             let guide = Stroke {
                 width: 1.0,
@@ -154,6 +154,10 @@ impl Module for StereometerModule {
         let dot = frame.palette.color(ColorRole::Primary);
         let dot = dot.with_alpha((f32::from(dot.alpha) * 180.0 / 255.0) as u8);
         self.circles.clear();
+        // Mid up, side across, each the mean of the two channels: mono-like content
+        // peaking at the reference reaches the guide radius. Scale is relative.
+        let half = frame.rect.width().min(frame.rect.height()) * 0.5;
+        let gain = 0.5 * half * self.scale * reference_gain(frame.reference_dbfs);
         if let Some(chunk) = snapshot.pcm() {
             let step = chunk.frame_count.div_ceil(512).max(1);
             for samples in chunk.interleaved.chunks_exact(channels).step_by(step) {
@@ -161,8 +165,8 @@ impl Module for StereometerModule {
                 let right = samples[1];
                 self.circles.push(Circle {
                     center: Point {
-                        x: center.x + (left - right) * 0.707 * radius * self.scale,
-                        y: center.y - (left + right) * 0.707 * radius * self.scale,
+                        x: center.x + (left - right) * gain,
+                        y: center.y - (left + right) * gain,
                     },
                     radius: 1.4,
                     color: dot,

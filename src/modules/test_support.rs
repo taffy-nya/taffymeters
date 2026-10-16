@@ -169,6 +169,8 @@ pub(crate) fn draw(
         scroll_delta_y: 0.0,
         zoom_delta: 1.0,
         palette: &Palette::default(),
+        // Full scale: a sample of 1.0 reaches `REFERENCE_HEIGHT` of the half height.
+        reference_dbfs: 0.0,
         renderer: target,
     })
 }

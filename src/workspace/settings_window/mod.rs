@@ -125,6 +125,7 @@ pub(crate) enum SettingsItem {
     Quit,
     Preset(Preset),
     TextSize,
+    ReferenceLevel,
     TypeStyle(&'static str),
 }
 

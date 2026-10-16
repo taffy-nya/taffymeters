@@ -660,6 +660,7 @@ impl Workspace {
         };
         let picking = self.move_source.is_some();
         let popup_open = egui::Popup::is_any_open(&ctx);
+        let reference_dbfs = self.reference_dbfs();
 
         // Leaf bodies first: everything registered later sits on top of them.
         for &(leaf, leaf_rect) in &geometry.leaves {
@@ -722,6 +723,7 @@ impl Workspace {
                     scroll_delta_y,
                     zoom_delta,
                     palette: &entry.palette,
+                    reference_dbfs,
                     renderer: &mut renderer,
                 });
                 if let Some(delay) = response.repaint_after {

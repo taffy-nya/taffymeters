@@ -9,7 +9,8 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption, flag_setting, number_setting, overlay_setting, spec_from_saved,
+        REFERENCE_HEADROOM_DB, StyleOption, flag_setting, number_setting, overlay_setting,
+        spec_from_saved,
     },
     plotting::{SpectrumCoordinates, spectrum_dbfs_at},
     render::{Point, Rect, TextStyle},
@@ -93,15 +94,16 @@ const COLOR_ROLES: &[ColorRole] = &[
 ];
 
 /// Highest frequency shown (the zoom gesture and the setting share these bounds;
-/// the source's Nyquist frequency caps it when drawing), the level at the bottom
-/// edge, and the shown dB range above it.
+/// the source's Nyquist frequency caps it when drawing), the bottom edge relative
+/// to the workspace reference level, and the shown dB range above it.
 const MAX_FREQUENCY_RANGE: (f32, f32) = (80.0, 96_000.0);
-const BOTTOM_DBFS_RANGE: (f32, f32) = (-160.0, -20.0);
+const BOTTOM_DB_RANGE: (f32, f32) = (-150.0, -10.0);
 const DB_RANGE: (f32, f32) = (24.0, 180.0);
-/// What a new Spectrum shows: up to 20 kHz, -100 to 0 dBFS.
+/// What a new Spectrum shows: up to 20 kHz, from 90 dB below the reference to
+/// 10 dB above it, so the reference sits at `REFERENCE_HEIGHT`.
 const DEFAULT_MAX_FREQUENCY_HZ: f32 = 20_000.0;
-const DEFAULT_BOTTOM_DBFS: f32 = -100.0;
 const DEFAULT_RANGE_DB: f32 = 100.0;
+const DEFAULT_BOTTOM_DB: f32 = REFERENCE_HEADROOM_DB - DEFAULT_RANGE_DB;
 /// Wheel zoom per scroll point: the range scales by `exp(-k · dy)`, the pace of the
 /// previous implementation's `1 + 0.001 · dy`.
 const WHEEL_ZOOM_PER_POINT: f32 = 0.001;
@@ -132,11 +134,11 @@ impl SpectrumModuleFactory {
             snapshot: Snapshot::default(),
             style: registry.create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)?,
             style_id: DEFAULT_SPECTRUM_STYLE_ID,
-            coordinates: SpectrumCoordinates {
+            view: SpectrumCoordinates {
                 min_frequency_hz: 20.0,
                 max_frequency_hz: DEFAULT_MAX_FREQUENCY_HZ,
-                min_dbfs: DEFAULT_BOTTOM_DBFS,
-                max_dbfs: DEFAULT_BOTTOM_DBFS + DEFAULT_RANGE_DB,
+                min_dbfs: DEFAULT_BOTTOM_DB,
+                max_dbfs: DEFAULT_BOTTOM_DB + DEFAULT_RANGE_DB,
             },
             show_peak: false,
             show_readout: false,
@@ -179,7 +181,8 @@ struct SpectrumModule {
     snapshot: Snapshot,
     style: Box<dyn SpectrumStyle>,
     style_id: &'static str,
-    coordinates: SpectrumCoordinates,
+    /// Shown frequencies, and levels relative to the workspace reference level.
+    view: SpectrumCoordinates,
     show_peak: bool,
     show_readout: bool,
     hover_line: String,
@@ -297,21 +300,21 @@ impl Module for SpectrumModule {
                     unit: "Hz",
                     logarithmic: true,
                 },
-                value: SettingValue::Number(self.coordinates.max_frequency_hz),
+                value: SettingValue::Number(self.view.max_frequency_hz),
                 default: SettingValue::Number(DEFAULT_MAX_FREQUENCY_HZ),
             },
             ViewSetting {
-                key: "bottom_dbfs",
+                key: "bottom_db",
                 label: "Bottom",
                 section: "Display",
                 kind: SettingKind::Number {
-                    min: BOTTOM_DBFS_RANGE.0,
-                    max: BOTTOM_DBFS_RANGE.1,
-                    unit: "dBFS",
+                    min: BOTTOM_DB_RANGE.0,
+                    max: BOTTOM_DB_RANGE.1,
+                    unit: "dB",
                     logarithmic: false,
                 },
-                value: SettingValue::Number(self.coordinates.min_dbfs),
-                default: SettingValue::Number(DEFAULT_BOTTOM_DBFS),
+                value: SettingValue::Number(self.view.min_dbfs),
+                default: SettingValue::Number(DEFAULT_BOTTOM_DB),
             },
             ViewSetting {
                 key: "range_db",
@@ -323,7 +326,7 @@ impl Module for SpectrumModule {
                     unit: "dB",
                     logarithmic: false,
                 },
-                value: SettingValue::Number(self.coordinates.max_dbfs - self.coordinates.min_dbfs),
+                value: SettingValue::Number(self.view.max_dbfs - self.view.min_dbfs),
                 default: SettingValue::Number(DEFAULT_RANGE_DB),
             },
             overlay_setting("show_peak", "Peak curve", self.show_peak),
@@ -332,20 +335,18 @@ impl Module for SpectrumModule {
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
-        let range = self.coordinates.max_dbfs - self.coordinates.min_dbfs;
+        let range = self.view.max_dbfs - self.view.min_dbfs;
         match key {
             "max_frequency_hz" => {
-                self.coordinates.max_frequency_hz =
-                    number_setting(key, value, MAX_FREQUENCY_RANGE)?;
+                self.view.max_frequency_hz = number_setting(key, value, MAX_FREQUENCY_RANGE)?;
             }
             // Moving the bottom keeps the range: the whole view shifts.
-            "bottom_dbfs" => {
-                self.coordinates.min_dbfs = number_setting(key, value, BOTTOM_DBFS_RANGE)?;
-                self.coordinates.max_dbfs = self.coordinates.min_dbfs + range;
+            "bottom_db" => {
+                self.view.min_dbfs = number_setting(key, value, BOTTOM_DB_RANGE)?;
+                self.view.max_dbfs = self.view.min_dbfs + range;
             }
             "range_db" => {
-                self.coordinates.max_dbfs =
-                    self.coordinates.min_dbfs + number_setting(key, value, DB_RANGE)?;
+                self.view.max_dbfs = self.view.min_dbfs + number_setting(key, value, DB_RANGE)?;
             }
             "show_peak" => self.show_peak = flag_setting(key, value)?,
             "show_readout" => self.show_readout = flag_setting(key, value)?,
@@ -377,13 +378,18 @@ impl Module for SpectrumModule {
             peak_dbfs: peak.map(|peak| peak.bins_dbfs.as_slice()),
         };
         let nyquist = self.reader.descriptor().sample_rate_hz as f32 * 0.5;
-        self.coordinates.max_frequency_hz = self.coordinates.max_frequency_hz.min(nyquist);
+        self.view.max_frequency_hz = self.view.max_frequency_hz.min(nyquist);
         let plot = frame.rect;
-        Self::update_range(&mut self.coordinates, &frame, plot, nyquist);
+        Self::update_range(&mut self.view, &frame, plot, nyquist);
+        let coordinates = SpectrumCoordinates {
+            min_dbfs: frame.reference_dbfs + self.view.min_dbfs,
+            max_dbfs: frame.reference_dbfs + self.view.max_dbfs,
+            ..self.view
+        };
         self.style.draw(
             SpectrumStyleContext {
                 snapshot: &data,
-                coordinates: &self.coordinates,
+                coordinates: &coordinates,
                 rect: plot,
                 monotonic_time: frame.monotonic_time,
                 palette: frame.palette,
@@ -391,13 +397,7 @@ impl Module for SpectrumModule {
             frame.renderer,
         );
         if self.show_readout {
-            Self::draw_hover(
-                &self.coordinates,
-                &mut self.hover_line,
-                &mut frame,
-                plot,
-                &data,
-            );
+            Self::draw_hover(&coordinates, &mut self.hover_line, &mut frame, plot, &data);
         }
         ModuleResponse::default()
     }
@@ -645,6 +645,7 @@ mod tests {
             scroll_delta_y,
             zoom_delta: 1.0,
             palette,
+            reference_dbfs: crate::module::DEFAULT_REFERENCE_DBFS,
             renderer: target,
         }
     }
@@ -707,27 +708,21 @@ mod tests {
         let mut coordinates = SpectrumCoordinates {
             min_frequency_hz: 20.0,
             max_frequency_hz: 20_000.0,
-            min_dbfs: DEFAULT_BOTTOM_DBFS,
-            max_dbfs: DEFAULT_BOTTOM_DBFS + DEFAULT_RANGE_DB,
+            min_dbfs: DEFAULT_BOTTOM_DB,
+            max_dbfs: DEFAULT_BOTTOM_DB + DEFAULT_RANGE_DB,
         };
         let palette = crate::theme::Palette::default();
         let mut target = RecordingTarget::default();
         let inside = Some(Point { x: 400.0, y: 200.0 });
         let frame = frame_at(&mut target, &palette, inside, 200.0);
         let plot = frame.rect;
-        let before = coordinates.y_for_dbfs(-50.0, plot);
+        let before = coordinates.y_for_dbfs(-30.0, plot);
         SpectrumModule::update_range(&mut coordinates, &frame, plot, 24_000.0);
-        assert_eq!(
-            coordinates.min_dbfs, DEFAULT_BOTTOM_DBFS,
-            "the bottom stays"
-        );
-        assert_eq!(
-            coordinates.y_for_dbfs(DEFAULT_BOTTOM_DBFS, plot),
-            plot.max.y
-        );
+        assert_eq!(coordinates.min_dbfs, DEFAULT_BOTTOM_DB, "the bottom stays");
+        assert_eq!(coordinates.y_for_dbfs(DEFAULT_BOTTOM_DB, plot), plot.max.y);
         let range = coordinates.max_dbfs - coordinates.min_dbfs;
         assert!((range - DEFAULT_RANGE_DB * (-0.2_f32).exp()).abs() < 0.01);
-        let after = coordinates.y_for_dbfs(-50.0, plot);
+        let after = coordinates.y_for_dbfs(-30.0, plot);
         assert!(after < before, "scrolling up makes the curve taller");
         // Linear about the bottom: heights above it scale by one factor.
         let height = |y: f32| plot.max.y - y;
@@ -943,6 +938,7 @@ mod tests {
                     scroll_delta_y: 0.0,
                     zoom_delta: 1.0,
                     palette: &crate::theme::Palette::default(),
+                    reference_dbfs: crate::module::DEFAULT_REFERENCE_DBFS,
                     renderer: &mut target,
                 });
             }

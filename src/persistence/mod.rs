@@ -25,6 +25,9 @@ pub(crate) struct WorkspaceFile {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) input: InputConfig,
+    /// Display reference level (dBFS); absent follows the build's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference_dbfs: Option<f32>,
     #[serde(default = "ThemeSettings::dark")]
     pub(crate) theme: ThemeSettings,
     #[serde(default)]
@@ -340,6 +343,7 @@ mod tests {
             format_version: FORMAT_VERSION,
             name: name.into(),
             input: InputConfig::default(),
+            reference_dbfs: None,
             theme: ThemeSettings::dark(),
             windows: Vec::new(),
         }

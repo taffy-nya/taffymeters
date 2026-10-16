@@ -7,7 +7,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        number_setting, spec_from_saved,
+        REFERENCE_HEADROOM_DB, number_setting, spec_from_saved,
     },
     plotting::SpectrumCoordinates,
     render::{ColoredRect, Point, Rect},
@@ -22,6 +22,9 @@ const HISTORY_SECONDS: f32 = 8.0;
 const MIN_VISIBLE_SECONDS: f32 = 0.5;
 /// Visible span a new Spectrogram shows.
 const DEFAULT_VISIBLE_SECONDS: f32 = 6.0;
+/// Levels from this far below the top (the reference plus its headroom) to the top
+/// map to the color scale.
+const LEVEL_SPAN_DB: f32 = 100.0;
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
 
@@ -240,6 +243,7 @@ impl Module for SpectrogramModule {
                 }));
             }
             let bins = &data.bins_dbfs;
+            let top_dbfs = frame.reference_dbfs + REFERENCE_HEADROOM_DB;
             for (band, &(first_bin, end_bin)) in self.band_bins.iter().enumerate() {
                 let y0 = frame.rect.max.y - (band + 1) as f32 * band_height;
                 let y1 = y0 + band_height + 0.5;
@@ -250,7 +254,8 @@ impl Module for SpectrogramModule {
                 else {
                     continue;
                 };
-                let normalized = ((dbfs - fft.floor_dbfs) / -fft.floor_dbfs).clamp(0.0, 1.0);
+                // Same span as a default Spectrum: the reference sits near the top.
+                let normalized = ((dbfs - top_dbfs) / LEVEL_SPAN_DB + 1.0).clamp(0.0, 1.0);
                 if normalized <= 0.015 {
                     continue;
                 }

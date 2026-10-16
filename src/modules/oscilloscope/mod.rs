@@ -10,7 +10,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption, flag_setting, number_setting, overlay_setting,
+        StyleOption, flag_setting, number_setting, overlay_setting, reference_gain,
     },
     render::{Point, Stroke},
     settings::{SettingValue, ViewSetting},
@@ -174,7 +174,8 @@ impl Module for OscilloscopeModule {
                 frame: &snapshot,
                 channel: self.channel,
                 rect: frame.rect,
-                y_scale: self.y_scale,
+                // The Scale setting is relative to the workspace reference level.
+                y_scale: self.y_scale * reference_gain(frame.reference_dbfs),
                 monotonic_time: frame.monotonic_time,
                 palette: frame.palette,
             },
@@ -229,6 +230,12 @@ mod tests {
     /// One persistence trace (the center line is hidden by default).
     const ONE_TRACE: usize = 1;
 
+    /// Height of `level` in the test frames, whose full-scale reference draws 1.0
+    /// at `REFERENCE_HEIGHT` of the half height.
+    fn level_y(level: f32) -> f32 {
+        TEST_RECT.center().y - level * crate::module::REFERENCE_HEIGHT * TEST_RECT.height() * 0.5
+    }
+
     #[test]
     fn reselecting_oscilloscope_channel_keeps_persistence_traces() {
         let mut fixture = PcmFixture::new(2);
@@ -266,8 +273,8 @@ mod tests {
         // The old channel's trace (mono mix 0.05) must be gone. Whether the same
         // result is re-traced from the new channel is not specified; if it is, it
         // must follow Left.
-        let mono_y = TEST_RECT.center().y - 0.05 * TEST_RECT.height() * 0.5;
-        let left_y = TEST_RECT.center().y - 0.2 * TEST_RECT.height() * 0.5;
+        let mono_y = level_y(0.05);
+        let left_y = level_y(0.2);
         for trace in &target.polylines {
             assert!(
                 trace
@@ -290,8 +297,8 @@ mod tests {
         draw(module.as_mut(), &mut target, Duration::from_millis(100));
         assert_eq!(target.non_empty_polylines(), ONE_TRACE);
         let trace = target.polylines.last().unwrap();
-        // Left is 0.2 (mono mix would be 0.05): y = center - 0.2 * height / 2.
-        let expected_y = TEST_RECT.center().y - 0.2 * TEST_RECT.height() * 0.5;
+        // Left is 0.2 (mono mix would be 0.05).
+        let expected_y = level_y(0.2);
         assert!(
             trace
                 .points

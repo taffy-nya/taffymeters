@@ -4,7 +4,7 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        number_setting,
+        number_setting, reference_gain,
     },
     render::{ColoredRect, Point, Rect},
     settings::{SettingKind, SettingValue, ViewSetting},
@@ -256,11 +256,13 @@ impl Module for WaveformModule {
         self.bars.clear();
         let center = frame.rect.center().y;
         let half_height = frame.rect.height() * 0.5;
+        // The Scale setting is relative to the workspace reference level.
+        let gain = self.y_scale * reference_gain(frame.reference_dbfs);
         for &(bin, minimum, maximum) in &envelope.bins {
             let column = (bin - first_bin) as f32;
-            let top = center - (maximum * self.y_scale).clamp(-1.0, 1.0) * half_height;
-            let bottom = center - (minimum * self.y_scale).clamp(-1.0, 1.0) * half_height;
-            let amplitude = maximum.abs().max(minimum.abs()) * self.y_scale;
+            let top = center - (maximum * gain).clamp(-1.0, 1.0) * half_height;
+            let bottom = center - (minimum * gain).clamp(-1.0, 1.0) * half_height;
+            let amplitude = maximum.abs().max(minimum.abs()) * gain;
             self.bars.push(ColoredRect {
                 rect: Rect {
                     min: Point {
@@ -327,7 +329,8 @@ mod tests {
     /// Vertical extent of a bar of constant sample `level` at full scale: the bar is
     /// one point tall and `level` moves it up (positive) from the center line.
     fn flat_bar_y(level: f32) -> f32 {
-        TEST_RECT.center().y - level * TEST_RECT.height() * 0.5
+        // The test frames use a full-scale reference: 1.0 reaches `REFERENCE_HEIGHT`.
+        TEST_RECT.center().y - level * crate::module::REFERENCE_HEIGHT * TEST_RECT.height() * 0.5
     }
 
     #[test]

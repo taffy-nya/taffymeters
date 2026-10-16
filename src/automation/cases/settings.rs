@@ -794,6 +794,24 @@ fn s03() -> Result<Value, String> {
             h.ws.observation().theme.text_size
         ),
     )?;
+    // Typed reference level on the Workspace tab; its ↺ follows the default again.
+    h.in_settings(&[SettingsItem::Tab(Tab::Workspace)])?;
+    type_value(
+        &mut h,
+        SettingsItem::ReferenceLevel,
+        "-24",
+        egui::Key::Enter,
+    )?;
+    let typed_reference = h.ws.reference_dbfs();
+    h.click(ControlKey::SettingsReset(SettingsItem::ReferenceLevel))?;
+    check(
+        typed_reference == -24.0 && h.ws.reference_dbfs() == crate::module::DEFAULT_REFERENCE_DBFS,
+        &format!(
+            "reference typed {typed_reference}, after ↺ {}",
+            h.ws.reference_dbfs()
+        ),
+    )?;
+    h.in_settings(&[SettingsItem::Tab(Tab::Theme)])?;
     // Card ↺: every global edit, the shown type's style, every instance override.
     h.in_settings(&[
         SettingsItem::Swatch {
@@ -952,6 +970,7 @@ fn s04() -> Result<Value, String> {
             output: OutputId::from_index(0),
             seconds: 3.0,
         },
+        WorkspaceAction::SetReferenceLevel { dbfs: Some(-24.0) },
         WorkspaceAction::SetThemePreset {
             preset: Preset::Light,
         },
@@ -1091,6 +1110,14 @@ fn s04() -> Result<Value, String> {
     check(
         before == after,
         &format!("restored workspace differs:\nbefore {before}\nafter  {after}"),
+    )?;
+    check(
+        h.ws.reference_dbfs() == -24.0 && saved["reference_dbfs"] == -24.0,
+        &format!(
+            "reference level not restored: {} (file {})",
+            h.ws.reference_dbfs(),
+            saved["reference_dbfs"]
+        ),
     )?;
     let o = h.ws.observation();
     check(
