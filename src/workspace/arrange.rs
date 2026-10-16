@@ -29,10 +29,18 @@ impl Workspace {
     /// Whether a copy of `instance` fits on `side`. Placeholders of types this
     /// build lacks cannot be copied.
     pub(crate) fn can_split(&self, instance: ModuleInstanceId, side: Side) -> bool {
+        self.window_of(instance)
+            .and_then(|window_id| self.leaf_rect(window_id, instance))
+            .is_some_and(|rect| self.can_split_in(instance, side, rect.size()))
+    }
+
+    /// `can_split` for a leaf already laid out at `area`.
+    pub(crate) fn can_split_in(&self, instance: ModuleInstanceId, side: Side, area: Vec2) -> bool {
+        let min = self.module_min_size(instance);
         self.modules
             .get(&instance)
             .is_some_and(|entry| entry.preserved.is_none())
-            && self.can_place_beside(instance, side, self.module_min_size(instance))
+            && fits(area, side.axis(), min, min)
     }
 
     pub(crate) fn move_target_valid(&self, source: ModuleInstanceId, target: MoveTarget) -> bool {

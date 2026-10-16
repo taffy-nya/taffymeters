@@ -22,9 +22,11 @@ use crate::{
     theme::ColorRole,
 };
 
-/// Width of the right / bottom split entries, in logical points.
+/// Width of the right / bottom split entries, in logical points; a quarter of the leaf
+/// when that is less.
 pub(crate) const SPLIT_ZONE: f32 = 20.0;
-/// Thickness of the native resize edges and size of the corner squares.
+/// Thickness of the native resize edges and size of the corner squares; small windows
+/// scale both down so the middle stays content.
 pub(crate) const RESIZE_EDGE: f32 = 6.0;
 pub(crate) const RESIZE_CORNER: f32 = 12.0;
 /// Poll interval for state that changes without new audio data or input.
@@ -180,10 +182,12 @@ impl ResizeEdge {
         }
     }
 
-    /// Non-overlapping hit rect: corners are squares, edges stop at the corners.
+    /// Non-overlapping hit rect: corners are squares, edges stop at the corners. A
+    /// corner is at most a quarter of the shorter side, edges half a corner thick.
     fn rect(self, window: Rect) -> Rect {
         let (min, max) = (window.min, window.max);
-        let (b, c) = (RESIZE_EDGE, RESIZE_CORNER);
+        let c = RESIZE_CORNER.min(window.width().min(window.height()) / 4.0);
+        let b = RESIZE_EDGE * c / RESIZE_CORNER;
         match self {
             Self::NorthWest => Rect::from_min_max(min, pos2(min.x + c, min.y + c)),
             Self::NorthEast => Rect::from_min_max(pos2(max.x - c, min.y), pos2(max.x, min.y + c)),
@@ -277,12 +281,16 @@ fn to_render_rect(rect: Rect) -> RenderRect {
     }
 }
 
+/// Sides with a split entry: the leaf's right and bottom edges.
+const SPLIT_SIDES: [Side; 2] = [Side::Right, Side::Below];
+
 fn split_zone(rect: Rect, side: Side) -> Rect {
+    let right = SPLIT_ZONE.min(rect.width() / 4.0);
     match side {
-        Side::Right => Rect::from_min_max(pos2(rect.max.x - SPLIT_ZONE, rect.min.y), rect.max),
+        Side::Right => Rect::from_min_max(pos2(rect.max.x - right, rect.min.y), rect.max),
         _ => Rect::from_min_max(
-            pos2(rect.min.x, rect.max.y - SPLIT_ZONE),
-            pos2(rect.max.x - SPLIT_ZONE, rect.max.y),
+            pos2(rect.min.x, rect.max.y - SPLIT_ZONE.min(rect.height() / 4.0)),
+            pos2(rect.max.x - right, rect.max.y),
         ),
     }
 }
@@ -651,6 +659,19 @@ impl Workspace {
         }
     }
 
+    /// Hit rect of a leaf's split entry, or `None` when it is hidden: while picking a
+    /// move target, or when a copy would not fit on that side.
+    fn split_entry(
+        &self,
+        leaf: ModuleInstanceId,
+        leaf_rect: Rect,
+        side: Side,
+        picking: bool,
+    ) -> Option<Rect> {
+        (!picking && self.can_split_in(leaf, side, leaf_rect.size()))
+            .then(|| split_zone(leaf_rect, side))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn layout_ui(
         &mut self,
@@ -700,13 +721,16 @@ impl Workspace {
             }
             // The Module only sees the pointer over its own content, not over the
             // window chrome drawn on top of it (split entries, dividers, resize edges).
+            let entries = SPLIT_SIDES.map(|side| self.split_entry(leaf, leaf_rect, side, picking));
             let pointer = (body.contains_pointer() && !popup_open && !picking)
                 .then(|| ui.input(|input| input.pointer.hover_pos()))
                 .flatten()
                 .filter(|position| {
                     leaf_rect.contains(*position)
-                        && !split_zone(leaf_rect, Side::Right).contains(*position)
-                        && !split_zone(leaf_rect, Side::Below).contains(*position)
+                        && !entries
+                            .iter()
+                            .flatten()
+                            .any(|zone| zone.contains(*position))
                         && !geometry
                             .dividers
                             .iter()
@@ -742,46 +766,46 @@ impl Workspace {
             }
         }
 
-        // Split entries.
-        if !picking {
-            let dragging = ui.input(|input| input.pointer.is_decidedly_dragging());
-            for &(leaf, leaf_rect) in &geometry.leaves {
-                for side in [Side::Right, Side::Below] {
-                    let zone = split_zone(leaf_rect, side);
-                    let response = ui.interact(
+        // Split entries, only where a copy fits: elsewhere the leaf body takes the
+        // clicks, so even a minimum-size leaf stays selectable and draggable.
+        let dragging = ui.input(|input| input.pointer.is_decidedly_dragging());
+        for &(leaf, leaf_rect) in &geometry.leaves {
+            for side in SPLIT_SIDES {
+                let Some(zone) = self.split_entry(leaf, leaf_rect, side, picking) else {
+                    continue;
+                };
+                let response = ui.interact(
+                    zone,
+                    Id::new(("taffymeters.split", window_id.0, leaf.0, side as u8)),
+                    Sense::click(),
+                );
+                controls.record(
+                    ControlKey::SplitZone {
+                        instance_id: leaf,
+                        side,
+                    },
+                    &response,
+                );
+                if response.hovered() && !dragging {
+                    let painter = ui.painter_at(zone);
+                    painter.rect_filled(
                         zone,
-                        Id::new(("taffymeters.split", window_id.0, leaf.0, side as u8)),
-                        Sense::click(),
+                        0.0,
+                        color32(self.chrome.color(ColorRole::Accent)).gamma_multiply(0.35),
                     );
-                    controls.record(
-                        ControlKey::SplitZone {
-                            instance_id: leaf,
-                            side,
-                        },
-                        &response,
+                    painter.text(
+                        zone.center(),
+                        Align2::CENTER_CENTER,
+                        "+",
+                        FontId::proportional(18.0),
+                        Color32::WHITE,
                     );
-                    let allowed = self.can_split(leaf, side);
-                    if response.hovered() && allowed && !dragging {
-                        let painter = ui.painter_at(zone);
-                        painter.rect_filled(
-                            zone,
-                            0.0,
-                            color32(self.chrome.color(ColorRole::Accent)).gamma_multiply(0.35),
-                        );
-                        painter.text(
-                            zone.center(),
-                            Align2::CENTER_CENTER,
-                            "+",
-                            FontId::proportional(18.0),
-                            Color32::WHITE,
-                        );
-                    }
-                    if response.clicked() {
-                        actions.push(WorkspaceAction::SplitModule {
-                            instance_id: leaf,
-                            side,
-                        });
-                    }
+                }
+                if response.clicked() {
+                    actions.push(WorkspaceAction::SplitModule {
+                        instance_id: leaf,
+                        side,
+                    });
                 }
             }
         }
@@ -1157,17 +1181,28 @@ mod tests {
     }
 
     #[test]
-    fn resize_hit_rects_do_not_overlap_and_corners_win() {
-        let window = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
-        for (index, a) in ResizeEdge::ALL.iter().enumerate() {
-            for b in &ResizeEdge::ALL[index + 1..] {
-                assert!(
-                    !a.rect(window).intersects(b.rect(window))
-                        || a.rect(window).intersect(b.rect(window)).area() == 0.0,
-                    "{a:?} overlaps {b:?}"
-                );
+    fn resize_hit_rects_do_not_overlap_corners_win_and_small_windows_keep_a_middle() {
+        for size in [egui::vec2(400.0, 300.0), egui::vec2(48.0, 16.0)] {
+            let window = Rect::from_min_size(pos2(0.0, 0.0), size);
+            for (index, a) in ResizeEdge::ALL.iter().enumerate() {
+                for b in &ResizeEdge::ALL[index + 1..] {
+                    assert!(
+                        !a.rect(window).intersects(b.rect(window))
+                            || a.rect(window).intersect(b.rect(window)).area() == 0.0,
+                        "{a:?} overlaps {b:?} in {size:?}"
+                    );
+                }
             }
+            assert!(ResizeEdge::NorthWest.rect(window).contains(pos2(1.0, 1.0)));
+            // A square half the shorter side wide stays content, not resize.
+            let middle =
+                Rect::from_center_size(window.center(), egui::Vec2::splat(size.min_elem() / 2.0));
+            assert!(
+                ResizeEdge::ALL
+                    .iter()
+                    .all(|edge| !edge.rect(window).intersects(middle)),
+                "resize edges cover the middle of {size:?}"
+            );
         }
-        assert!(ResizeEdge::NorthWest.rect(window).contains(pos2(2.0, 2.0)));
     }
 }

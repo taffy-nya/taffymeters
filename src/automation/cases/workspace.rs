@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     dataflow::ChannelSelection,
+    module::MIN_EXTENT,
     modules::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     workspace::{
         ActionOutcome, ControlKey, FIRST_WINDOW, ModuleInstanceId, MoveTarget, ResizeEdge,
@@ -160,13 +161,12 @@ fn w01() -> Result<Value, String> {
             .window(FIRST_WINDOW)
             .ok_or("root closed")?
             .min_size;
-    h.set_size(vec2(100.0, 60.0));
+    h.set_size(vec2(30.0, 10.0));
     h.frame(vec![]);
     let size = h.window(FIRST_WINDOW)?.size;
+    let expected = vec2(3.0 * MIN_EXTENT, MIN_EXTENT);
     check(
-        min_size == vec2(120.0, 32.0)
-            && h.window(FIRST_WINDOW)?.min_size == min_size
-            && size == vec2(120.0, 60.0),
+        min_size == expected && h.window(FIRST_WINDOW)?.min_size == min_size && size == expected,
         &format!("window minimum not derived from the layout: {min_size:?}, size {size:?}"),
     )?;
     let before = h.ws.observation();
@@ -188,12 +188,27 @@ fn w01() -> Result<Value, String> {
     )?;
     let rects = &after.window(FIRST_WINDOW).ok_or("root closed")?.leaf_rects;
     check(
-        rects.iter().all(|(_, rect)| rect.width() >= 40.0 - 0.01),
+        rects
+            .iter()
+            .all(|(_, rect)| rect.width() >= MIN_EXTENT - 0.01),
         &format!("leaf below its minimum width: {rects:?}"),
     )?;
+    // A leaf at its minimum has no split entries; its body (inside the scaled resize
+    // edges) still takes a right click and opens the settings window.
+    check(
+        [Side::Right, Side::Below].into_iter().all(|side| {
+            h.locate(&ControlKey::SplitZone {
+                instance_id: a,
+                side,
+            })
+            .is_err()
+        }),
+        "a leaf without room for a copy still has a split entry",
+    )?;
+    h.settings(ControlKey::LeafBody(a), &[])?;
     h.ws.check_ownership()?;
     Ok(json!({"equal_widths":widths,"manual_ratio_kept":kept_ratio,
-        "min_inner_size":[120,32],"remaining":[a.0,c.0,d.0]}))
+        "min_inner_size":[expected.x,expected.y],"remaining":[a.0,c.0,d.0]}))
 }
 
 /// Divider drag through real egui events: grid, Alt, legal clamp, Escape, double click,
@@ -237,6 +252,19 @@ fn w02() -> Result<Value, String> {
         (ratio * 900.0 - 601.0).abs() < 0.01,
         &format!("Alt drag snapped: {}", ratio * 900.0),
     )?;
+    // The far end of the legal interval (900 − 16 = 884) is off the grid (880) and
+    // still reachable: the interval's ends are snap points.
+    h.drag(
+        divider,
+        &[pos2(700.0, y), pos2(899.0, y)],
+        egui::Modifiers::NONE,
+        None,
+    )?;
+    let (_, far, _) = root_split(&h.ws, 0)?;
+    check(
+        (far * 900.0 - (900.0 - MIN_EXTENT)).abs() < 0.01,
+        &format!("extreme drag missed the far minimum: {}", far * 900.0),
+    )?;
     h.drag(
         divider,
         &[pos2(500.0, y), pos2(5.0, y)],
@@ -244,11 +272,10 @@ fn w02() -> Result<Value, String> {
         None,
     )?;
     let (_, clamped, _) = root_split(&h.ws, 0)?;
-    // Legal interval starts at the 40-pt minimum; the nearest grid point inside is 48.
     check(
-        (clamped * 900.0 - 48.0).abs() < 0.01,
+        (clamped * 900.0 - MIN_EXTENT).abs() < 0.01,
         &format!(
-            "extreme drag broke the minimum or grid: {}",
+            "extreme drag broke or missed the minimum: {}",
             clamped * 900.0
         ),
     )?;
@@ -294,7 +321,8 @@ fn w02() -> Result<Value, String> {
         &format!("body drag should start exactly one native move: {commands:?}"),
     )?;
     Ok(
-        json!({"grid_position":528,"alt_position":601,"clamped_position":48,
+        json!({"grid_position":528,"alt_position":601,"far_position":900.0 - MIN_EXTENT,
+        "clamped_position":MIN_EXTENT,
         "escape_restored":true,"double_click_ratio":0.5,"body_start_drag":1}),
     )
 }
@@ -575,8 +603,8 @@ fn w05() -> Result<Value, String> {
     // Too-small targets are disabled; a vanished target fails without losing the source.
     let c = split(&mut h.ws, a, Side::Right)?;
     let d = split(&mut h.ws, c, Side::Right)?;
-    // Three 50-pt columns cannot take a second 40-pt column beside them.
-    h.set_size(vec2(150.0, 420.0));
+    // Three 20-pt columns cannot take a second 16-pt column beside them.
+    h.set_size(vec2(60.0, 420.0));
     h.frame(vec![]);
     action(&mut h.ws, WorkspaceAction::BeginMove { instance_id: b })?;
     h.frame(vec![]);

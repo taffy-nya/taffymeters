@@ -67,17 +67,21 @@ pub struct StyleOption {
     pub label: &'static str,
 }
 
+/// Default minimum width and height of a Module, in logical points (one divider grid
+/// step).
+pub const MIN_EXTENT: f32 = 16.0;
+
 pub trait Module: Send {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse;
 
     /// Smallest area, in logical points, the Module accepts. The Workspace never
     /// shrinks a layout leaf below it unless the window itself is forced smaller. The
-    /// default only keeps a leaf large enough to stay reachable (its split entries and
-    /// body); content simply scales down.
+    /// default (`MIN_EXTENT` square) only keeps a leaf reachable; content simply
+    /// scales down.
     fn min_size(&self) -> Size {
         Size {
-            width: 40.0,
-            height: 32.0,
+            width: MIN_EXTENT,
+            height: MIN_EXTENT,
         }
     }
 

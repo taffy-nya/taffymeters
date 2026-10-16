@@ -164,7 +164,8 @@ impl DividerGeometry {
     }
 
     /// Ratio for a divider dragged to `pointer` (absolute coordinate along the axis).
-    /// The legal interval always wins; the grid only chooses inside it.
+    /// The legal interval always wins; the grid only chooses inside it, and the
+    /// interval's ends are snap points too so either side can reach its minimum.
     pub(crate) fn ratio_for_pointer(&self, pointer: f32, grid: bool) -> f32 {
         let start = self.axis.start(self.parent);
         let span = self.axis.extent(self.parent.size());
@@ -176,14 +177,17 @@ impl DividerGeometry {
             Some((low, high)) => {
                 let free = pointer.clamp(low, high);
                 if grid {
+                    let mut snapped = if free - low <= high - free { low } else { high };
                     let first = ((low - start) / GRID_STEP).ceil();
                     let last = ((high - start) / GRID_STEP).floor();
                     if first <= last {
                         let nearest = ((free - start) / GRID_STEP).round().clamp(first, last);
-                        start + nearest * GRID_STEP
-                    } else {
-                        free
+                        let point = start + nearest * GRID_STEP;
+                        if (point - free).abs() <= (snapped - free).abs() {
+                            snapped = point;
+                        }
                     }
+                    snapped
                 } else {
                     free
                 }
@@ -766,9 +770,15 @@ mod tests {
         let geometry = layout.geometry(rect, &min);
         let divider = *geometry.divider(SplitId(1)).unwrap();
         assert_eq!(divider.legal, Some((130.0, 190.0)));
-        // Far left: clamped to the first child's minimum, then the nearest legal
-        // grid point (anchored at x=10) is 10 + 8*16 = 138.
+        // Far left: clamped to the first child's minimum; the interval's end is a snap
+        // point, nearer than the first grid point inside (anchored at x=10: 138).
         let ratio = divider.ratio_for_pointer(-500.0, true);
+        assert!((ratio * 300.0 + 10.0 - 130.0).abs() < 0.01, "{ratio}");
+        // Far right: the end 190 lies off the grid (last grid point 186) and still wins.
+        let ratio = divider.ratio_for_pointer(1000.0, true);
+        assert!((ratio * 300.0 + 10.0 - 190.0).abs() < 0.01, "{ratio}");
+        // Near an end but nearer a grid point: the grid point.
+        let ratio = divider.ratio_for_pointer(135.0, true);
         assert!((ratio * 300.0 + 10.0 - 138.0).abs() < 0.01, "{ratio}");
         // Alt: free but still legal.
         let ratio = divider.ratio_for_pointer(-500.0, false);

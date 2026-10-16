@@ -1654,7 +1654,8 @@ fn s08() -> Result<Value, String> {
             .find(|window| window.id == small)
             .and_then(|window| window.builder.min_inner_size);
     check(
-        h.window(small)?.size == vec2(120.0, 40.0) && small_min == Some(vec2(40.0, 32.0)),
+        h.window(small)?.size == vec2(120.0, 40.0)
+            && small_min == Some(vec2(crate::module::MIN_EXTENT, crate::module::MIN_EXTENT)),
         &format!(
             "a small window was not restored at its size: {:?}, minimum {small_min:?}",
             h.window(small)?.size
