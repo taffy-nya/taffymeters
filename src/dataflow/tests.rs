@@ -963,6 +963,30 @@ fn private_joins_do_not_inherit_earlier_history_or_levels() {
 }
 
 #[test]
+fn a_levels_join_mid_interval_does_not_inherit_the_earlier_peak() {
+    let (mut capture, dataflow, _) = fixture(2, 128, 16);
+    let (spec, output) = levels_spec();
+    let early = dataflow.subscribe(spec.clone());
+    // Loud for the first half of the 1600-frame publication interval, silent for
+    // the second; the late subscriber joins between the halves.
+    feed(&mut capture, &dataflow, &stereo(0, 800));
+    let late = dataflow.subscribe(spec);
+    feed(&mut capture, &dataflow, &vec![0.0; 2 * 800]);
+    let early_level = latest_at(&early.reader(), output, 1_600);
+    let late_level = latest_at(&late.reader(), output, 1_600);
+    let early_dbfs = &early_level.levels().unwrap().dbfs;
+    assert!(
+        early_dbfs[0] > -7.0,
+        "A keeps the loud half: {early_dbfs:?}"
+    );
+    assert_eq!(
+        late_level.levels().unwrap().dbfs,
+        [time::LEVELS_FLOOR_DBFS; 2],
+        "B hears only silence"
+    );
+}
+
+#[test]
 fn partial_time_closes_keep_the_other_work_and_rejoins_start_fresh() {
     let (mut capture, dataflow, _) = fixture(2, 128, 16);
     let (levels_spec, _) = levels_spec();
@@ -1231,11 +1255,19 @@ fn steady_state_worker_does_not_allocate_while_readers_keep_up() {
     let spectrum = dataflow.subscribe(spectrum);
     let (pcm, pcm_output) = pcm_spec(Keep::Seconds(1.0));
     let pcm = dataflow.subscribe(pcm);
-    let (levels, _) = levels_spec();
+    // The Level Meter's shape: Levels read as they are and by a held Peak.
+    let mut levels = DataSpec::new();
+    let levels_node = levels.add(SOURCE, NodeSpec::Levels);
+    let held = levels.add(levels_node, peak(2_000.0));
+    levels.output(levels_node, Keep::Latest);
+    levels.output(held, Keep::Latest);
     let levels = dataflow.subscribe(levels);
+    let (loudness, _) = loudness_spec();
+    let loudness = dataflow.subscribe(loudness);
 
     let mut snapshot = Snapshot::default();
     let mut level_snapshot = Snapshot::default();
+    let mut loudness_snapshot = Snapshot::default();
     let mut history = HistoryView::new();
     let mut waveform = HistoryView::new();
     let mut frame = 0_u64;
@@ -1248,6 +1280,7 @@ fn steady_state_worker_does_not_allocate_while_readers_keep_up() {
             });
             spectrum.reader().read(&mut snapshot);
             levels.reader().read(&mut level_snapshot);
+            loudness.reader().read(&mut loudness_snapshot);
             spectrum.reader().sync_history(history_output, &mut history);
             pcm.reader().sync_history(pcm_output, &mut waveform);
         }

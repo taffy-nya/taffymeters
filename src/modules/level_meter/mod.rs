@@ -1,14 +1,14 @@
 //! Level Meter (per channel sample peak) and Loudness Meter (programme momentary
-//! loudness). Both draw vertical bars on the same absolute −60…+3 scale; every
-//! ballistic (the bar's fall, the held peak) is computed by the dataflow in source
-//! time, so the Modules only draw the latest results.
+//! loudness). Both draw vertical bars on the same absolute −60…+3 scale. The Level
+//! Meter's bar is each publication interval's sample peak as is; its peak hold is
+//! computed by the dataflow in source time, so the Modules only draw the latest
+//! results.
 
 mod loudness;
 
 use crate::{
     dataflow::{
-        DataController, DataSpec, DataSubscription, Keep, NodeRef, NodeSpec, OutputId, PeakConfig,
-        SOURCE,
+        DataController, DataSpec, DataSubscription, Keep, NodeSpec, OutputId, PeakConfig, SOURCE,
     },
     extensions::{Registry, RegistryError},
     module::{
@@ -33,11 +33,13 @@ const BAR_INSET: f32 = 8.0;
 const MAX_BARS: usize = 8;
 const PEAK_MARKER_HEIGHT: f32 = 2.0;
 
-/// The bar: instant rise, no hold, a quick fall gathering speed.
-const BAR_PEAK: PeakConfig = PeakConfig {
-    hold_ms: 0.0,
-    fall_db_per_second_squared: 120.0,
+/// Level Meter colors: Low below −6 dBFS, Mid from −6 to 0 dBFS, High above full
+/// scale.
+const SAMPLE_PEAK_ZONES: Zones = Zones {
+    mid_from: -6.0,
+    high_above: 0.0,
 };
+
 /// The peak hold marker.
 const HELD_PEAK: PeakConfig = PeakConfig {
     hold_ms: 2_000.0,
@@ -70,40 +72,55 @@ fn bar_track(rect: Rect, index: usize, count: usize) -> Rect {
     }
 }
 
-/// The track and its fill up to `level`.
-fn push_bar(rects: &mut Vec<ColoredRect>, palette: &Palette, track: Rect, level: f32) {
+/// Where a meter's color changes, on its own scale (dBFS or LUFS).
+#[derive(Clone, Copy)]
+struct Zones {
+    /// Mid from this level up, inclusive.
+    mid_from: f32,
+    /// High strictly above this level.
+    high_above: f32,
+}
+
+impl Zones {
+    fn color(self, palette: &Palette, level: f32) -> Color {
+        if level > self.high_above {
+            palette.color(ColorRole::High)
+        } else if level >= self.mid_from {
+            palette.color(ColorRole::Mid)
+        } else {
+            palette.color(ColorRole::Low)
+        }
+    }
+}
+
+/// The track and its fill up to `level`, colored by the zone `level` is in.
+fn push_bar(
+    rects: &mut Vec<ColoredRect>,
+    palette: &Palette,
+    zones: Zones,
+    track: Rect,
+    level: f32,
+) {
     rects.push(ColoredRect {
         rect: track,
         color: palette.color(ColorRole::Surface),
     });
-    let fill = normalized(level);
     rects.push(ColoredRect {
         rect: Rect {
             min: Point {
                 x: track.min.x,
-                y: track.max.y - track.height() * fill,
+                y: track.max.y - track.height() * normalized(level),
             },
             max: track.max,
         },
-        color: meter_color(palette, fill),
+        color: zones.color(palette, level),
     });
 }
 
-fn meter_color(palette: &Palette, normalized: f32) -> Color {
-    if normalized < 0.7 {
-        palette.color(ColorRole::Low)
-    } else if normalized < 0.85 {
-        palette.color(ColorRole::Mid)
-    } else {
-        palette.color(ColorRole::High)
-    }
-}
-
-/// The Level Meter's data: per channel sample peaks, held twice — quickly for the
-/// bar and long for the peak marker.
+/// The Level Meter's data: per channel sample peaks shown as they are by the bar,
+/// and held by a Peak for the marker.
 struct LevelMeterData {
     spec: DataSpec,
-    bar_node: NodeRef,
     bar: OutputId,
     peak: OutputId,
 }
@@ -111,16 +128,10 @@ struct LevelMeterData {
 fn level_meter_data() -> LevelMeterData {
     let mut spec = DataSpec::new();
     let levels = spec.add(SOURCE, NodeSpec::Levels);
-    let bar_node = spec.add(levels, NodeSpec::Peak(BAR_PEAK));
     let peak_node = spec.add(levels, NodeSpec::Peak(HELD_PEAK));
-    let bar = spec.output(bar_node, Keep::Latest);
+    let bar = spec.output(levels, Keep::Latest);
     let peak = spec.output(peak_node, Keep::Latest);
-    LevelMeterData {
-        spec,
-        bar_node,
-        bar,
-        peak,
-    }
+    LevelMeterData { spec, bar, peak }
 }
 
 struct LevelMeterFactory;
@@ -150,7 +161,6 @@ impl ModuleFactory for LevelMeterFactory {
             controller: subscription.controller(),
             reader: subscription.reader(),
             _subscription: subscription,
-            bar_node: defaults.bar_node,
             bar: defaults.bar,
             peak: defaults.peak,
             snapshot: Snapshot::default(),
@@ -168,7 +178,6 @@ struct LevelMeterModule {
     controller: DataController,
     reader: DataReader,
     _subscription: DataSubscription,
-    bar_node: NodeRef,
     bar: OutputId,
     peak: OutputId,
     snapshot: Snapshot,
@@ -189,10 +198,6 @@ impl Module for LevelMeterModule {
         } else {
             None
         }
-    }
-
-    fn node_label(&self, node: NodeRef) -> Option<&'static str> {
-        (node == self.bar_node).then_some("Bar")
     }
 
     fn color_roles(&self) -> &'static [ColorRole] {
@@ -230,11 +235,17 @@ impl Module for LevelMeterModule {
         self.rects.clear();
         for (channel, &level) in bars.dbfs.iter().take(count).enumerate() {
             let track = bar_track(frame.rect, channel, count);
-            push_bar(&mut self.rects, frame.palette, track, level);
+            push_bar(
+                &mut self.rects,
+                frame.palette,
+                SAMPLE_PEAK_ZONES,
+                track,
+                level,
+            );
             let Some(&held) = peaks.and_then(|peaks| peaks.dbfs.get(channel)) else {
                 continue;
             };
-            // Never under the bar, whatever the two falls are set to.
+            // Never under the bar: right after an edit the held result may lag.
             let y = track.max.y - track.height() * normalized(held.max(level));
             self.rects.push(ColoredRect {
                 rect: Rect {
@@ -288,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn stereo_bars_rise_at_once_and_fall_under_the_held_peak() {
+    fn stereo_bars_follow_each_interval_at_once_and_the_marker_holds() {
         let palette = Palette::default();
         let mut fixture = PcmFixture::new(2);
         let mut meter = create(&fixture);
@@ -307,13 +318,14 @@ mod tests {
         assert!((rose[2] - height_of(-12.04)).abs() < 0.5, "{rose:?}");
         assert!((rose[1] - rose[0]).abs() < 0.5 && (rose[3] - rose[2]).abs() < 0.5);
 
-        // Half a second of silence: the bars fall (½·120·0.5² = 15 dB) while the
+        // One silent interval: the bars drop to the bottom at once while the
         // markers are still held.
-        fixture.feed(&vec![0.0; 2 * 15 * BLOCK_FRAMES]);
+        fixture.feed(&vec![0.0; 2 * BLOCK_FRAMES]);
         target.clear();
         draw(meter.as_mut(), &mut target, Duration::ZERO);
         let fell = tops(&target, &palette);
-        assert!((fell[0] - height_of(-6.02 - 15.0)).abs() < 1.0, "{fell:?}");
+        assert!((fell[0] - height_of(METER_BOTTOM)).abs() < 0.5, "{fell:?}");
+        assert!((fell[2] - height_of(METER_BOTTOM)).abs() < 0.5, "{fell:?}");
         assert!(
             (fell[1] - rose[1]).abs() < 0.5,
             "held marker moved: {fell:?}"
@@ -322,5 +334,20 @@ mod tests {
             (fell[3] - rose[3]).abs() < 0.5,
             "held marker moved: {fell:?}"
         );
+    }
+
+    #[test]
+    fn sample_peak_colors_change_at_minus_6_and_above_full_scale() {
+        let palette = Palette::default();
+        let color = |dbfs| SAMPLE_PEAK_ZONES.color(&palette, dbfs);
+        let (low, mid, high) = (
+            palette.color(ColorRole::Low),
+            palette.color(ColorRole::Mid),
+            palette.color(ColorRole::High),
+        );
+        assert_eq!(color(-6.1), low);
+        assert_eq!(color(-6.0), mid);
+        assert_eq!(color(0.0), mid, "full scale is not over");
+        assert_eq!(color(0.1), high);
     }
 }

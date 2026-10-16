@@ -128,9 +128,6 @@ impl NodeParam {
         }
     }
 
-    /// Row label; prefixed with the node's label unless it already starts with it
-    /// (the Peak parameters read "Peak hold", or "Bar hold" on a node the Module
-    /// names "Bar").
     pub fn label(self) -> &'static str {
         match self {
             Self::Channel => "Channel",
@@ -141,8 +138,8 @@ impl NodeParam {
             Self::SmoothAttack => "Smooth attack",
             Self::SmoothRelease => "Smooth release",
             Self::Gain => "Gain",
-            Self::PeakHold => "hold",
-            Self::PeakFall => "fall",
+            Self::PeakHold => "Peak hold",
+            Self::PeakFall => "Peak fall",
         }
     }
 
@@ -156,7 +153,8 @@ impl NodeParam {
             Self::SmoothAttack | Self::SmoothRelease => (0.0, 2_000.0, "ms"),
             Self::Gain => (-60.0, 60.0, "dB"),
             Self::PeakHold => (0.0, 3_000.0, "ms"),
-            Self::PeakFall => (0.0, 300.0, "dB/s²"),
+            // Centered on the 30 dB/s² default: 60 dB falls in 2 s.
+            Self::PeakFall => (0.0, 60.0, "dB/s²"),
             Self::Channel | Self::FftWindow | Self::FftHop => return None,
         })
     }

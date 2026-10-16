@@ -13,9 +13,15 @@ use crate::{
     theme::ColorRole,
 };
 
-use super::{bar_track, push_bar};
+use super::{Zones, bar_track, push_bar};
 
 pub const LOUDNESS_METER_MODULE_ID: &str = "taffymeters.loudness_meter";
+
+/// The colors the meters had at 70% and 85% of the −60…+3 scale.
+const LOUDNESS_ZONES: Zones = Zones {
+    mid_from: -15.9,
+    high_above: -6.45,
+};
 
 fn loudness_data() -> (DataSpec, OutputId) {
     let mut spec = DataSpec::new();
@@ -94,6 +100,7 @@ impl Module for LoudnessMeterModule {
         push_bar(
             &mut self.rects,
             frame.palette,
+            LOUDNESS_ZONES,
             bar_track(frame.rect, 0, 1),
             loudness.momentary_lufs,
         );

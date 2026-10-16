@@ -4,7 +4,7 @@ use crate::{
     audio::SourceReader,
     dataflow::{
         ChannelError, ChannelSelection, ControlError, DataController, DataSpec, DataflowHandle,
-        NodeRef, OutputId,
+        OutputId,
     },
     extensions::{Registry, RegistryError},
     render::{Flow, Point, Rect, RenderTarget, Size},
@@ -116,12 +116,6 @@ pub trait Module: Send {
 
     /// Name of an output of the instance's `DataSpec` in its settings.
     fn output_label(&self, _output: OutputId) -> Option<&'static str> {
-        None
-    }
-
-    /// Name of a node of the instance's `DataSpec` in its settings, when the node
-    /// kind's own name would not tell several apart.
-    fn node_label(&self, _node: NodeRef) -> Option<&'static str> {
         None
     }
 
