@@ -311,6 +311,7 @@ impl Workspace {
                 .list_presets()
                 .iter()
                 .any(|saved| same_name(saved, &name))
+            || store.preset_path(&name).exists()
         {
             return Err(WorkspaceError::PresetExists(name));
         }
@@ -390,24 +391,43 @@ impl Workspace {
             .into_iter()
             .map(|index| displays[index])
             .collect();
+        // Layouts first: their minimum sizes take part in the placement.
+        let mut bindings: HashMap<u64, SharedAnalysisId> = HashMap::new();
+        let mut layouts = Vec::with_capacity(file.windows.len());
+        for window in &file.windows {
+            let root = match &window.layout {
+                Some(layout) => Some(self.restore_node(layout, &mut bindings)?),
+                None => None,
+            };
+            let layout = Layout::from_root(root);
+            // A populated window may be smaller than an empty one: its minimum is
+            // its layout's.
+            let min_size = layout
+                .min_size(&|id| self.module_min_size(id))
+                .unwrap_or(EMPTY_WINDOW_MIN_SIZE);
+            layouts.push((layout, min_size));
+        }
         let windows: Vec<SavedWindow> = file
             .windows
             .iter()
-            .map(|window| {
+            .zip(&layouts)
+            .map(|(window, (_, min_size))| {
                 let [left, top, right, bottom] = window.frame;
                 SavedWindow {
                     display: window.display,
                     frame: Rect::from_min_max(pos2(left, top), pos2(right, bottom)),
                     group: window.group,
+                    min: *min_size,
                 }
             })
             .collect();
         let outers = place(&saved, &windows, &targets);
-        let mut bindings: HashMap<u64, SharedAnalysisId> = HashMap::new();
         let mut groups: HashMap<u32, u64> = HashMap::new();
-        for (window_file, outer) in file.windows.iter().zip(outers) {
+        for ((window_file, (layout, min_size)), outer) in
+            file.windows.iter().zip(layouts).zip(outers)
+        {
             let scale = targets[window_file.display].scale;
-            self.restore_window(window_file, outer, scale, &mut bindings, &mut groups)?;
+            self.restore_window(window_file, layout, min_size, outer, scale, &mut groups)?;
         }
         // A group needs two windows.
         let mut members: HashMap<u64, usize> = HashMap::new();
@@ -427,25 +447,17 @@ impl Workspace {
         Ok(())
     }
 
-    /// One window at `outer` (physical pixels) on a display of `scale`.
+    /// One window with its restored `layout` at `outer` (physical pixels) on a
+    /// display of `scale`.
     fn restore_window(
         &mut self,
         file: &WindowFile,
+        layout: Layout,
+        min_size: eframe::egui::Vec2,
         outer: Rect,
         scale: f32,
-        bindings: &mut HashMap<u64, SharedAnalysisId>,
         groups: &mut HashMap<u32, u64>,
     ) -> Result<WindowId, WorkspaceError> {
-        let root = match &file.layout {
-            Some(layout) => Some(self.restore_node(layout, bindings)?),
-            None => None,
-        };
-        let layout = Layout::from_root(root);
-        // A populated window may be smaller than an empty one: its minimum is its
-        // layout's.
-        let min_size = layout
-            .min_size(&|id| self.module_min_size(id))
-            .unwrap_or(EMPTY_WINDOW_MIN_SIZE);
         let size = (outer.size() / scale).max(min_size);
         let mut window = WindowState::new(layout, size, file.always_on_top);
         window.initial_min_size = min_size;

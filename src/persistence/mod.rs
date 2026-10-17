@@ -331,7 +331,7 @@ impl WorkspaceStore {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
-                (path.extension()? == "json")
+                (path.extension()?.eq_ignore_ascii_case("json"))
                     .then(|| path.file_stem()?.to_str().map(str::to_owned))
                     .flatten()
             })
@@ -551,6 +551,8 @@ mod tests {
         )
         .unwrap();
         fs::write(store.preset_path("Broken"), b"{ not json").unwrap();
+        // Renamed by hand: still listed (and so taken for Save as).
+        fs::write(store.presets().join("Upper.JSON"), b"{}").unwrap();
         assert!(matches!(
             store.load_preset("Future"),
             Err(PersistError::Version(_, 99))
@@ -572,12 +574,15 @@ mod tests {
         assert_eq!(store.load_preset("Saved").unwrap(), Some(file.clone()));
         assert_eq!(
             store.list_presets(),
-            vec!["Broken", "Future", "Old", "Saved"]
+            vec!["Broken", "Future", "Old", "Saved", "Upper"]
         );
         store.delete_preset("Saved").unwrap();
         assert!(store.load_preset("Saved").unwrap().is_none());
         store.save_session(&file).unwrap();
         assert_eq!(store.load_session().unwrap(), Some(file));
-        assert_eq!(store.list_presets(), vec!["Broken", "Future", "Old"]);
+        assert_eq!(
+            store.list_presets(),
+            vec!["Broken", "Future", "Old", "Upper"]
+        );
     }
 }

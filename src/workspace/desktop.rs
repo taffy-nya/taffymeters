@@ -334,13 +334,14 @@ pub(crate) struct SavedDisplay {
     pub(crate) hint: Option<(Pos2, f32)>,
 }
 
-/// A window as saved: its display (index into the saved displays), frame and
-/// group number.
+/// A window as saved: its display (index into the saved displays), frame, group
+/// number and the minimum size of its layout (logical points).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SavedWindow {
     pub(crate) display: usize,
     pub(crate) frame: Rect,
     pub(crate) group: Option<u32>,
+    pub(crate) min: Vec2,
 }
 
 /// The current display each saved display goes to. A display the hint identifies
@@ -363,21 +364,21 @@ pub(crate) fn match_displays(
             })
         })
         .collect();
+    // The first saved display takes the current one unless it was recognized.
+    if let Some(first) = matched.first_mut() {
+        first.get_or_insert(current);
+    }
     let mut free: Vec<usize> = (0..displays.len())
-        .filter(|index| *index != current && !matched.contains(&Some(*index)))
+        .filter(|index| !matched.contains(&Some(*index)))
         .collect();
     free.sort_by(|a, b| {
         let (a, b) = (displays[*a].work.min, displays[*b].work.min);
         a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y))
     });
     let mut free = free.into_iter();
-    for (index, slot) in matched.iter_mut().enumerate() {
+    for slot in &mut matched {
         if slot.is_none() {
-            *slot = Some(if index == 0 {
-                current
-            } else {
-                free.next().unwrap_or(current)
-            });
+            *slot = Some(free.next().unwrap_or(current));
         }
     }
     matched
@@ -387,18 +388,22 @@ pub(crate) fn match_displays(
 }
 
 /// Outer frames (physical pixels) of saved windows on the displays `targets`
-/// (one per saved display). Windows of one saved display that touch, or share a
-/// group, form a cluster that is mapped as a whole, per axis: attached to both
-/// work-area edges it stretches proportionally; attached to one edge it keeps its
-/// distance to that edge and its size; attached to neither it keeps its size and
-/// the relative position of its center. A cluster larger than the target shrinks
-/// to fit, then moves inside. Every edge is rounded to a physical pixel on its
-/// own, so edges that coincided still coincide.
+/// (one per saved display). Windows of one saved display that touch (within the
+/// touch tolerance of that display), or share a group, form a cluster that is
+/// mapped as a whole, per axis: attached to both work-area edges it stretches
+/// proportionally; attached to one edge it keeps its distance to that edge and
+/// its size; attached to neither it keeps its size and the relative position of
+/// its center. A cluster larger than the target shrinks by one factor on its
+/// unstretched axes (keeping its proportions), but never below a member's
+/// minimum size; then it moves inside (its top-left first). Every edge is rounded
+/// to a physical pixel on its own, so edges that coincided still coincide.
 pub(crate) fn place(
     saved: &[SavedDisplay],
     windows: &[SavedWindow],
     targets: &[Display],
 ) -> Vec<Rect> {
+    /// A cluster edge this close (logical points) to a work-area edge rests on it;
+    /// saved frames put such edges exactly there (`saved_frame`).
     const ATTACHED: f32 = 0.5;
     // Union-find over the windows.
     let mut parent: Vec<usize> = (0..windows.len()).collect();
@@ -412,8 +417,12 @@ pub(crate) fn place(
     for a in 0..windows.len() {
         for b in a + 1..windows.len() {
             let (wa, wb) = (&windows[a], &windows[b]);
+            // Windows touch at runtime within a few physical pixels.
+            let tolerance = saved[wa.display].hint.map_or(ATTACHED, |(_, scale)| {
+                (TOUCH_TOLERANCE_PX / scale).max(ATTACHED)
+            });
             if wa.display == wb.display
-                && (touching_within(wa.frame, wb.frame, ATTACHED)
+                && (touching_within(wa.frame, wb.frame, tolerance)
                     || (wa.group.is_some() && wa.group == wb.group))
             {
                 let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
@@ -421,6 +430,30 @@ pub(crate) fn place(
             }
         }
     }
+    /// x' = scale·x + offset on one axis.
+    #[derive(Clone, Copy)]
+    struct AxisMap {
+        scale: f32,
+        offset: f32,
+        stretched: bool,
+    }
+    let attach = |low: f32, high: f32, from: f32, to: f32| -> AxisMap {
+        let (start, end) = (low <= ATTACHED, high >= from - ATTACHED);
+        let (scale, offset) = match (start, end) {
+            (true, true) => (to / from, 0.0),
+            (true, false) => (1.0, 0.0),
+            (false, true) => (1.0, to - from),
+            (false, false) => {
+                let center = (low + high) / 2.0;
+                (1.0, center * to / from - center)
+            }
+        };
+        AxisMap {
+            scale,
+            offset,
+            stretched: start && end,
+        }
+    };
     let mut placed = vec![Rect::NOTHING; windows.len()];
     for cluster in 0..windows.len() {
         let members: Vec<usize> = (0..windows.len())
@@ -430,41 +463,62 @@ pub(crate) fn place(
             continue;
         };
         let display = windows[*first].display;
-        let saved_size = saved[display].size;
+        let from = saved[display].size;
         let target = &targets[display];
-        let target_size = target.logical_size();
+        let to = target.logical_size();
         let bounds = members.iter().fold(Rect::NOTHING, |bounds, index| {
             bounds.union(windows[*index].frame)
         });
-        // x' = scale·x + offset, per axis.
-        let map = |low: f32, high: f32, from: f32, to: f32| -> (f32, f32) {
-            let start = low <= ATTACHED;
-            let end = high >= from - ATTACHED;
-            let (mut scale, mut offset) = match (start, end) {
-                (true, true) => (to / from, 0.0),
-                (true, false) => (1.0, 0.0),
-                (false, true) => (1.0, to - from),
-                (false, false) => {
-                    let center = (low + high) / 2.0;
-                    (1.0, center * to / from - center)
-                }
-            };
-            let (low, high) = (scale * low + offset, scale * high + offset);
-            if high - low > to {
-                let shrink = to / (high - low);
-                scale *= shrink;
-                offset = (offset - low) * shrink;
-            } else if low < 0.0 {
-                offset -= low;
-            } else if high > to {
-                offset -= high - to;
+        let mut axes = [
+            attach(bounds.min.x, bounds.max.x, from.x, to.x),
+            attach(bounds.min.y, bounds.max.y, from.y, to.y),
+        ];
+        let (low, high, to) = (
+            [bounds.min.x, bounds.min.y],
+            [bounds.max.x, bounds.max.y],
+            [to.x, to.y],
+        );
+        // One shrink factor keeps the proportions of what is not stretched.
+        let fit = (0..2)
+            .filter(|axis| !axes[*axis].stretched)
+            .map(|axis| to[axis] / (axes[axis].scale * (high[axis] - low[axis])))
+            .fold(1.0_f32, f32::min);
+        for (axis, map) in axes.iter_mut().enumerate() {
+            if !map.stretched {
+                map.scale *= fit;
+                map.offset *= fit;
             }
-            (scale, offset)
-        };
-        let (sx, ox) = map(bounds.min.x, bounds.max.x, saved_size.x, target_size.x);
-        let (sy, oy) = map(bounds.min.y, bounds.max.y, saved_size.y, target_size.y);
-        let x = |v: f32| (target.work.min.x + (sx * v + ox) * target.scale).round();
-        let y = |v: f32| (target.work.min.y + (sy * v + oy) * target.scale).round();
+            // No member below its layout's minimum: the cluster may then exceed the
+            // target, but its windows keep touching.
+            let floor = members
+                .iter()
+                .map(|index| {
+                    let window = &windows[*index];
+                    let (size, min) = match axis {
+                        0 => (window.frame.width(), window.min.x),
+                        _ => (window.frame.height(), window.min.y),
+                    };
+                    min / size
+                })
+                .fold(0.0_f32, f32::max);
+            if map.scale < floor {
+                let start = map.scale * low[axis] + map.offset;
+                map.scale = floor;
+                map.offset = start - floor * low[axis];
+            }
+            let (start, end) = (
+                map.scale * low[axis] + map.offset,
+                map.scale * high[axis] + map.offset,
+            );
+            if start < 0.0 {
+                map.offset -= start;
+            } else if end > to[axis] {
+                map.offset -= (end - to[axis]).min(start);
+            }
+        }
+        let [ax, ay] = axes;
+        let x = |v: f32| (target.work.min.x + (ax.scale * v + ax.offset) * target.scale).round();
+        let y = |v: f32| (target.work.min.y + (ay.scale * v + ay.offset) * target.scale).round();
         for index in members {
             let frame = windows[index].frame;
             placed[index] = Rect::from_min_max(
@@ -560,6 +614,7 @@ mod tests {
             display: 0,
             frame: Rect::from_min_max(pos2(left, top), pos2(right, bottom)),
             group: None,
+            min: vec2(16.0, 16.0),
         }
     }
 
@@ -653,6 +708,47 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_floating_window_shrinks_keeping_its_proportions() {
+        let saved = one(vec2(1920.0, 1040.0));
+        let placed = place(
+            &saved,
+            &[window(100.0, 100.0, 1100.0, 600.0)],
+            &[display(0.0, 0.0, 800.0, 600.0, 1.0)],
+        );
+        assert_eq!(placed[0].size(), vec2(800.0, 400.0), "{placed:?}");
+        assert_eq!(placed[0].min.x, 0.0);
+    }
+
+    #[test]
+    fn shrinking_stops_at_minimum_sizes_so_windows_keep_touching() {
+        let saved = one(vec2(1920.0, 1040.0));
+        // A 16-point window beside a wide one, shrunk to half.
+        let windows = [
+            window(100.0, 100.0, 116.0, 300.0),
+            window(116.0, 100.0, 1700.0, 300.0),
+        ];
+        let placed = place(&saved, &windows, &[display(0.0, 0.0, 800.0, 600.0, 1.0)]);
+        assert!(placed[0].width() >= 16.0, "{placed:?}");
+        assert_eq!(placed[0].max.x, placed[1].min.x);
+        assert_eq!(placed[0].min.x, 0.0);
+    }
+
+    #[test]
+    fn windows_touching_within_the_runtime_tolerance_form_one_cluster() {
+        // 1 px apart at 100%: touching for snapping, so moved as one.
+        let saved = [SavedDisplay {
+            size: vec2(1920.0, 1040.0),
+            hint: Some((Pos2::ZERO, 1.0)),
+        }];
+        let windows = [
+            window(100.0, 100.0, 500.0, 400.0),
+            window(501.0, 100.0, 901.0, 400.0),
+        ];
+        let placed = place(&saved, &windows, &[display(0.0, 0.0, 960.0, 520.0, 1.0)]);
+        assert_eq!(placed[1].min.x - placed[0].max.x, 1.0, "{placed:?}");
+    }
+
+    #[test]
     fn same_work_area_restores_exactly() {
         let target = display(-1280.0, 0.0, 2560.0, 1400.0, 2.0);
         let saved = [SavedDisplay {
@@ -670,6 +766,7 @@ mod tests {
                 display: 0,
                 frame: saved_frame(&target, *outer),
                 group: None,
+                min: vec2(16.0, 16.0),
             })
             .collect();
         assert_eq!(place(&saved, &windows, &[target]), outers.to_vec());
@@ -716,6 +813,12 @@ mod tests {
         assert_eq!(
             match_displays(&[unknown, known_left], &displays, 2),
             vec![2, 2]
+        );
+        // Recognized elsewhere, the first saved display leaves the current one
+        // free for the others.
+        assert_eq!(
+            match_displays(&[known_left, unknown], &displays, 0),
+            vec![2, 0]
         );
     }
 }
