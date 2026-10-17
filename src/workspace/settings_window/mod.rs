@@ -245,6 +245,7 @@ impl Workspace {
         let settings = self.settings.as_ref()?;
         let mut builder = egui::ViewportBuilder::default()
             .with_title("Taffymeters settings")
+            .with_icon(crate::icon::small())
             .with_inner_size(SETTINGS_SIZE)
             .with_min_inner_size(SETTINGS_MIN_SIZE)
             .with_always_on_top();

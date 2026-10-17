@@ -77,6 +77,7 @@ impl App {
     pub(crate) fn host_builder() -> egui::ViewportBuilder {
         egui::ViewportBuilder::default()
             .with_title("Taffymeters")
+            .with_icon(crate::icon::large())
             .with_decorations(false)
             .with_taskbar(false)
             .with_resizable(false)

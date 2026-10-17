@@ -19,6 +19,7 @@ pub mod theme;
 mod app;
 #[cfg(feature = "automation")]
 mod automation;
+mod icon;
 mod live;
 mod persistence;
 #[cfg(any(test, feature = "automation"))]

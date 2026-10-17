@@ -420,6 +420,7 @@ impl WindowState {
     pub(crate) fn viewport_builder(&self, id: WindowId) -> egui::ViewportBuilder {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("Taffymeters #{}", id.0))
+            .with_icon(crate::icon::small())
             .with_inner_size(self.initial_size)
             .with_min_inner_size(self.initial_min_size)
             .with_decorations(false);

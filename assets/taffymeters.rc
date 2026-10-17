@@ -1,0 +1,27 @@
+// VERSION_MAJOR/MINOR/PATCH and VERSION_STR come from Cargo.toml via build.rs.
+
+1 ICON "taffymeters.ico"
+
+1 VERSIONINFO
+FILEVERSION VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 0
+PRODUCTVERSION VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Taffymeters"
+            VALUE "ProductName", "Taffymeters"
+            VALUE "FileVersion", VERSION_STR
+            VALUE "ProductVersion", VERSION_STR
+            VALUE "InternalName", "taffymeters"
+            VALUE "OriginalFilename", "taffymeters.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
