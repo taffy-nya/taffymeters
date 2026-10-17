@@ -16,6 +16,7 @@ mod window;
 
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::Arc,
     time::Duration,
 };
 
@@ -27,14 +28,16 @@ use crate::{
     dataflow::{ChannelSelection, ControlError, NodeRef, NodeSpec, OutputId, SharedAnalysisId},
     extensions::{Registry, RegistryError},
     module::{Module, ModuleServices},
-    modules::{self, SPECTRUM_MODULE_ID},
-    persistence::{InputConfig, ModuleFile, PersistError, WorkspaceStore},
+    modules,
+    persistence::{InputConfig, ModuleFile, PersistError, PresetRef, WorkspaceStore},
     render::Color,
     settings::SettingValue,
     theme::{ColorRole, Palette, Preset, RoleOverrides, ThemeSettings},
 };
 
 pub(crate) use desktop::{DesktopProbe, NativeDesktop};
+#[cfg(feature = "automation")]
+pub(crate) use desktop::{Display, display_at};
 #[cfg(feature = "automation")]
 pub(crate) use layout::Axis;
 use layout::{Layout, LayoutError};
@@ -216,23 +219,21 @@ pub(crate) enum WorkspaceAction {
     SetReferenceLevel {
         dbfs: Option<f32>,
     },
-    SaveWorkspace,
-    SaveWorkspaceAs {
+    /// Replace the whole workspace with a preset.
+    LoadPreset {
+        preset: PresetRef,
+    },
+    /// Save the workspace as a new user preset; the session then comes from it.
+    SavePresetAs {
         name: String,
     },
-    /// Save the current workspace, then replace it with the saved one.
-    SwitchWorkspace {
-        name: String,
-    },
-    /// Save the current workspace, then start a new default one.
-    NewWorkspace {
+    /// Save the workspace over the user preset the session comes from.
+    SavePreset,
+    DeletePreset {
         name: String,
     },
     ClearNotices,
-    /// Replace the current workspace with one default Spectrum window and the Dark
-    /// theme, keeping its name, and save it.
-    ResetWorkspace,
-    /// Save the workspace and close every window (the application exits).
+    /// Save the session and close every window (the application exits).
     Quit,
 }
 
@@ -258,10 +259,10 @@ pub(crate) enum WorkspaceError {
     Persist(PersistError),
     /// The workspace has no directory to save to.
     NoStore,
-    /// Its file could not be read; saving would overwrite it.
-    Protected(String),
-    WorkspaceExists(String),
-    NoSuchWorkspace(String),
+    PresetExists(String),
+    NoSuchPreset(String),
+    /// The session does not come from a user preset to save over.
+    NoSavedPreset,
     /// A copy could not take over every setting of the original.
     CopyIncomplete(String),
 }
@@ -281,12 +282,11 @@ impl std::fmt::Display for WorkspaceError {
             Self::LiveAudio(error) => std::fmt::Display::fmt(error, f),
             Self::Persist(error) => std::fmt::Display::fmt(error, f),
             Self::NoStore => f.write_str("this workspace has no save location"),
-            Self::Protected(name) => write!(
-                f,
-                "workspace {name:?} could not be read; save it under another name"
-            ),
-            Self::WorkspaceExists(name) => write!(f, "workspace {name:?} already exists"),
-            Self::NoSuchWorkspace(name) => write!(f, "workspace {name:?} is not saved"),
+            Self::PresetExists(name) => write!(f, "preset {name:?} already exists"),
+            Self::NoSuchPreset(name) => write!(f, "preset {name:?} is not available"),
+            Self::NoSavedPreset => {
+                f.write_str("this workspace does not come from a saved preset; use Save as")
+            }
             Self::CopyIncomplete(reason) => write!(f, "could not copy the module: {reason}"),
         }
     }
@@ -459,11 +459,13 @@ pub struct Workspace {
     control_error: Option<(String, Duration)>,
     /// Shared repaint clock of animating windows (real time).
     frame_clock: Option<std::time::Instant>,
-    /// Name under which the workspace saves.
-    name: String,
+    /// The preset the session was loaded from, if it still has one.
+    preset: Option<PresetRef>,
     store: Option<WorkspaceStore>,
-    /// The file under `name` could not be read; saving must not replace it.
+    /// The session file could not be read; saving must not replace it.
     protected: bool,
+    /// Monitors and pointer state; owned so restoring and saving can place windows.
+    desktop: Arc<dyn DesktopProbe + Send + Sync>,
     theme: ThemeSettings,
     /// Colors of the window chrome (global roles).
     chrome: Palette,
@@ -488,7 +490,10 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    fn empty(live: LiveAudio) -> Result<Self, WorkspaceError> {
+    fn empty(
+        live: LiveAudio,
+        desktop: Arc<dyn DesktopProbe + Send + Sync>,
+    ) -> Result<Self, WorkspaceError> {
         let mut registry = Registry::default();
         modules::register(&mut registry)?;
         let services = ModuleServices {
@@ -510,9 +515,10 @@ impl Workspace {
             control_error: None,
             notices_shown_until: Duration::ZERO,
             frame_clock: None,
-            name: crate::persistence::DEFAULT_WORKSPACE.to_owned(),
+            preset: None,
             store: None,
             protected: false,
+            desktop,
             chrome: theme.global_palette(),
             theme,
             input: InputConfig::default(),
@@ -526,24 +532,25 @@ impl Workspace {
         })
     }
 
-    /// A workspace with one window holding one default Spectrum, not saved
-    /// (automation only; the product opens its saved workspace).
+    /// A workspace with one window holding one default Spectrum, not saved, on the
+    /// native desktop (automation only; the product opens its session).
     #[cfg(feature = "automation")]
     pub fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
-        let mut workspace = Self::empty(live)?;
-        workspace.add_default_window(always_on_top)?;
-        Ok(workspace)
-    }
-
-    /// One window with one default Spectrum.
-    fn add_default_window(&mut self, always_on_top: bool) -> Result<WindowId, WorkspaceError> {
-        let first = self.create_module(SPECTRUM_MODULE_ID)?;
+        let mut workspace = Self::empty(live, Arc::new(NativeDesktop))?;
+        let first = workspace.create_module(modules::SPECTRUM_MODULE_ID)?;
         let mut window =
             WindowState::new(Layout::with_leaf(first), INITIAL_WINDOW_SIZE, always_on_top);
         window.active = Some(first);
-        let id = WindowId(Self::allocate(&mut self.next_window_id)?);
-        self.windows.insert(id, window);
-        Ok(id)
+        let id = WindowId(Self::allocate(&mut workspace.next_window_id)?);
+        workspace.windows.insert(id, window);
+        Ok(workspace)
+    }
+
+    /// Replace the desktop the workspace places its windows on (simulated
+    /// desktops of the automation harness).
+    #[cfg(feature = "automation")]
+    pub(crate) fn set_desktop(&mut self, desktop: Arc<dyn DesktopProbe + Send + Sync>) {
+        self.desktop = desktop;
     }
 
     /// Drop every Module before stopping capture and the worker.
@@ -812,18 +819,14 @@ impl Workspace {
             }
             WorkspaceAction::SetTextSize { size } => self.set_text_size(size),
             WorkspaceAction::SetReferenceLevel { dbfs } => self.set_reference_level(dbfs),
-            WorkspaceAction::SaveWorkspace => {
-                self.save()?;
-                Ok(ActionOutcome::Applied)
-            }
-            WorkspaceAction::SaveWorkspaceAs { name } => self.save_as(name),
-            WorkspaceAction::SwitchWorkspace { name } => self.switch_to(name),
-            WorkspaceAction::NewWorkspace { name } => self.new_workspace(name),
+            WorkspaceAction::LoadPreset { preset } => self.load_preset(preset),
+            WorkspaceAction::SavePresetAs { name } => self.save_preset_as(name),
+            WorkspaceAction::SavePreset => self.save_preset(),
+            WorkspaceAction::DeletePreset { name } => self.delete_preset(&name),
             WorkspaceAction::ClearNotices => {
                 self.notices.clear();
                 Ok(ActionOutcome::Applied)
             }
-            WorkspaceAction::ResetWorkspace => self.reset_workspace(),
             WorkspaceAction::Quit => self.quit(),
         }
     }

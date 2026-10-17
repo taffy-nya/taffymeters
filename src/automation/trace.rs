@@ -150,7 +150,7 @@ impl Trace {
             "nodes": metrics.nodes,
             "control_error": observation.control_error,
             "source": format!("{:?}", observation.source_status.state),
-            "workspace": observation.name,
+            "preset": observation.preset,
             "theme": observation.theme.preset,
             "notices": observation.notices,
             "settings_open": settings_open,

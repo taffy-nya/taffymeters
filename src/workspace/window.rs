@@ -10,7 +10,6 @@ use eframe::egui::{
 
 use super::{
     ModuleInstanceId, MoveTarget, Side, SplitId, WindowId, Workspace, WorkspaceAction,
-    desktop::DesktopProbe,
     layout::{Axis, DividerGeometry},
     settings_window::SettingsItem,
 };
@@ -369,7 +368,6 @@ impl Workspace {
         window_id: WindowId,
         ui: &mut egui::Ui,
         display_time: Duration,
-        probe: &dyn DesktopProbe,
     ) -> bool {
         let pass_started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
@@ -389,7 +387,7 @@ impl Workspace {
         let windows_before: Vec<WindowId> = self.windows.keys().copied().collect();
         let settings_before = self.settings.is_some();
         self.tick(display_time);
-        let repaint = self.window_pass(window_id, ui, rect, display_time, probe);
+        let repaint = self.window_pass(window_id, ui, rect, display_time);
         if let Some(delay) = repaint {
             let now = std::time::Instant::now();
             let wait = if delay <= FRAME_INTERVAL {
@@ -461,7 +459,6 @@ impl Workspace {
         ui: &mut egui::Ui,
         rect: Rect,
         display_time: Duration,
-        probe: &dyn DesktopProbe,
     ) -> Option<Duration> {
         let ctx = ui.ctx().clone();
         let window = self.windows.get_mut(&window_id)?;
@@ -494,14 +491,7 @@ impl Workspace {
                 viewport.minimized.unwrap_or(false),
             )
         });
-        let wake = self.observe_placement(
-            window_id,
-            outer,
-            pixels_per_point,
-            maximized,
-            minimized,
-            probe,
-        );
+        let wake = self.observe_placement(window_id, outer, pixels_per_point, maximized, minimized);
         if !wake.is_empty() {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }

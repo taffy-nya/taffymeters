@@ -755,14 +755,14 @@ fn w07() -> Result<Value, String> {
         "detach to a 2x window failed",
     )?;
     // Native move of the 2x window close to the root's right edge, then release.
-    h.desktop.button_down.set(true);
+    h.desktop.set_button_down(true);
     h.window_mut(second)?.position = pos2(1007.0, 120.0);
     h.frame_window(second, vec![])?;
     check(
         h.window(second)?.position == pos2(1007.0, 120.0),
         "snapped while the button was still held",
     )?;
-    h.desktop.button_down.set(false);
+    h.desktop.set_button_down(false);
     h.frame_window(second, vec![])?;
     let snapped = h.window(second)?.position;
     check(
@@ -822,11 +822,11 @@ fn w07() -> Result<Value, String> {
         &format!("an unpinned window did not start a native move: {unpinned_drags}"),
     )?;
     // Moving the root moves the member by the same physical delta.
-    h.desktop.button_down.set(true);
+    h.desktop.set_button_down(true);
     h.window_mut(FIRST_WINDOW)?.position = pos2(150.0, 130.0);
     h.frame_window(FIRST_WINDOW, vec![])?;
     h.frame_window(second, vec![])?;
-    h.desktop.button_down.set(false);
+    h.desktop.set_button_down(false);
     h.frame_window(FIRST_WINDOW, vec![])?;
     h.frame_window(second, vec![])?;
     check(
@@ -846,10 +846,10 @@ fn w07() -> Result<Value, String> {
         h.ws.observation().windows.iter().all(|w| w.group.is_none()),
         "Leave group left a one-member group",
     )?;
-    h.desktop.button_down.set(true);
+    h.desktop.set_button_down(true);
     h.window_mut(FIRST_WINDOW)?.position = pos2(400.0, 300.0);
     h.frame_window(FIRST_WINDOW, vec![])?;
-    h.desktop.button_down.set(false);
+    h.desktop.set_button_down(false);
     h.frame_window(FIRST_WINDOW, vec![])?;
     h.frame_window(second, vec![])?;
     check(

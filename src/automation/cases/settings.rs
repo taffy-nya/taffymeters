@@ -1,5 +1,5 @@
-//! S01–S08: settings window, copies, invisible sharing, theme, saving and
-//! restoring, missing extensions, workspace switching, window rescue and reset.
+//! S01–S08: settings window, copies, invisible sharing, theme, the session and
+//! presets, missing extensions, preset switching, window placement and rescue.
 //! They run the real Workspace, Module factories and manual source with temporary
 //! configuration directories; settings operations use real egui events.
 
@@ -20,17 +20,17 @@ use crate::{
         BAR_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID,
         SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
     },
-    persistence::WorkspaceStore,
+    persistence::{PresetRef, WorkspaceStore},
     settings::{NodeParam, SettingValue},
     theme::{ColorRole, Preset},
     workspace::{
-        ActionOutcome, ColorScope, ControlKey, FIRST_WINDOW, ModuleInstanceId, SWATCHES,
+        ActionOutcome, ColorScope, ControlKey, Display, FIRST_WINDOW, ModuleInstanceId, SWATCHES,
         SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction,
     },
 };
 
 use crate::automation::{
-    harness::Harness,
+    harness::{FakeDesktop, Harness},
     support::{action, check, created, deadline, first_leaf, wait_until, workspace},
 };
 
@@ -65,9 +65,42 @@ impl TempDir {
         WorkspaceStore::new(&self.0)
     }
 
-    fn file(&self, name: &str) -> PathBuf {
-        self.0.join("workspaces").join(format!("{name}.json"))
+    fn preset(&self, name: &str) -> PathBuf {
+        self.0.join("presets").join(format!("{name}.json"))
     }
+
+    fn session(&self) -> PathBuf {
+        self.0.join("session.json")
+    }
+
+    /// Write `file` as the session to open next.
+    fn write_session(&self, file: &Value) -> Result<(), String> {
+        fs::write(
+            self.session(),
+            serde_json::to_vec_pretty(file).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// The harness's default monitor as a saved display: recognized on restore.
+fn primary_display() -> Value {
+    json!({"work_area":[1920.0,1040.0],"hint":{"origin_px":[0.0,0.0],"scale":1.0}})
+}
+
+/// Open the session in `dir` on the harness's default desktop.
+fn reopen(dir: &TempDir) -> Result<(Workspace, ManualInputDriver), String> {
+    let (live, driver) = manual_live()?;
+    let ws = Workspace::open(live, dir.store(), FakeDesktop::new()).map_err(|e| e.to_string())?;
+    Ok((ws, driver))
+}
+
+fn saved(name: &str) -> PresetRef {
+    PresetRef::Saved(name.to_owned())
+}
+
+fn builtin(name: &str) -> PresetRef {
+    PresetRef::Builtin(name.to_owned())
 }
 
 impl Drop for TempDir {
@@ -894,11 +927,13 @@ fn fingerprint(ws: &Workspace) -> Value {
     json!({"windows":windows,"theme":o.theme})
 }
 
-/// Save (menu and autosave on closing the last window), restart, compare.
+/// Save as a preset through the settings window, then autosave of the session
+/// (Quit and closing the last window), restart, compare. Presets only change on
+/// request.
 fn s04() -> Result<Value, String> {
     let dir = TempDir::new("s04")?;
     let (ws, _driver) = workspace()?;
-    let mut h = Harness::new(ws.with_store(dir.store(), "Round trip"));
+    let mut h = Harness::new(ws.with_store(dir.store()));
     h.frame(vec![]);
     let a = first_leaf(&h.ws)?;
     let spec_a = spec(&h.ws, a)?;
@@ -1036,16 +1071,26 @@ fn s04() -> Result<Value, String> {
     h.frame_window(second, vec![])?;
     h.frame_window(FIRST_WINDOW, vec![])?;
     h.focus = FIRST_WINDOW;
-    // Save through the settings window.
+    // Save as a preset through the settings window.
     h.settings(
         ControlKey::LeafBody(a),
-        &[SettingsItem::Tab(Tab::Workspace), SettingsItem::Save],
+        &[SettingsItem::Tab(Tab::Workspace)],
     )?;
+    h.in_settings(&[SettingsItem::PresetName])?;
+    h.frame(vec![Event::Text("Round trip".to_owned())]);
+    h.frame(vec![]);
+    h.in_settings(&[SettingsItem::SavePresetAs])?;
     check(
-        dir.file("Round trip").exists(),
-        "Save did not write the workspace",
+        dir.preset("Round trip").exists() && h.ws.observation().preset == Some(saved("Round trip")),
+        "Save as did not write the preset",
     )?;
-    // A later change is kept by Quit, which saves before closing every window.
+    let preset_file = read_json(&dir.preset("Round trip"))?;
+    check(
+        preset_file.get("preset").is_none(),
+        "a preset records a session origin",
+    )?;
+    h.focus = FIRST_WINDOW;
+    // A later change is kept by Quit in the session, not in the preset.
     let split =
         h.ws.observation()
             .window(FIRST_WINDOW)
@@ -1072,9 +1117,13 @@ fn s04() -> Result<Value, String> {
         "Quit left windows or instances",
     )?;
     drop(h);
-    let saved = read_json(&dir.file("Round trip"))?;
+    check(
+        read_json(&dir.preset("Round trip"))? == preset_file,
+        "the session's autosave changed the preset",
+    )?;
+    let saved_session = read_json(&dir.session())?;
     let mut saved_keys = BTreeSet::new();
-    keys(&saved, &mut saved_keys);
+    keys(&saved_session, &mut saved_keys);
     const RUNTIME: [&str; 12] = [
         "instance_id",
         "window_id",
@@ -1098,19 +1147,19 @@ fn s04() -> Result<Value, String> {
         leaked.is_empty(),
         &format!("runtime state in the file: {leaked:?}"),
     )?;
-    let saved_text = serde_json::to_string(&saved).unwrap_or_default();
+    let saved_text = serde_json::to_string(&saved_session).unwrap_or_default();
     check(
         !saved_text.contains("binding"),
         "copies and edits created explicit sharing",
     )?;
     check(
-        saved["windows"].as_array().map(Vec::len) == Some(2),
-        "the file does not hold both windows",
+        saved_session["windows"].as_array().map(Vec::len) == Some(2)
+            && saved_session["preset"] == json!({"saved":"Round trip"}),
+        "the session does not hold both windows and its preset",
     )?;
 
     // Restart.
-    let (live, _driver) = manual_live()?;
-    let ws = Workspace::open(live, dir.store(), false).map_err(|e| e.to_string())?;
+    let (ws, _driver) = reopen(&dir)?;
     let mut h = Harness::new(ws);
     h.frame_all()?;
     let after = fingerprint(&h.ws);
@@ -1119,16 +1168,16 @@ fn s04() -> Result<Value, String> {
         &format!("restored workspace differs:\nbefore {before}\nafter  {after}"),
     )?;
     check(
-        h.ws.reference_dbfs() == -24.0 && saved["reference_dbfs"] == -24.0,
+        h.ws.reference_dbfs() == -24.0 && saved_session["reference_dbfs"] == -24.0,
         &format!(
             "reference level not restored: {} (file {})",
             h.ws.reference_dbfs(),
-            saved["reference_dbfs"]
+            saved_session["reference_dbfs"]
         ),
     )?;
     let o = h.ws.observation();
     check(
-        o.name == "Round trip" && o.notices.is_empty(),
+        o.preset == Some(saved("Round trip")) && o.notices.is_empty(),
         &format!("restore reported {:?}", o.notices),
     )?;
     check(
@@ -1143,12 +1192,19 @@ fn s04() -> Result<Value, String> {
         positions.contains(&pos2(1200.0, 300.0)),
         &format!("detached window position not restored: {positions:?}"),
     )?;
-    // Saving the restored workspace writes the same file.
-    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
-    let resaved = read_json(&dir.file("Round trip"))?;
+    // Saving the restored session writes the same file.
+    h.ws.autosave();
     check(
-        resaved == saved,
-        "saving the restored workspace changed the file",
+        read_json(&dir.session())? == saved_session,
+        "saving the restored session changed the file",
+    )?;
+    // Save to the preset on request.
+    action(&mut h.ws, WorkspaceAction::SavePreset)?;
+    check(
+        read_json(&dir.preset("Round trip"))?["windows"][0]["layout"]["ratio"]
+            .as_f64()
+            .is_some_and(|ratio| (ratio - 0.3).abs() < 1e-6),
+        "Save to did not write the preset",
     )?;
     h.ws.check_ownership()?;
     // Closing the last window ends the session and saves first.
@@ -1177,7 +1233,7 @@ fn s04() -> Result<Value, String> {
         },
     )?;
     action(&mut h.ws, WorkspaceAction::CloseWindow { window_id: *last })?;
-    let closed = read_json(&dir.file("Round trip"))?;
+    let closed = read_json(&dir.session())?;
     check(
         closed["windows"].as_array().map(Vec::len) == Some(1)
             && closed["windows"][0]["layout"]["ratio"]
@@ -1191,11 +1247,10 @@ fn s04() -> Result<Value, String> {
     )
 }
 
-/// Missing types, unusable configuration, unknown style and input, and a file
-/// from a newer build: reported, kept verbatim, never overwritten.
+/// Missing types, unusable configuration, unknown style and input, and a session
+/// file from another build: reported, kept verbatim, never overwritten.
 fn s05() -> Result<Value, String> {
     let dir = TempDir::new("s05")?;
-    let store = dir.store();
     let plugin = json!({"type_id":"vendor.plugin.meter",
         "data":{"nodes":[{"input":null,"kind":"vendor_node","params":{"q":3}}],
                 "outputs":[{"node":0,"keep":"latest","binding":7}]},
@@ -1216,9 +1271,9 @@ fn s05() -> Result<Value, String> {
         {"input":1,"kind":"tilt","params":{"db_per_octave":4.5}},
         {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"fall_db_per_second_squared":30.0}}],
         "outputs":[{"node":2,"keep":"latest"},{"node":3,"keep":"latest"}]}});
-    let file = json!({"format_version":1,"name":"Imported","input":{"kind":"daw_bridge","pipe":"studio-a"},
-        "theme":{"preset":"dark"},
-        "windows":[{"outer_position":[120.0,140.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
+    let file = json!({"format_version":2,"input":{"kind":"daw_bridge","pipe":"studio-a"},
+        "theme":{"preset":"dark"},"displays":[primary_display()],
+        "windows":[{"display":0,"frame":[120.0,140.0,1020.0,560.0],
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
                 "first":{"node":"split","axis":"top_bottom","ratio":0.5,
                     "first":{"node":"leaf","module":plugin},
@@ -1227,19 +1282,12 @@ fn s05() -> Result<Value, String> {
                     "first":{"node":"leaf","module":{"type_id":OSCILLOSCOPE_MODULE_ID,"style":"vendor.glow",
                         "data":{"nodes":[],"outputs":[{"node":null,"keep":"latest"}]}}},
                     "second":{"node":"leaf","module":unusable_view}}}},
-            {"outer_position":[1100.0,140.0],"pixels_per_point":1.0,"inner_size":[300.0,200.0],
+            {"display":0,"frame":[1100.0,140.0,1400.0,340.0],
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
                 "first":{"node":"leaf","module":empty_with_data},
                 "second":{"node":"leaf","module":huge_fft}}}]});
-    fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
-    fs::write(
-        dir.file("Imported"),
-        serde_json::to_vec_pretty(&file).unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-    store.set_last_used("Imported").map_err(|e| e.to_string())?;
-    let (live, _driver) = manual_live()?;
-    let ws = Workspace::open(live, store.clone(), false).map_err(|e| e.to_string())?;
+    dir.write_session(&file)?;
+    let (ws, _driver) = reopen(&dir)?;
     let mut h = Harness::new(ws);
     h.frame_all()?;
     let o = h.ws.observation();
@@ -1303,8 +1351,8 @@ fn s05() -> Result<Value, String> {
         "unknown style did not fall back to the default",
     )?;
     settle(&h.ws, 1)?;
-    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
-    let saved = read_json(&dir.file("Imported"))?;
+    h.ws.autosave();
+    let saved = read_json(&dir.session())?;
     let layout = &saved["windows"][0]["layout"];
     check(
         layout["first"]["first"]["module"] == plugin
@@ -1327,10 +1375,9 @@ fn s05() -> Result<Value, String> {
             side: Side::Right,
         },
     )?)?;
-    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
+    h.ws.autosave();
     check(
-        read_json(&dir.file("Imported"))?["windows"][0]["layout"]["second"]["first"]["second"]["module"]
-            ["style"]
+        read_json(&dir.session())?["windows"][0]["layout"]["second"]["first"]["second"]["module"]["style"]
             == "vendor.glow",
         "the copy dropped the kept style",
     )?;
@@ -1345,9 +1392,9 @@ fn s05() -> Result<Value, String> {
         oscilloscope,
         &[SettingsItem::Style(LINE_OSCILLOSCOPE_STYLE_ID)],
     )?;
-    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
+    h.ws.autosave();
     check(
-        read_json(&dir.file("Imported"))?["windows"][0]["layout"]["second"]["first"]["module"]["style"]
+        read_json(&dir.session())?["windows"][0]["layout"]["second"]["first"]["module"]["style"]
             == LINE_OSCILLOSCOPE_STYLE_ID,
         "an explicit style choice did not replace the kept one",
     )?;
@@ -1365,58 +1412,55 @@ fn s05() -> Result<Value, String> {
     )?;
     drop(h);
 
-    // A newer build's file is protected.
-    let future = br#"{"format_version": 99, "name": "Future", "windows": []}"#;
-    fs::write(dir.file("Future"), future).map_err(|e| e.to_string())?;
-    store.set_last_used("Future").map_err(|e| e.to_string())?;
-    let (live, _driver) = manual_live()?;
-    let mut ws = Workspace::open(live, store.clone(), false).map_err(|e| e.to_string())?;
+    // A session file from another build is protected.
+    let future = br#"{"format_version": 99, "windows": []}"#;
+    fs::write(dir.session(), future).map_err(|e| e.to_string())?;
+    let (mut ws, _driver) = reopen(&dir)?;
     let o = ws.observation();
     check(
-        o.notices.iter().any(|n| n.contains("version 99")) && o.windows.len() == 1,
-        "a newer file did not open as a protected default workspace",
-    )?;
-    check(
-        action(&mut ws, WorkspaceAction::SaveWorkspace)
-            .is_err_and(|e| e.contains("could not be read")),
-        "Save overwrote a protected workspace",
+        o.notices.iter().any(|n| n.contains("version 99"))
+            && o.windows.len() == 1
+            && o.preset == Some(builtin("Default")),
+        "an unreadable session did not open as the protected Default preset",
     )?;
     ws.autosave();
     check(
-        fs::read(dir.file("Future")).map_err(|e| e.to_string())? == future,
-        "autosave touched the protected file",
+        fs::read(dir.session()).map_err(|e| e.to_string())? == future,
+        "autosave touched the protected session",
     )?;
     check(
         action(
             &mut ws,
-            WorkspaceAction::SaveWorkspaceAs {
-                name: "Future".to_owned(),
+            WorkspaceAction::SavePresetAs {
+                name: "DEFAULT".to_owned(),
             },
         )
-        .is_err_and(|e| e.contains("already exists"))
-            && fs::read(dir.file("Future")).map_err(|e| e.to_string())? == future,
-        "Save as overwrote the protected file under its own name",
+        .is_err_and(|e| e.contains("already exists")),
+        "Save as took a built-in preset's name",
     )?;
     action(
         &mut ws,
-        WorkspaceAction::SaveWorkspaceAs {
+        WorkspaceAction::SavePresetAs {
             name: "Recovered".to_owned(),
         },
     )?;
+    ws.autosave();
     check(
-        dir.file("Recovered").exists(),
-        "Save as did not write a new workspace",
+        dir.preset("Recovered").exists()
+            && fs::read(dir.session()).map_err(|e| e.to_string())? == future,
+        "Save as did not write a preset, or the session became writable",
     )?;
     Ok(json!({"missing":missing,"notices":o.notices.len()}))
 }
 
-/// New workspace through the naming panel, then repeated switching: old instances
-/// and their subscriptions are released, nothing accumulates.
+/// Save as a preset through the naming panel, then repeated loading of presets:
+/// old instances and their subscriptions are released, nothing accumulates.
+/// Deleting the preset the session came from leaves nothing to save over.
 fn s06() -> Result<Value, String> {
     let dir = TempDir::new("s06")?;
     let (ws, _driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
-    let mut h = Harness::new(ws.with_store(dir.store(), "A"));
+    let mut h = Harness::new(ws.with_store(dir.store()));
     let a = first_leaf(&h.ws)?;
     for type_id in [WAVEFORM_MODULE_ID, OSCILLOSCOPE_MODULE_ID] {
         let new = created(action(
@@ -1440,112 +1484,118 @@ fn s06() -> Result<Value, String> {
         ControlKey::LeafBody(a),
         &[SettingsItem::Tab(Tab::Workspace)],
     )?;
-    // New first saves the current workspace, so its own name (unsaved here, and in
-    // any letter case: Windows file names) cannot become the new one's.
+    // A built-in preset's name, in any letter case (Windows file names), is taken.
     check(
         action(
             &mut h.ws,
-            WorkspaceAction::NewWorkspace {
-                name: "a".to_owned(),
+            WorkspaceAction::SavePresetAs {
+                name: "default".to_owned(),
             },
         )
         .is_err()
-            && h.ws.observation().modules.len() == 3
-            && !dir.file("A").exists(),
-        "New accepted the current workspace's name",
+            && !dir.preset("default").exists(),
+        "Save as took a built-in preset's name",
     )?;
-    h.in_settings(&[SettingsItem::Name])?;
-    h.frame(vec![Event::Text("a".to_owned())]);
+    let taken = "bar - top";
+    h.in_settings(&[SettingsItem::PresetName])?;
+    h.frame(vec![Event::Text(taken.to_owned())]);
     h.frame(vec![]);
-    let offered = h.in_settings(&[SettingsItem::NewWorkspace]);
+    let offered = h.in_settings(&[SettingsItem::SavePresetAs]);
     check(
         offered
             .as_ref()
             .is_err_and(|error| error.starts_with("Disabled control")),
-        &format!("New was offered under the current name: {offered:?}"),
+        &format!("Save as was offered under a built-in name: {offered:?}"),
     )?;
-    h.key(egui::Key::Backspace);
+    for _ in taken.chars() {
+        h.key(egui::Key::Backspace);
+    }
     // Typed text (a space included) is text, not the Space shortcut.
-    h.frame(vec![Event::Text("B 2".to_owned())]);
+    h.frame(vec![Event::Text("A 2".to_owned())]);
     h.frame(vec![]);
     check(
         h.ws.observation().source_status.state == crate::audio::SourceState::Running,
         "typing a name paused the source",
     )?;
-    h.in_settings(&[SettingsItem::NewWorkspace])?;
+    h.in_settings(&[SettingsItem::SavePresetAs])?;
     let o = h.ws.observation();
     check(
-        o.name == "B 2" && o.windows.len() == 1 && o.modules.len() == 1,
+        dir.preset("A 2").exists() && o.preset == Some(saved("A 2")) && o.modules.len() == 3,
+        &format!("Save as did not save the preset: {:?}", o.control_error),
+    )?;
+    // The built-in Default from the list replaces everything.
+    h.in_settings(&[SettingsItem::BuiltinPreset(0)])?;
+    let o = h.ws.observation();
+    check(
+        o.preset == Some(builtin("Default"))
+            && o.windows.len() == 1
+            && o.modules.len() == 1
+            && o.modules[0].type_id == OSCILLOSCOPE_MODULE_ID,
         &format!(
-            "New did not start a default workspace: {} {:?}",
-            o.name, o.control_error
+            "Default did not replace the workspace: {:?} {:?}",
+            o.preset, o.control_error
         ),
     )?;
     check(
         !o.windows.iter().any(|w| w.id == FIRST_WINDOW),
-        "the new workspace reused the old window identity",
+        "the loaded preset reused the old window identity",
     )?;
     settle(&h.ws, 1)?;
-    check(
-        read_json(&dir.file("A"))?["windows"][0]["layout"]["node"] == "split"
-            && dir.file("B 2").exists(),
-        "switching did not save the previous workspace",
-    )?;
-    let names = h.ws.saved_workspaces();
     let mut baseline = None;
     for round in 0..10 {
-        let target = if round % 2 == 0 { "A" } else { "B 2" };
-        action(
-            &mut h.ws,
-            WorkspaceAction::SwitchWorkspace {
-                name: target.to_owned(),
-            },
-        )?;
-        let expected = if target == "A" { 3 } else { 1 };
+        let (preset, expected) = if round % 2 == 0 {
+            (saved("A 2"), 3)
+        } else {
+            (builtin("Default"), 1)
+        };
+        action(&mut h.ws, WorkspaceAction::LoadPreset { preset })?;
         settle(&h.ws, expected)?;
         h.ws.check_ownership()?;
         check(
             h.ws.observation().modules.len() == expected as usize,
-            "instances of the previous workspace survived the switch",
+            "instances of the previous workspace survived the load",
         )?;
         let metrics = handle.metrics();
         if round == 0 {
             baseline = Some((metrics.nodes, metrics.rings));
         } else if round % 2 == 0 && baseline != Some((metrics.nodes, metrics.rings)) {
             return Err(format!(
-                "dataflow grew across switches: {metrics:?} vs {baseline:?}"
+                "dataflow grew across loads: {metrics:?} vs {baseline:?}"
             ));
         }
     }
-    // Switching through the settings window.
-    h.focus = h.ws.windows().first().map(|w| w.id).ok_or("no window")?;
-    h.frame_all()?;
-    let index = names.iter().position(|n| n == "A").ok_or("A not listed")? as u16;
-    h.in_settings(&[SettingsItem::Switch(index)])?;
-    let o = h.ws.observation();
-    check(o.name == "A" && o.modules.len() == 3, "menu switch failed")?;
-    settle(&h.ws, 3)?;
-    // The record of the workspace to open next time cannot be written (a directory
-    // stands where the file belongs): Save As still commits to the new name and
-    // reports the record separately.
-    let state = dir.0.join("state.json");
-    fs::remove_file(&state).map_err(|e| e.to_string())?;
-    fs::create_dir(&state).map_err(|e| e.to_string())?;
-    action(
-        &mut h.ws,
-        WorkspaceAction::SaveWorkspaceAs {
-            name: "C".to_owned(),
-        },
-    )?;
+    // Loading through the settings window's list of saved presets.
+    let names = h.ws.saved_presets();
+    let index = names
+        .iter()
+        .position(|n| n == "A 2")
+        .ok_or("A 2 not listed")? as u16;
+    h.in_settings(&[SettingsItem::SavedPreset(index)])?;
     let o = h.ws.observation();
     check(
-        o.name == "C"
-            && dir.file("C").exists()
-            && o.notices.iter().any(|n| n.contains("open next time")),
-        &format!(
-            "Save As did not keep its committed name: {} {:?}",
-            o.name, o.notices
-        ),
+        o.preset == Some(saved("A 2")) && o.modules.len() == 3,
+        "menu load failed",
+    )?;
+    settle(&h.ws, 3)?;
+    // Deleting asks first; the session keeps running without a preset to save to.
+    h.in_settings(&[SettingsItem::DeletePreset(index)])?;
+    check(
+        dir.preset("A 2").exists(),
+        "Delete acted without confirmation",
+    )?;
+    h.in_settings(&[
+        SettingsItem::CancelDelete,
+        SettingsItem::DeletePreset(index),
+        SettingsItem::ConfirmDelete,
+    ])?;
+    let o = h.ws.observation();
+    check(
+        !dir.preset("A 2").exists() && o.preset.is_none() && o.modules.len() == 3,
+        "Delete did not remove the preset or changed the workspace",
+    )?;
+    check(
+        action(&mut h.ws, WorkspaceAction::SavePreset).is_err_and(|e| e.contains("Save as")),
+        "Save to was possible without a saved preset",
     )?;
     let metrics = handle.metrics();
     Ok(
@@ -1554,7 +1604,11 @@ fn s06() -> Result<Value, String> {
     )
 }
 
-/// Windows that end up off every monitor come back; partly visible ones stay.
+/// Windows land on usable displays: windows off every monitor come back while
+/// partly visible ones stay, a session from a display that is gone opens on the
+/// current one, touching windows stay touching on a display of another size and
+/// scale, and a built-in bar spans the display of the window the settings were
+/// opened from.
 fn s07() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let mut h = Harness::new(ws);
@@ -1581,36 +1635,106 @@ fn s07() -> Result<Value, String> {
         "a partly visible window was moved",
     )?;
 
-    // Restored onto a monitor that is no longer there.
+    drop(h);
+
+    // A session saved on a display that is no longer there.
     let dir = TempDir::new("s07")?;
-    let file = json!({"format_version":1,"name":"Away",
-        "windows":[{"outer_position":[-5000.0,300.0],"pixels_per_point":1.0,"inner_size":[400.0,300.0],
-            "layout":{"node":"leaf","module":{"type_id":SPECTRUM_MODULE_ID}}}]});
-    fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
-    fs::write(
-        dir.file("Away"),
-        serde_json::to_vec(&file).unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-    dir.store()
-        .set_last_used("Away")
-        .map_err(|e| e.to_string())?;
-    let (live, _driver) = manual_live()?;
-    let ws = Workspace::open(live, dir.store(), false).map_err(|e| e.to_string())?;
+    let spectrum = json!({"node":"leaf","module":{"type_id":SPECTRUM_MODULE_ID}});
+    dir.write_session(&json!({"format_version":2,
+        "displays":[{"work_area":[1920.0,1040.0],"hint":{"origin_px":[-1920.0,0.0],"scale":1.0}}],
+        "windows":[{"display":0,"frame":[100.0,300.0,500.0,600.0],"layout":spectrum}]}))?;
+    let (ws, _driver) = reopen(&dir)?;
     let mut restored = Harness::new(ws);
     let opened_at = restored.window(restored.focus)?.position;
     restored.frame(vec![]);
     let landed = restored.window(restored.focus)?.position;
     check(
-        opened_at == pos2(-5000.0, 300.0) && landed == pos2(0.0, 300.0),
-        &format!("restored off-screen window: opened {opened_at:?}, now {landed:?}"),
+        opened_at == pos2(100.0, 300.0) && landed == opened_at,
+        &format!("session from a gone display: opened {opened_at:?}, now {landed:?}"),
     )?;
-    Ok(json!({"rescued":[rescued.x,rescued.y],"restored":[landed.x,landed.y]}))
+    drop(restored);
+
+    // Touching windows on a larger display at 125%.
+    dir.write_session(
+        &json!({"format_version":2,"displays":[{"work_area":[1920.0,1040.0]}],
+        "windows":[{"display":0,"frame":[100.0,100.0,500.0,400.0],"layout":spectrum},
+            {"display":0,"frame":[500.0,100.0,800.0,400.0],"layout":spectrum}]}),
+    )?;
+    let desktop = FakeDesktop::with_displays(vec![Display {
+        work: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(2560.0, 1400.0)),
+        scale: 1.25,
+        primary: true,
+    }]);
+    let (live, _driver) = manual_live()?;
+    let ws = Workspace::open(live, dir.store(), desktop.clone()).map_err(|e| e.to_string())?;
+    let mut scaled = Harness::with_desktop(ws, desktop);
+    scaled.frame_all()?;
+    let frames: Vec<egui::Rect> = scaled
+        .workspace_windows()
+        .map(|(_, w)| egui::Rect::from_min_size(w.position, w.size * w.ppp))
+        .collect();
+    check(
+        frames.len() == 2
+            && (frames[0].max.x - frames[1].min.x).abs() < 0.5
+            && frames[0].min.y == frames[1].min.y
+            && (frames[0].width() - 500.0).abs() < 0.5
+            && (frames[1].width() - 375.0).abs() < 0.5,
+        &format!("touching windows at 125%: {frames:?}"),
+    )?;
+    drop(scaled);
+
+    // The built-in bar on a second display at 200%, where the window is.
+    let desktop = FakeDesktop::with_displays(vec![
+        Display {
+            work: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1920.0, 1040.0)),
+            scale: 1.0,
+            primary: true,
+        },
+        Display {
+            work: egui::Rect::from_min_size(pos2(1920.0, 0.0), vec2(2880.0, 1736.0)),
+            scale: 2.0,
+            primary: false,
+        },
+    ]);
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::with_desktop(ws, desktop);
+    h.window_mut(FIRST_WINDOW)?.position = pos2(2200.0, 300.0);
+    h.frame(vec![]);
+    h.new_window_ppp = 2.0;
+    let leaf = first_leaf(&h.ws)?;
+    h.settings(
+        ControlKey::LeafBody(leaf),
+        &[
+            SettingsItem::Tab(Tab::Workspace),
+            SettingsItem::BuiltinPreset(1),
+        ],
+    )?;
+    h.frame_all()?;
+    let o = h.ws.observation();
+    let bar = o.windows.first().ok_or("no window")?;
+    let window = h.window(bar.id)?;
+    check(
+        o.preset == Some(builtin("Bar - Top"))
+            && o.windows.len() == 1
+            && bar.leaves.len() == 8
+            && bar.pinned
+            && bar.always_on_top
+            && window.position == pos2(1920.0, 0.0)
+            && window.size == vec2(1440.0, 112.0),
+        &format!(
+            "bar on the 200% display: {:?} at {:?} size {:?}",
+            o.preset, window.position, window.size
+        ),
+    )?;
+    Ok(
+        json!({"rescued":[rescued.x,rescued.y],"bar":[window.position.x,window.position.y,window.size.x,window.size.y]}),
+    )
 }
 
-/// Reset of the workspace (with confirmation), settings for an empty window, and a
-/// saved explicit binding (as a plugin or an older file may carry): kept on
+/// A saved explicit binding (as a plugin or an older file may carry): kept on
 /// restore, but an edit through the settings still changes only its instance.
+/// Then detach from a minimized window, the built-in Default loaded from the
+/// settings, a command to a minimized window and settings for an empty window.
 fn s08() -> Result<Value, String> {
     let dir = TempDir::new("s08")?;
     let spectrum = |extra: Value| {
@@ -1622,29 +1746,17 @@ fn s08() -> Result<Value, String> {
             "outputs":[{"node":2,"keep":"latest"},extra]}})
     };
     let bound = json!({"node":3,"keep":"latest","binding":9});
-    // The second window is always on top, the first (whose place Reset keeps) is
-    // not. The second is smaller than an empty window may be, which its Module
+    // The second window is smaller than an empty window may be, which its Module
     // allows.
-    let file = json!({"format_version":1,"name":"Bound","theme":{"preset":"light"},
-        "windows":[{"outer_position":[300.0,200.0],"pixels_per_point":1.0,"inner_size":[900.0,420.0],
-            "always_on_top":false,
+    let file = json!({"format_version":2,"theme":{"preset":"light"},"displays":[primary_display()],
+        "windows":[{"display":0,"frame":[300.0,200.0,1200.0,620.0],
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
                 "first":{"node":"leaf","module":spectrum(bound.clone())},
                 "second":{"node":"leaf","module":spectrum(bound)}}},
-            {"outer_position":[1300.0,200.0],"pixels_per_point":1.0,"inner_size":[120.0,40.0],
-            "always_on_top":true,
+            {"display":0,"frame":[1300.0,200.0,1420.0,240.0],"always_on_top":true,
             "layout":{"node":"leaf","module":{"type_id":WAVEFORM_MODULE_ID}}}]});
-    fs::create_dir_all(dir.0.join("workspaces")).map_err(|e| e.to_string())?;
-    fs::write(
-        dir.file("Bound"),
-        serde_json::to_vec(&file).unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-    dir.store()
-        .set_last_used("Bound")
-        .map_err(|e| e.to_string())?;
-    let (live, _driver) = manual_live()?;
-    let ws = Workspace::open(live, dir.store(), false).map_err(|e| e.to_string())?;
+    dir.write_session(&file)?;
+    let (ws, _driver) = reopen(&dir)?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
     h.frame_all()?;
@@ -1679,8 +1791,8 @@ fn s08() -> Result<Value, String> {
             && spec(&h.ws, a)?.outputs()[1].binding.is_some(),
         "an edit of a bound instance did not stay on that instance",
     )?;
-    action(&mut h.ws, WorkspaceAction::SaveWorkspace)?;
-    let saved = serde_json::to_string(&read_json(&dir.file("Bound"))?).unwrap_or_default();
+    h.ws.autosave();
+    let saved = serde_json::to_string(&read_json(&dir.session())?).unwrap_or_default();
     check(
         saved.matches("\"binding\":9").count() == 1,
         "the remaining binding did not keep its file number",
@@ -1708,40 +1820,31 @@ fn s08() -> Result<Value, String> {
         ),
     )?;
 
-    // Reset: one default Spectrum, Dark theme, same name and place; saved.
-    let before = h.ws.observation().modules.len();
-    h.in_settings(&[SettingsItem::Tab(Tab::Workspace), SettingsItem::Reset])?;
-    check(
-        h.ws.observation().modules.len() == before,
-        "Reset acted without confirmation",
-    )?;
+    // The built-in Default from the settings: one centered Oscilloscope, Dark.
     h.in_settings(&[
-        SettingsItem::CancelReset,
-        SettingsItem::Reset,
-        SettingsItem::ConfirmReset,
+        SettingsItem::Tab(Tab::Workspace),
+        SettingsItem::BuiltinPreset(0),
     ])?;
     h.frame_all()?;
     let o = h.ws.observation();
     check(
-        o.name == "Bound"
+        o.preset == Some(builtin("Default"))
             && o.windows.len() == 1
-            && !o.windows[0].always_on_top
+            && o.windows[0].always_on_top
             && o.modules.len() == 1
-            && o.modules[0].type_id == SPECTRUM_MODULE_ID
+            && o.modules[0].type_id == OSCILLOSCOPE_MODULE_ID
             && o.theme.preset == "dark"
             && o.theme.colors.is_empty(),
-        &format!("Reset did not restore the defaults: {:?}", o.windows.len()),
+        &format!("Default did not replace the workspace: {:?}", o.preset),
     )?;
     settle(&h.ws, 1)?;
-    let reset_file = read_json(&dir.file("Bound"))?;
     let new_window = o.windows[0].id;
     let position = h.window(new_window)?.position;
     check(
-        reset_file["theme"]["preset"] == "dark"
-            && reset_file["windows"].as_array().map(Vec::len) == Some(1)
-            && position == pos2(300.0, 200.0)
+        position == pos2(720.0, 400.0)
+            && h.window(new_window)?.size == vec2(480.0, 240.0)
             && h.ws.settings_open(),
-        &format!("Reset was not saved or moved the window: {position:?}"),
+        &format!("Default was not centered: {position:?}"),
     )?;
 
     // A window minimized while the settings window edits it still receives the
@@ -1761,9 +1864,9 @@ fn s08() -> Result<Value, String> {
         h.take_commands(new_window).iter().any(|command| {
             matches!(
                 command,
-                ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop)
+                ViewportCommand::WindowLevel(egui::WindowLevel::Normal)
             )
-        }) && h.ws.observation().windows[0].always_on_top,
+        }) && !h.ws.observation().windows[0].always_on_top,
         "a minimized window did not receive the settings window's command",
     )?;
     h.window_mut(new_window)?.minimized = false;
@@ -1784,5 +1887,5 @@ fn s08() -> Result<Value, String> {
         "Add module in the settings window failed",
     )?;
     h.ws.check_ownership()?;
-    Ok(json!({"restored_spectrum_nodes":restored,"reset_position":[position.x,position.y]}))
+    Ok(json!({"restored_spectrum_nodes":restored,"default_position":[position.x,position.y]}))
 }

@@ -1,29 +1,37 @@
-//! Saving, restoring and switching workspaces. Only logical configuration crosses
-//! the file boundary; restoring creates new instances through the factories, which
-//! build their subscriptions from the saved `DataSpec`.
+//! The session, presets and how windows land on the desktop. Only logical
+//! configuration crosses the file boundary; restoring creates new instances
+//! through the factories, which build their subscriptions from the saved
+//! `DataSpec`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
-use eframe::egui::{Pos2, pos2, vec2};
+use eframe::egui::{Rect, pos2, vec2};
 use serde_json::Value;
 
 use super::{
     ActionOutcome, EMPTY_WINDOW_MIN_SIZE, ModuleEntry, ModuleInstanceId, SplitId, WindowId,
     WindowState, Workspace, WorkspaceError,
+    desktop::{
+        DesktopProbe, Display, FALLBACK_DISPLAY, SavedDisplay, SavedWindow, display_at,
+        match_displays, place, saved_frame,
+    },
     layout::{Axis, Layout, Node, Split},
 };
 use crate::{
     LiveAudio,
     dataflow::{DataSpec, SharedAnalysisId},
     module::{Module, ModuleFrame, ModuleResponse},
-    modules::SPECTRUM_MODULE_ID,
     persistence::{
-        FORMAT_VERSION, InputConfig, LayoutFile, ModuleFile, SYSTEM_INPUT, SplitAxis, WindowFile,
-        WorkspaceFile, WorkspaceStore, same_name, valid_name,
+        DEFAULT_PRESET, DisplayFile, DisplayHint, FORMAT_VERSION, LayoutFile, ModuleFile,
+        PersistError, PresetRef, SYSTEM_INPUT, SplitAxis, WindowFile, WorkspaceFile,
+        WorkspaceStore, builtin_preset, builtin_presets, same_name, valid_name,
     },
     render::{Point, TextStyle},
     settings::SettingValue,
-    theme::{ColorRole, RoleOverrides, ThemeSettings},
+    theme::{ColorRole, RoleOverrides},
 };
 
 /// Type of the stand-in for an instance this build cannot restore.
@@ -98,57 +106,94 @@ fn file_axis(axis: SplitAxis) -> Axis {
 }
 
 impl Workspace {
-    /// The workspace last used in `store` (or a new default one). An unreadable
-    /// file is reported and protected: the session runs on a default layout and
-    /// never saves over it.
+    /// The last session in `store`, or the built-in Default preset when there is
+    /// none. An unreadable session file is reported and protected: the process runs
+    /// on the Default preset and never saves over it.
     pub fn open(
         live: LiveAudio,
         store: WorkspaceStore,
-        always_on_top: bool,
+        desktop: Arc<dyn DesktopProbe + Send + Sync>,
     ) -> Result<Self, WorkspaceError> {
-        let mut workspace = Self::empty(live)?;
-        let name = store
-            .last_used()
-            .unwrap_or_else(|| crate::persistence::DEFAULT_WORKSPACE.to_owned());
-        let loaded = store.load(&name);
+        let mut workspace = Self::empty(live, desktop)?;
+        let loaded = store.load_session();
         workspace.store = Some(store);
-        workspace.name = name;
-        match loaded {
-            Ok(Some(file)) => workspace.restore(file)?,
-            Ok(None) => {
-                workspace.add_default_window(always_on_top)?;
-            }
+        let file = match loaded {
+            Ok(Some(file)) => file,
+            Ok(None) => workspace.default_preset()?,
             Err(error) => {
                 workspace.protected = true;
                 workspace.push_notice(format!("{error}; it will not be overwritten"));
-                workspace.add_default_window(always_on_top)?;
+                workspace.default_preset()?
             }
-        }
+        };
+        workspace.preset = file.preset.clone();
+        let displays = workspace.displays();
+        let current = Self::primary(&displays);
+        workspace.restore(file, &displays, current)?;
         Ok(workspace)
+    }
+
+    /// The built-in Default preset, recorded as the session's origin.
+    fn default_preset(&self) -> Result<WorkspaceFile, WorkspaceError> {
+        let preset = PresetRef::Builtin(DEFAULT_PRESET.to_owned());
+        let mut file = self.preset_file(&preset)?;
+        file.preset = Some(preset);
+        Ok(file)
     }
 
     /// Give a store to a workspace built in memory (automation scenarios).
     #[cfg(feature = "automation")]
-    pub(crate) fn with_store(mut self, store: WorkspaceStore, name: &str) -> Self {
+    pub(crate) fn with_store(mut self, store: WorkspaceStore) -> Self {
         self.store = Some(store);
-        self.name = name.to_owned();
         self
     }
 
-    pub(crate) fn name(&self) -> &str {
-        &self.name
+    pub(crate) fn preset(&self) -> Option<&PresetRef> {
+        self.preset.as_ref()
     }
 
-    /// Saved workspace names (empty without a store).
-    pub(crate) fn saved_workspaces(&self) -> Vec<String> {
+    /// Saved preset names (empty without a store).
+    pub(crate) fn saved_presets(&self) -> Vec<String> {
         self.store
             .as_ref()
-            .map(WorkspaceStore::list)
+            .map(WorkspaceStore::list_presets)
             .unwrap_or_default()
     }
 
     pub(crate) fn can_save(&self) -> bool {
         self.store.is_some() && !self.protected
+    }
+
+    /// The monitors windows are placed on (a stand-in when none is reported).
+    fn displays(&self) -> Vec<Display> {
+        let displays = self.desktop.displays();
+        if displays.is_empty() {
+            vec![FALLBACK_DISPLAY]
+        } else {
+            displays
+        }
+    }
+
+    fn primary(displays: &[Display]) -> usize {
+        displays
+            .iter()
+            .position(|display| display.primary)
+            .unwrap_or(0)
+    }
+
+    /// Physical outer frame of a window: where it is, else where it will open,
+    /// else centered on `fallback`.
+    fn outer_frame(window: &WindowState, fallback: &Display) -> Rect {
+        window.desktop.outer.unwrap_or_else(|| {
+            let ppp = window.pixels_per_point;
+            match window.initial_position {
+                Some(position) => Rect::from_min_size(position * ppp, window.content_size * ppp),
+                None => Rect::from_center_size(
+                    fallback.work.center(),
+                    window.content_size * fallback.scale,
+                ),
+            }
+        })
     }
 
     /// Apply style, view settings and colors to a new instance. An unavailable
@@ -193,162 +238,105 @@ impl Workspace {
         Ok(warnings)
     }
 
-    /// Save under the current name.
-    pub(crate) fn save(&mut self) -> Result<(), WorkspaceError> {
-        if self.protected {
-            return Err(WorkspaceError::Protected(self.name.clone()));
-        }
-        let file = self.saved_file();
-        let store = self.store.as_ref().ok_or(WorkspaceError::NoStore)?;
-        store.save(&file)?;
-        // The workspace file is committed; failing to record it as the one to open
-        // next time does not undo that (Save As keeps the new name).
-        if let Err(error) = store.set_last_used(&self.name) {
-            self.push_notice(format!(
-                "saved, but could not record it as the workspace to open next time: {error}"
-            ));
-        }
-        Ok(())
-    }
-
-    /// Save on exit, before closing the last window and before a switch; problems
-    /// become notices. Without windows there is nothing worth saving.
+    /// Save the session; problems become notices. Runs on exit, on Quit and before
+    /// the last window closes. Without windows there is nothing worth saving.
     pub(crate) fn autosave(&mut self) {
         if !self.can_save() || self.windows.is_empty() {
             return;
         }
-        if let Err(error) = self.save() {
-            self.push_notice(format!("could not save workspace: {error}"));
+        let file = self.saved_file();
+        let store = self.store.as_ref().expect("can_save checked the store");
+        if let Err(error) = store.save_session(&file) {
+            self.push_notice(format!("could not save the workspace: {error}"));
         }
     }
 
-    pub(super) fn save_as(&mut self, name: String) -> Result<ActionOutcome, WorkspaceError> {
-        let store = self.store.as_ref().ok_or(WorkspaceError::NoStore)?;
-        if !valid_name(&name) {
-            return Err(crate::persistence::PersistError::InvalidName(name).into());
+    fn preset_file(&self, preset: &PresetRef) -> Result<WorkspaceFile, WorkspaceError> {
+        let missing = || WorkspaceError::NoSuchPreset(preset.name().to_owned());
+        match preset {
+            PresetRef::Builtin(name) => Ok(builtin_preset(name).ok_or_else(missing)??),
+            PresetRef::Saved(name) => self
+                .store
+                .as_ref()
+                .ok_or(WorkspaceError::NoStore)?
+                .load_preset(name)?
+                .ok_or_else(missing),
         }
-        // A protected file is never the destination: it could not be read.
-        if (name != self.name || self.protected) && store.path_of(&name).exists() {
-            return Err(WorkspaceError::WorkspaceExists(name));
-        }
-        let (previous, was_protected) = (std::mem::replace(&mut self.name, name), self.protected);
-        self.protected = false;
-        if let Err(error) = self.save() {
-            self.name = previous;
-            self.protected = was_protected;
-            return Err(error);
-        }
-        Ok(ActionOutcome::Applied)
     }
 
-    pub(super) fn switch_to(&mut self, name: String) -> Result<ActionOutcome, WorkspaceError> {
-        let store = self.store.as_ref().ok_or(WorkspaceError::NoStore)?;
-        let file = store
-            .load(&name)?
-            .ok_or_else(|| WorkspaceError::NoSuchWorkspace(name.clone()))?;
-        if self.can_save() {
-            self.save()?;
-        }
-        self.clear();
-        self.name = name;
-        self.protected = false;
-        self.restore(file)?;
-        if let Some(store) = &self.store
-            && let Err(error) = store.set_last_used(&self.name)
-        {
-            self.push_notice(format!(
-                "could not record the workspace to open next time: {error}"
-            ));
-        }
-        Ok(ActionOutcome::Applied)
-    }
-
-    pub(super) fn new_workspace(&mut self, name: String) -> Result<ActionOutcome, WorkspaceError> {
-        let store = self.store.as_ref().ok_or(WorkspaceError::NoStore)?;
-        if !valid_name(&name) {
-            return Err(crate::persistence::PersistError::InvalidName(name).into());
-        }
-        // The current name (even unsaved, in any letter case: Windows names files
-        // case-insensitively) would make the outgoing save the new file's target.
-        if same_name(&name, &self.name) || store.path_of(&name).exists() {
-            return Err(WorkspaceError::WorkspaceExists(name));
-        }
-        if self.can_save() {
-            self.save()?;
-        }
-        let placement = self.first_placement();
-        // Only once the replacement exists is the current content dropped.
-        self.replace_with_default(placement)?;
-        self.name = name;
-        self.protected = false;
-        self.save()?;
-        Ok(ActionOutcome::Applied)
-    }
-
-    /// Replace the workspace's content with the defaults, keeping its name and the
-    /// place of its first window; saved unless the file is protected.
-    pub(super) fn reset_workspace(&mut self) -> Result<ActionOutcome, WorkspaceError> {
-        let placement = self.first_placement();
-        // Only once the replacement exists is the current content dropped.
-        self.replace_with_default(placement)?;
-        if self.can_save() {
-            self.save()?;
-        }
-        Ok(ActionOutcome::Applied)
-    }
-
-    /// Always-on-top, pin and desktop position (logical points, scale) of the
-    /// first window, for the default window that replaces the content.
-    fn first_placement(&self) -> (bool, bool, Option<(Pos2, f32)>) {
-        let Some(window) = self.windows.values().next() else {
-            return (false, false, None);
-        };
-        let ppp = window.pixels_per_point;
-        let position = window
-            .desktop
-            .outer
-            .map(|outer| (outer.min / ppp, ppp))
-            .or(window.initial_position.map(|position| (position, ppp)));
-        (window.always_on_top, window.pinned, position)
-    }
-
-    /// Replace everything with one default Spectrum window and the Dark theme. The
-    /// new instance is created first: when that fails (e.g. a busy control queue),
-    /// the current content stays as it was.
-    fn replace_with_default(
+    /// Replace everything with `preset`, placed on the display of the window the
+    /// settings were opened from (or of the first window).
+    pub(super) fn load_preset(
         &mut self,
-        (always_on_top, pinned, position): (bool, bool, Option<(Pos2, f32)>),
-    ) -> Result<(), WorkspaceError> {
-        let first = self.create_module(SPECTRUM_MODULE_ID)?;
-        let window_id = match Self::allocate(&mut self.next_window_id) {
-            Ok(id) => WindowId(id),
-            Err(error) => {
-                self.modules.remove(&first);
-                return Err(error);
-            }
-        };
-        let entry = self.modules.remove(&first);
+        preset: PresetRef,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let file = self.preset_file(&preset)?;
+        let displays = self.displays();
+        let primary = Self::primary(&displays);
+        let anchor = self
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.window())
+            .and_then(|id| self.windows.get(&id))
+            .or_else(|| self.windows.values().next());
+        let current = anchor
+            .and_then(|window| {
+                display_at(
+                    &displays,
+                    Self::outer_frame(window, &displays[primary]).center(),
+                )
+            })
+            .unwrap_or(primary);
         self.clear();
-        if let Some(entry) = entry {
-            self.modules.insert(first, entry);
+        self.preset = Some(preset);
+        self.restore(file, &displays, current)?;
+        Ok(ActionOutcome::Applied)
+    }
+
+    /// The workspace as a preset file (no session origin).
+    fn preset_contents(&mut self) -> WorkspaceFile {
+        let mut file = self.saved_file();
+        file.preset = None;
+        file
+    }
+
+    pub(super) fn save_preset_as(&mut self, name: String) -> Result<ActionOutcome, WorkspaceError> {
+        let store = self.store.clone().ok_or(WorkspaceError::NoStore)?;
+        if !valid_name(&name) {
+            return Err(PersistError::InvalidName(name).into());
         }
-        self.theme = ThemeSettings::dark();
-        self.input = InputConfig::default();
-        self.reference_dbfs = None;
-        self.refresh_palettes();
-        let mut window = WindowState::new(
-            Layout::with_leaf(first),
-            super::INITIAL_WINDOW_SIZE,
-            always_on_top,
-        );
-        window.active = Some(first);
-        window.pinned = pinned;
-        if let Some((position, ppp)) = position {
-            window.initial_position = Some(position);
-            window.pixels_per_point = ppp;
+        // Windows names files case-insensitively.
+        if builtin_presets().any(|builtin| same_name(builtin, &name))
+            || store
+                .list_presets()
+                .iter()
+                .any(|saved| same_name(saved, &name))
+        {
+            return Err(WorkspaceError::PresetExists(name));
         }
-        self.windows.insert(window_id, window);
-        Ok(())
+        let file = self.preset_contents();
+        store.save_preset(&name, &file)?;
+        self.preset = Some(PresetRef::Saved(name));
+        Ok(ActionOutcome::Applied)
+    }
+
+    pub(super) fn save_preset(&mut self) -> Result<ActionOutcome, WorkspaceError> {
+        let store = self.store.clone().ok_or(WorkspaceError::NoStore)?;
+        let Some(PresetRef::Saved(name)) = self.preset.clone() else {
+            return Err(WorkspaceError::NoSavedPreset);
+        };
+        let file = self.preset_contents();
+        store.save_preset(&name, &file)?;
+        Ok(ActionOutcome::Applied)
+    }
+
+    pub(super) fn delete_preset(&mut self, name: &str) -> Result<ActionOutcome, WorkspaceError> {
+        let store = self.store.as_ref().ok_or(WorkspaceError::NoStore)?;
+        store.delete_preset(name)?;
+        if matches!(&self.preset, Some(PresetRef::Saved(origin)) if same_name(origin, name)) {
+            self.preset = None;
+        }
+        Ok(ActionOutcome::Applied)
     }
 
     /// Drop every window and instance (and with them their subscriptions).
@@ -363,8 +351,14 @@ impl Workspace {
         }
     }
 
-    /// Build windows and instances from a saved workspace.
-    pub(super) fn restore(&mut self, file: WorkspaceFile) -> Result<(), WorkspaceError> {
+    /// Build windows and instances from a file, placing its displays on
+    /// `displays` (the first saved one on `current` unless it is recognized).
+    fn restore(
+        &mut self,
+        file: WorkspaceFile,
+        displays: &[Display],
+        current: usize,
+    ) -> Result<(), WorkspaceError> {
         self.theme = file.theme;
         if crate::theme::Preset::from_id(&self.theme.preset).is_none() {
             self.push_notice(format!(
@@ -381,10 +375,39 @@ impl Workspace {
         }
         self.input = file.input;
         self.reference_dbfs = file.reference_dbfs;
+        let saved: Vec<SavedDisplay> = file
+            .displays
+            .iter()
+            .map(|display| SavedDisplay {
+                size: vec2(display.work_area[0], display.work_area[1]),
+                hint: display
+                    .hint
+                    .as_ref()
+                    .map(|hint| (pos2(hint.origin_px[0], hint.origin_px[1]), hint.scale)),
+            })
+            .collect();
+        let targets: Vec<Display> = match_displays(&saved, displays, current)
+            .into_iter()
+            .map(|index| displays[index])
+            .collect();
+        let windows: Vec<SavedWindow> = file
+            .windows
+            .iter()
+            .map(|window| {
+                let [left, top, right, bottom] = window.frame;
+                SavedWindow {
+                    display: window.display,
+                    frame: Rect::from_min_max(pos2(left, top), pos2(right, bottom)),
+                    group: window.group,
+                }
+            })
+            .collect();
+        let outers = place(&saved, &windows, &targets);
         let mut bindings: HashMap<u64, SharedAnalysisId> = HashMap::new();
         let mut groups: HashMap<u32, u64> = HashMap::new();
-        for window_file in &file.windows {
-            self.restore_window(window_file, &mut bindings, &mut groups)?;
+        for (window_file, outer) in file.windows.iter().zip(outers) {
+            let scale = targets[window_file.display].scale;
+            self.restore_window(window_file, outer, scale, &mut bindings, &mut groups)?;
         }
         // A group needs two windows.
         let mut members: HashMap<u64, usize> = HashMap::new();
@@ -396,9 +419,6 @@ impl Workspace {
                 window.group = None;
             }
         }
-        if self.windows.is_empty() {
-            self.add_default_window(false)?;
-        }
         self.binding_numbers = bindings
             .into_iter()
             .map(|(number, binding)| (binding, number))
@@ -407,9 +427,12 @@ impl Workspace {
         Ok(())
     }
 
+    /// One window at `outer` (physical pixels) on a display of `scale`.
     fn restore_window(
         &mut self,
         file: &WindowFile,
+        outer: Rect,
+        scale: f32,
         bindings: &mut HashMap<u64, SharedAnalysisId>,
         groups: &mut HashMap<u32, u64>,
     ) -> Result<WindowId, WorkspaceError> {
@@ -423,31 +446,16 @@ impl Workspace {
         let min_size = layout
             .min_size(&|id| self.module_min_size(id))
             .unwrap_or(EMPTY_WINDOW_MIN_SIZE);
-        let size = vec2(file.inner_size[0], file.inner_size[1]);
-        let size = if size.is_finite() {
-            size.max(min_size)
-        } else {
-            super::INITIAL_WINDOW_SIZE.max(min_size)
-        };
+        let size = (outer.size() / scale).max(min_size);
         let mut window = WindowState::new(layout, size, file.always_on_top);
         window.initial_min_size = min_size;
         window.pinned = file.pinned;
-        let ppp = if file.pixels_per_point.is_finite() {
-            file.pixels_per_point.clamp(0.25, 8.0)
-        } else {
-            1.0
-        };
-        window.pixels_per_point = ppp;
-        if let Some([x, y]) = file.outer_position
-            && x.is_finite()
-            && y.is_finite()
-        {
-            window.initial_position = Some(pos2(x / ppp, y / ppp));
-            // A maximized window only needs the position to pick its monitor; the
-            // OS places it, and it is not moved back afterwards.
-            if !file.maximized {
-                window.restore_target = Some(pos2(x, y));
-            }
+        window.pixels_per_point = scale;
+        window.initial_position = Some(outer.min / scale);
+        // A maximized window only needs the position to pick its monitor; the OS
+        // places it, and it is not moved back afterwards.
+        if !file.maximized {
+            window.restore_target = Some(outer.min);
         }
         window.initial_maximized = file.maximized;
         window.active = file
@@ -637,6 +645,10 @@ impl Workspace {
         }
         let mut numbers = std::mem::take(&mut self.binding_numbers);
         let mut groups: BTreeMap<u64, u32> = BTreeMap::new();
+        let displays = self.displays();
+        let fallback = displays[Self::primary(&displays)];
+        // Displays in the order windows first use them.
+        let mut on: Vec<usize> = Vec::new();
         let windows = self
             .windows
             .values()
@@ -647,19 +659,19 @@ impl Workspace {
                     *groups.entry(group).or_insert(next)
                 });
                 let leaves = window.layout.leaves();
+                let outer = Self::outer_frame(window, &fallback);
+                let index = display_at(&displays, outer.center()).unwrap_or(0);
+                let display = on
+                    .iter()
+                    .position(|used| *used == index)
+                    .unwrap_or_else(|| {
+                        on.push(index);
+                        on.len() - 1
+                    });
+                let frame = saved_frame(&displays[index], outer);
                 WindowFile {
-                    outer_position: window
-                        .desktop
-                        .outer
-                        .map(|outer| outer.min)
-                        .or_else(|| {
-                            window
-                                .initial_position
-                                .map(|position| position * window.pixels_per_point)
-                        })
-                        .map(|position: Pos2| [position.x, position.y]),
-                    pixels_per_point: window.pixels_per_point,
-                    inner_size: [window.content_size.x, window.content_size.y],
+                    display,
+                    frame: [frame.min.x, frame.min.y, frame.max.x, frame.max.y],
                     always_on_top: window.always_on_top,
                     pinned: window.pinned,
                     maximized: window.maximized,
@@ -678,10 +690,24 @@ impl Workspace {
         self.binding_numbers = numbers;
         WorkspaceFile {
             format_version: FORMAT_VERSION,
-            name: self.name.clone(),
+            preset: self.preset.clone(),
             input: self.input.clone(),
             reference_dbfs: self.reference_dbfs,
             theme: self.theme.clone(),
+            displays: on
+                .into_iter()
+                .map(|index| {
+                    let display = displays[index];
+                    let size = display.logical_size();
+                    DisplayFile {
+                        work_area: [size.x, size.y],
+                        hint: Some(DisplayHint {
+                            origin_px: [display.work.min.x, display.work.min.y],
+                            scale: display.scale,
+                        }),
+                    }
+                })
+                .collect(),
             windows,
         }
     }

@@ -228,8 +228,9 @@ impl Workspace {
         pixels_per_point: f32,
         maximized: bool,
         minimized: bool,
-        probe: &dyn DesktopProbe,
     ) -> Vec<WindowId> {
+        let probe = std::sync::Arc::clone(&self.desktop);
+        let probe = probe.as_ref();
         let mut followers_to_wake = Vec::new();
         let Some(window) = self.windows.get_mut(&window_id) else {
             return followers_to_wake;

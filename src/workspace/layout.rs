@@ -229,6 +229,7 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
+    #[cfg(any(test, feature = "automation"))]
     pub(crate) fn with_leaf(id: ModuleInstanceId) -> Self {
         Self {
             root: Some(Node::Leaf(id)),

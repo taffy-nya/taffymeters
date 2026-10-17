@@ -88,12 +88,14 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 _ => return Err(usage("--input must be synthetic, sweep or system".into())),
             }
             .map_err(|e| runtime(e.to_string()))?;
-            // With a configuration directory the preview opens, edits and saves
-            // workspaces there like the product; without it nothing is saved.
+            // With a configuration directory the preview opens, edits and saves the
+            // session and presets there like the product; without it nothing is saved.
             let workspace = match value_of("--config-dir") {
-                Some(root) => {
-                    Workspace::open(live, crate::persistence::WorkspaceStore::new(root), false)
-                }
+                Some(root) => Workspace::open(
+                    live,
+                    crate::persistence::WorkspaceStore::new(root),
+                    std::sync::Arc::new(crate::workspace::NativeDesktop),
+                ),
                 None => Workspace::new(live, false),
             }
             .map_err(|e| runtime(e.to_string()))?;

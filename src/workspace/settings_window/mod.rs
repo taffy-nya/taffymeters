@@ -10,10 +10,7 @@ use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 use self::widgets::record;
 #[cfg(any(test, feature = "automation"))]
 use super::window::ControlKey;
-use super::{
-    ColorScope, ModuleInstanceId, WindowId, Workspace, WorkspaceAction, desktop::DesktopProbe,
-    window::Controls,
-};
+use super::{ColorScope, ModuleInstanceId, WindowId, Workspace, WorkspaceAction, window::Controls};
 use crate::{
     dataflow::{ChannelSelection, NodeRef, OutputId},
     render::Color,
@@ -112,15 +109,18 @@ pub(crate) enum SettingsItem {
     LeaveGroup,
     CloseWindow,
     AddModule(&'static str),
-    Save,
-    Name,
-    SaveAs,
-    NewWorkspace,
-    /// Saved workspace by index in the sorted list.
-    Switch(u16),
-    Reset,
-    ConfirmReset,
-    CancelReset,
+    /// Name for a new preset.
+    PresetName,
+    SavePresetAs,
+    /// Save over the user preset the session was loaded from.
+    SavePreset,
+    /// Built-in preset by index in the listed order.
+    BuiltinPreset(u16),
+    /// User preset by index in the sorted list.
+    SavedPreset(u16),
+    DeletePreset(u16),
+    ConfirmDelete,
+    CancelDelete,
     Pause,
     ClearNotices,
     Quit,
@@ -163,7 +163,8 @@ pub(crate) struct SettingsWindow {
     window: Option<WindowId>,
     type_style: Option<&'static str>,
     name: String,
-    confirm_reset: bool,
+    /// The user preset whose deletion waits for confirmation.
+    confirm_delete: Option<String>,
     /// A text field (a name, a typed number) had keyboard focus at the end of the
     /// last pass: Escape belongs to it. egui drops the focus on Escape before the
     /// next pass runs, so the pass that sees Escape cannot ask egui itself.
@@ -191,7 +192,7 @@ impl SettingsWindow {
             window: None,
             type_style: None,
             name: String::new(),
-            confirm_reset: false,
+            confirm_delete: None,
             text_focus: false,
             initial_position,
             opening,
@@ -213,11 +214,16 @@ impl SettingsWindow {
         }
     }
 
-    /// The workspace was replaced (switch, new, reset): nothing is targeted.
+    /// The window the settings were opened from.
+    pub(super) fn window(&self) -> Option<WindowId> {
+        self.window
+    }
+
+    /// A preset replaced the workspace: nothing is targeted.
     pub(super) fn forget_targets(&mut self) {
         self.instance = None;
         self.window = None;
-        self.confirm_reset = false;
+        self.confirm_delete = None;
         if matches!(self.tab, Tab::Module | Tab::Window) {
             self.tab = Tab::Workspace;
         }
@@ -292,7 +298,7 @@ impl Workspace {
         } else {
             Tab::Window
         };
-        settings.confirm_reset = false;
+        settings.confirm_delete = None;
         settings.commands.push(ViewportCommand::Focus);
         Ok(())
     }
@@ -312,12 +318,7 @@ impl Workspace {
     }
 
     /// One UI pass of the settings window inside its own viewport.
-    pub(crate) fn settings_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        display_time: Duration,
-        probe: &dyn DesktopProbe,
-    ) {
+    pub(crate) fn settings_ui(&mut self, ui: &mut egui::Ui, display_time: Duration) {
         // Actions taken here (e.g. detach) are timed on the app clock, which this
         // pass keeps moving even when every Workspace window is minimized.
         self.tick(display_time);
@@ -345,7 +346,8 @@ impl Workspace {
             settings.placed = true;
             let ppp = ctx.pixels_per_point();
             let physical = egui::Rect::from_min_max(outer.min * ppp, outer.max * ppp);
-            if let Some(target) = probe
+            if let Some(target) = self
+                .desktop
                 .work_area(physical.center())
                 .and_then(|work| super::desktop::reachable_position(physical, work, f32::INFINITY))
             {
@@ -399,7 +401,7 @@ impl Workspace {
                     record(&mut controls, SettingsItem::Tab(tab), &response);
                     if response.clicked() {
                         settings.tab = tab;
-                        settings.confirm_reset = false;
+                        settings.confirm_delete = None;
                     }
                 }
             });

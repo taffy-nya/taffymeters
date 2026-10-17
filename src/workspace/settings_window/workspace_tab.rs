@@ -1,7 +1,7 @@
-//! The Workspace tab: saving, resetting, naming and switching workspaces, the
-//! source status, notices and quitting.
+//! The Workspace tab: loading, saving and deleting presets, the source status,
+//! notices and quitting. The session itself saves on exit.
 
-use eframe::egui::{self, Align, Layout};
+use eframe::egui::{self, Align, Layout, RichText};
 
 use super::{
     SettingsItem, SettingsWindow,
@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     audio::SourceState,
-    persistence::{same_name, valid_name},
+    persistence::{PresetRef, builtin_presets, same_name, valid_name},
     workspace::{Workspace, WorkspaceAction, window::Controls},
 };
 
@@ -23,94 +23,120 @@ impl Workspace {
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
-        ui.horizontal_wrapped(|ui| header(ui, self.name(), "workspace"));
+        let detail = match self.preset() {
+            Some(PresetRef::Builtin(name)) => format!("from built-in preset {name}"),
+            Some(PresetRef::Saved(name)) => format!("from preset {name}"),
+            None => "not saved as a preset".to_owned(),
+        };
+        ui.horizontal_wrapped(|ui| header(ui, "Workspace", &detail));
         let has_store = self.store.is_some();
-        card(ui, "Current", |ui| {
-            if settings.confirm_reset {
-                warning(
-                    ui,
-                    "Replace this workspace with one default Spectrum and the Dark theme?",
-                );
+        let saved = self.saved_presets();
+        card(ui, "Presets", |ui| {
+            ui.label(RichText::new("Built-in").weak());
+            ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (index, name) in builtin_presets().enumerate() {
+                    let current = self.preset() == Some(&PresetRef::Builtin(name.to_owned()));
+                    let response = ui.selectable_label(current, name);
+                    record(
+                        controls,
+                        SettingsItem::BuiltinPreset(index as u16),
+                        &response,
+                    );
+                    if response.clicked() {
+                        actions.push(WorkspaceAction::LoadPreset {
+                            preset: PresetRef::Builtin(name.to_owned()),
+                        });
+                    }
+                }
+            });
+            if saved.is_empty() {
+                return;
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("Saved").weak());
+            for (index, name) in saved.iter().enumerate() {
+                let index = index as u16;
+                if settings.confirm_delete.as_ref() == Some(name) {
+                    warning(ui, &format!("Delete preset {name}?"));
+                    ui.horizontal(|ui| {
+                        if danger_button(ui, "Delete", SettingsItem::ConfirmDelete, controls) {
+                            actions.push(WorkspaceAction::DeletePreset { name: name.clone() });
+                            settings.confirm_delete = None;
+                        }
+                        if button(ui, true, "Cancel", SettingsItem::CancelDelete, controls) {
+                            settings.confirm_delete = None;
+                        }
+                    });
+                    continue;
+                }
                 ui.horizontal(|ui| {
-                    if danger_button(ui, "Reset", SettingsItem::ConfirmReset, controls) {
-                        actions.push(WorkspaceAction::ResetWorkspace);
-                        settings.confirm_reset = false;
+                    // The name fills the row like the built-in ones; Delete on the right.
+                    const DELETE_WIDTH: f32 = 74.0;
+                    let size = egui::vec2(
+                        (ui.available_width() - DELETE_WIDTH).max(40.0),
+                        ui.spacing().interact_size.y,
+                    );
+                    let current = self.preset() == Some(&PresetRef::Saved(name.clone()));
+                    let response = ui
+                        .allocate_ui_with_layout(
+                            size,
+                            Layout::top_down_justified(Align::LEFT),
+                            |ui| ui.selectable_label(current, name),
+                        )
+                        .inner;
+                    record(controls, SettingsItem::SavedPreset(index), &response);
+                    if response.clicked() {
+                        actions.push(WorkspaceAction::LoadPreset {
+                            preset: PresetRef::Saved(name.clone()),
+                        });
                     }
-                    if button(ui, true, "Cancel", SettingsItem::CancelReset, controls) {
-                        settings.confirm_reset = false;
-                    }
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    if button(ui, self.can_save(), "Save", SettingsItem::Save, controls) {
-                        actions.push(WorkspaceAction::SaveWorkspace);
-                    }
-                    if button(ui, true, "Reset workspace…", SettingsItem::Reset, controls) {
-                        settings.confirm_reset = true;
+                    if button(
+                        ui,
+                        true,
+                        "Delete…",
+                        SettingsItem::DeletePreset(index),
+                        controls,
+                    ) {
+                        settings.confirm_delete = Some(name.clone());
                     }
                 });
             }
         });
-        card(ui, "Save as / new", |ui| {
+        card(ui, "Save as preset", |ui| {
             let response = ui.add_enabled(
                 has_store,
                 egui::TextEdit::singleline(&mut settings.name)
-                    .hint_text("Workspace name")
+                    .hint_text("Preset name")
                     .desired_width(f32::INFINITY),
             );
-            record(controls, SettingsItem::Name, &response);
+            record(controls, SettingsItem::PresetName, &response);
             let name = settings.name.trim().to_owned();
             let valid = valid_name(&name);
             // Windows names files case-insensitively.
-            let exists = self
-                .saved_workspaces()
-                .iter()
-                .any(|saved| same_name(saved, &name));
-            // New saves the current workspace first: its own name cannot be the new one.
-            let current = same_name(&name, &self.name);
+            let exists = saved.iter().any(|saved| same_name(saved, &name));
+            let builtin = builtin_presets().any(|builtin| same_name(builtin, &name));
             if !name.is_empty() && !valid {
                 warning(ui, "Not a valid name");
             } else if exists {
-                warning(ui, "A workspace with this name exists");
-            } else if current {
-                warning(ui, "This is the current workspace's name");
+                warning(ui, "A preset with this name exists");
+            } else if builtin {
+                warning(ui, "A built-in preset has this name");
             }
             ui.horizontal(|ui| {
-                let allowed = has_store && valid && !exists;
-                if button(ui, allowed, "Save as", SettingsItem::SaveAs, controls) {
-                    actions.push(WorkspaceAction::SaveWorkspaceAs { name: name.clone() });
+                let allowed = has_store && valid && !exists && !builtin;
+                if button(ui, allowed, "Save as", SettingsItem::SavePresetAs, controls) {
+                    actions.push(WorkspaceAction::SavePresetAs { name: name.clone() });
                     settings.name.clear();
                 }
-                if button(
-                    ui,
-                    allowed && !current,
-                    "New",
-                    SettingsItem::NewWorkspace,
-                    controls,
-                ) {
-                    actions.push(WorkspaceAction::NewWorkspace { name: name.clone() });
-                    settings.name.clear();
+                if let Some(PresetRef::Saved(origin)) = self.preset() {
+                    let label = format!("Save to {origin}");
+                    if button(ui, has_store, &label, SettingsItem::SavePreset, controls) {
+                        actions.push(WorkspaceAction::SavePreset);
+                    }
                 }
             });
         });
-        let saved = self.saved_workspaces();
-        if !saved.is_empty() {
-            card(ui, "Saved workspaces", |ui| {
-                ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    for (index, saved_name) in saved.iter().enumerate() {
-                        let current = *saved_name == self.name;
-                        let response = ui.selectable_label(current, saved_name);
-                        record(controls, SettingsItem::Switch(index as u16), &response);
-                        if response.clicked() && !current {
-                            actions.push(WorkspaceAction::SwitchWorkspace {
-                                name: saved_name.clone(),
-                            });
-                        }
-                    }
-                });
-            });
-        }
         card(ui, "Audio source", |ui| {
             let status = self.source_status();
             ui.label(crate::workspace::window::source_status_text(&status));
@@ -165,12 +191,7 @@ impl Workspace {
         }
         ui.add_space(4.0);
         trailing(ui, |ui| {
-            let quit = if self.can_save() {
-                "Quit (save workspace)"
-            } else {
-                "Quit"
-            };
-            if danger_button(ui, quit, SettingsItem::Quit, controls) {
+            if danger_button(ui, "Quit", SettingsItem::Quit, controls) {
                 actions.push(WorkspaceAction::Quit);
             }
         });

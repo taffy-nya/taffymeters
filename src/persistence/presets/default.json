@@ -1,0 +1,32 @@
+{
+  "format_version": 2,
+  "theme": {
+    "preset": "dark"
+  },
+  "displays": [
+    {
+      "work_area": [
+        1920.0,
+        1032.0
+      ]
+    }
+  ],
+  "windows": [
+    {
+      "display": 0,
+      "frame": [
+        720.0,
+        396.0,
+        1200.0,
+        636.0
+      ],
+      "always_on_top": true,
+      "layout": {
+        "node": "leaf",
+        "module": {
+          "type_id": "taffymeters.oscilloscope"
+        }
+      }
+    }
+  ]
+}

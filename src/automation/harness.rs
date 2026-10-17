@@ -3,16 +3,19 @@
 //! applied to a simulated desktop, never to the OS.
 
 use std::{
-    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use eframe::egui::{self, Event, PointerButton, Pos2, Rect, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::workspace::{
-    ControlKey, ControlTarget, DesktopProbe, FIRST_WINDOW, INITIAL_WINDOW_SIZE, SettingsItem,
-    WindowId, Workspace,
+    ControlKey, ControlTarget, DesktopProbe, Display, FIRST_WINDOW, INITIAL_WINDOW_SIZE,
+    SettingsItem, WindowId, Workspace,
 };
 
 /// The settings window in the harness's window map. It is not a Workspace window;
@@ -21,19 +24,50 @@ pub(super) const SETTINGS: WindowId = WindowId(u64::MAX);
 /// Tall enough that every tab's controls are visible without scrolling.
 const SETTINGS_SIM_SIZE: Vec2 = vec2(460.0, 1600.0);
 
-/// Simulated desktop facts for the snapping logic.
+/// Simulated desktop facts for the snapping logic and window placement. Shared
+/// with the Workspace, which owns its desktop probe.
 pub(super) struct FakeDesktop {
-    pub button_down: Cell<bool>,
-    pub work_area: Cell<Option<Rect>>,
+    button_down: AtomicBool,
+    displays: Mutex<Vec<Display>>,
+}
+
+impl FakeDesktop {
+    /// One 1920×1080 monitor at 100% with a 40 px taskbar at the bottom.
+    pub fn new() -> Arc<Self> {
+        Self::with_displays(vec![Display {
+            work: Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0)),
+            scale: 1.0,
+            primary: true,
+        }])
+    }
+
+    pub fn with_displays(displays: Vec<Display>) -> Arc<Self> {
+        Arc::new(Self {
+            button_down: AtomicBool::new(false),
+            displays: Mutex::new(displays),
+        })
+    }
+
+    pub fn set_button_down(&self, down: bool) {
+        self.button_down.store(down, Ordering::Relaxed);
+    }
 }
 
 impl DesktopProbe for FakeDesktop {
     fn primary_button_down(&self) -> bool {
-        self.button_down.get()
+        self.button_down.load(Ordering::Relaxed)
     }
 
-    fn work_area(&self, _point: Pos2) -> Option<Rect> {
-        self.work_area.get()
+    fn work_area(&self, point: Pos2) -> Option<Rect> {
+        let displays = self.displays();
+        crate::workspace::display_at(&displays, point).map(|index| displays[index].work)
+    }
+
+    fn displays(&self) -> Vec<Display> {
+        self.displays
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -76,7 +110,7 @@ impl SimWindow {
 pub(super) struct Harness {
     pub ws: Workspace,
     pub windows: BTreeMap<WindowId, SimWindow>,
-    pub desktop: FakeDesktop,
+    pub desktop: Arc<FakeDesktop>,
     pub display_time: Duration,
     pub frame: u64,
     /// The window receiving input from the single-window helpers.
@@ -90,19 +124,29 @@ pub(super) struct Harness {
 }
 
 impl Harness {
+    /// Drive `ws` on a fresh simulated desktop (one 1920×1080 monitor).
     pub fn new(ws: Workspace) -> Self {
+        Self::with_desktop(ws, FakeDesktop::new())
+    }
+
+    /// Drive `ws` on `desktop`, which the Workspace then uses too. Windows open at
+    /// the scale of its primary display.
+    pub fn with_desktop(mut ws: Workspace, desktop: Arc<FakeDesktop>) -> Self {
+        ws.set_desktop(Arc::clone(&desktop) as Arc<dyn DesktopProbe + Send + Sync>);
+        let new_window_ppp = desktop
+            .displays()
+            .iter()
+            .find(|display| display.primary)
+            .map_or(1.0, |display| display.scale);
         let mut harness = Self {
             ws,
             windows: BTreeMap::new(),
-            desktop: FakeDesktop {
-                button_down: Cell::new(false),
-                work_area: Cell::new(Some(Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0)))),
-            },
+            desktop,
             display_time: Duration::from_secs(1),
             frame: 0,
             focus: FIRST_WINDOW,
             blocked: HashSet::new(),
-            new_window_ppp: 1.0,
+            new_window_ppp,
             modifiers: egui::Modifiers::NONE,
         };
         // The initial default window opens at a fixed spot; restored windows open
@@ -216,12 +260,11 @@ impl Harness {
         }
         let context = window.context.clone();
         let ws = &mut self.ws;
-        let desktop = &self.desktop;
         let output = context.run_ui(input, |ui| {
             if id == SETTINGS {
-                ws.settings_ui(ui, display_time, desktop);
+                ws.settings_ui(ui, display_time);
             } else {
-                ws.window_ui(id, ui, display_time, desktop);
+                ws.window_ui(id, ui, display_time);
             }
         });
         let targets = if id == SETTINGS {

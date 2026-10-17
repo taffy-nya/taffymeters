@@ -16,7 +16,7 @@ use std::{
 
 use eframe::egui::{self, ViewportCommand};
 
-use crate::workspace::{NativeDesktop, WindowId, Workspace, WorkspaceAction};
+use crate::workspace::{WindowId, Workspace, WorkspaceAction};
 
 #[cfg(feature = "automation")]
 type SharedTrace = Option<Arc<Mutex<crate::automation::Trace>>>;
@@ -100,7 +100,7 @@ fn window_pass(
     {
         let _ = workspace.apply_action(WorkspaceAction::CloseWindow { window_id });
     }
-    let drawn = workspace.window_ui(window_id, ui, started_at.elapsed(), &NativeDesktop);
+    let drawn = workspace.window_ui(window_id, ui, started_at.elapsed());
     #[cfg(feature = "automation")]
     if let Some(trace) = trace {
         let mut trace = lock(trace);
@@ -153,7 +153,7 @@ impl eframe::App for App {
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
                     let _ = workspace.apply_action(WorkspaceAction::CloseSettings);
                 } else {
-                    workspace.settings_ui(ui, self.started_at.elapsed(), &NativeDesktop);
+                    workspace.settings_ui(ui, self.started_at.elapsed());
                 }
                 // Recorded here too: with every Workspace window minimized, no other
                 // pass would report the settings window opening or closing.

@@ -1,0 +1,202 @@
+{
+  "format_version": 2,
+  "theme": {
+    "preset": "dark",
+    "colors": {
+      "divider": "#00000000"
+    }
+  },
+  "displays": [
+    {
+      "work_area": [
+        1920.0,
+        1032.0
+      ]
+    }
+  ],
+  "windows": [
+    {
+      "display": 0,
+      "frame": [
+        0.0,
+        920.0,
+        1920.0,
+        1032.0
+      ],
+      "always_on_top": true,
+      "pinned": true,
+      "layout": {
+        "node": "split",
+        "axis": "left_right",
+        "ratio": 0.13333333,
+        "manual": true,
+        "first": {
+          "node": "leaf",
+          "module": {
+            "type_id": "taffymeters.spectrogram",
+            "view": {
+              "flow": {
+                "choice": "up"
+              },
+              "gain_db": {
+                "number": 0.0
+              },
+              "visible_seconds": {
+                "number": 6.0
+              }
+            }
+          }
+        },
+        "second": {
+          "node": "split",
+          "axis": "left_right",
+          "ratio": 0.24358974,
+          "manual": true,
+          "first": {
+            "node": "leaf",
+            "module": {
+              "type_id": "taffymeters.oscilloscope",
+              "style": "taffymeters.oscilloscope.line",
+              "view": {
+                "channel": {
+                  "channel": "mono_average"
+                },
+                "scale": {
+                  "number": 1.0
+                },
+                "show_guide": {
+                  "bool": false
+                }
+              }
+            }
+          },
+          "second": {
+            "node": "split",
+            "axis": "left_right",
+            "ratio": 0.33898305,
+            "manual": true,
+            "first": {
+              "node": "split",
+              "axis": "top_bottom",
+              "ratio": 0.5,
+              "manual": false,
+              "first": {
+                "node": "leaf",
+                "module": {
+                  "type_id": "taffymeters.waveform",
+                  "view": {
+                    "channel": {
+                      "channel": "left"
+                    },
+                    "flow": {
+                      "choice": "left"
+                    },
+                    "scale": {
+                      "number": 1.0
+                    },
+                    "visible_seconds": {
+                      "number": 4.0
+                    }
+                  }
+                }
+              },
+              "second": {
+                "node": "leaf",
+                "module": {
+                  "type_id": "taffymeters.waveform",
+                  "view": {
+                    "channel": {
+                      "channel": "right"
+                    },
+                    "flow": {
+                      "choice": "left"
+                    },
+                    "scale": {
+                      "number": 1.0
+                    },
+                    "visible_seconds": {
+                      "number": 4.0
+                    }
+                  }
+                }
+              }
+            },
+            "second": {
+              "node": "split",
+              "axis": "left_right",
+              "ratio": 0.05128205,
+              "manual": true,
+              "first": {
+                "node": "leaf",
+                "module": {
+                  "type_id": "taffymeters.level_meter",
+                  "view": {
+                    "show_peak": {
+                      "bool": false
+                    }
+                  }
+                }
+              },
+              "second": {
+                "node": "split",
+                "axis": "left_right",
+                "ratio": 0.02702703,
+                "manual": true,
+                "first": {
+                  "node": "leaf",
+                  "module": {
+                    "type_id": "taffymeters.loudness_meter"
+                  }
+                },
+                "second": {
+                  "node": "split",
+                  "axis": "left_right",
+                  "ratio": 0.19444444,
+                  "manual": true,
+                  "first": {
+                    "node": "leaf",
+                    "module": {
+                      "type_id": "taffymeters.stereometer",
+                      "view": {
+                        "scale": {
+                          "number": 1.0
+                        },
+                        "show_guides": {
+                          "bool": false
+                        }
+                      }
+                    }
+                  },
+                  "second": {
+                    "node": "leaf",
+                    "module": {
+                      "type_id": "taffymeters.spectrum",
+                      "style": "taffymeters.spectrum.line",
+                      "view": {
+                        "bottom_db": {
+                          "number": -90.0
+                        },
+                        "max_frequency_hz": {
+                          "number": 20000.0
+                        },
+                        "range_db": {
+                          "number": 90.0
+                        },
+                        "show_peak": {
+                          "bool": false
+                        },
+                        "show_readout": {
+                          "bool": false
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

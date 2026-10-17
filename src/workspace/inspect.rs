@@ -63,7 +63,8 @@ pub(crate) struct WorkspaceObservation {
     pub(crate) source_status: SourceStatus,
     pub(crate) control_error: Option<String>,
     pub(crate) modules_created: u64,
-    pub(crate) name: String,
+    /// The preset the session comes from.
+    pub(crate) preset: Option<crate::persistence::PresetRef>,
     pub(crate) notices: Vec<String>,
     pub(crate) theme: ThemeSettings,
 }
@@ -149,7 +150,7 @@ impl Workspace {
                 .as_ref()
                 .map(|(message, _)| message.clone()),
             modules_created: self.modules_created,
-            name: self.name.clone(),
+            preset: self.preset.clone(),
             notices: self.notices.clone(),
             theme: self.theme.clone(),
         }

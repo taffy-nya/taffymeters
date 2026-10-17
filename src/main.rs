@@ -77,7 +77,8 @@ fn main() -> eframe::Result<()> {
         "system audio: {} Hz, {} channels, {:?}",
         descriptor.sample_rate_hz, descriptor.channel_count, descriptor.channel_layout
     );
-    let workspace = match workspace::Workspace::open(live, store, true) {
+    let desktop = std::sync::Arc::new(workspace::NativeDesktop);
+    let workspace = match workspace::Workspace::open(live, store, desktop) {
         Ok(workspace) => workspace,
         Err(error) => {
             eprintln!("module initialization failed: {error}");
@@ -87,7 +88,8 @@ fn main() -> eframe::Result<()> {
     run_window(app::App::new(workspace))
 }
 
-/// `[--config-dir <dir>]`: where workspaces are saved (default `%APPDATA%\taffymeters`).
+/// `[--config-dir <dir>]`: where the session and presets are saved (default
+/// `%APPDATA%\taffymeters`).
 fn parse_config_dir(args: &[String]) -> Result<Option<std::path::PathBuf>, String> {
     match args {
         [] => Ok(None),
