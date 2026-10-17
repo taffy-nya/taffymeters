@@ -1,5 +1,5 @@
-//! The Window tab: adding to an empty window, always-on-top, maximize, grouping
-//! and closing the targeted window.
+//! The Window tab: adding to an empty window, always-on-top, pin, maximize,
+//! grouping and closing the targeted window.
 
 use eframe::egui::{self, RichText};
 
@@ -47,6 +47,17 @@ impl Workspace {
                     enabled: on_top,
                 });
             }
+            let mut pinned = window.pinned;
+            let response = ui
+                .checkbox(&mut pinned, "Pin")
+                .on_hover_text("Dragging does not move the window or its group");
+            record(controls, SettingsItem::Pin, &response);
+            if response.changed() {
+                actions.push(WorkspaceAction::SetPinned {
+                    window_id,
+                    enabled: pinned,
+                });
+            }
             let label = if window.maximized {
                 "Restore"
             } else {
@@ -57,10 +68,12 @@ impl Workspace {
             }
         });
         card(ui, "Group", |ui| {
-            let status = if window.group.is_some() {
-                "Moves together with the windows of its group."
-            } else {
+            let status = if window.group.is_none() {
                 "Not grouped. Windows that touch can move as one."
+            } else if self.drag_pinned(window_id) {
+                "Pinned with its group: dragging moves none of them."
+            } else {
+                "Moves together with the windows of its group."
             };
             ui.label(RichText::new(status).weak());
             ui.horizontal_wrapped(|ui| {

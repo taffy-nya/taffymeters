@@ -63,6 +63,9 @@ pub(crate) struct WindowFile {
     pub(crate) inner_size: [f32; 2],
     #[serde(default)]
     pub(crate) always_on_top: bool,
+    /// Body drags do not move the window (or its group).
+    #[serde(default)]
+    pub(crate) pinned: bool,
     #[serde(default)]
     pub(crate) maximized: bool,
     /// Windows with the same number move together.

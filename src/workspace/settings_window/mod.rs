@@ -106,6 +106,7 @@ pub(crate) enum SettingsItem {
     MoveTo,
     CloseModule,
     AlwaysOnTop,
+    Pin,
     Maximize,
     Group,
     LeaveGroup,

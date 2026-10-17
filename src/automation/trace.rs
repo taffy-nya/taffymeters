@@ -133,6 +133,7 @@ impl Trace {
                     "ratio": (s.ratio * 10_000.0).round() / 10_000.0, "manual": s.manual})).collect::<Vec<_>>(),
                 "active": w.active.map(|id| id.0),
                 "always_on_top": w.always_on_top,
+                "pinned": w.pinned,
                 "group": w.group,
                 "pending_detach": w.pending_detach.map(|id| id.0),
                 "min_size": [w.min_size.x, w.min_size.y],

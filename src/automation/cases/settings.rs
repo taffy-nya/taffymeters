@@ -888,7 +888,7 @@ fn fingerprint(ws: &Workspace) -> Value {
             json!({"modules":modules,
                 "splits":window.splits.iter().map(|s| json!([format!("{:?}", s.axis), s.ratio, s.manual])).collect::<Vec<_>>(),
                 "active":window.active.and_then(|a| window.leaves.iter().position(|l| *l == a)),
-                "always_on_top":window.always_on_top})
+                "always_on_top":window.always_on_top,"pinned":window.pinned})
         })
         .collect();
     json!({"windows":windows,"theme":o.theme})
@@ -1021,6 +1021,13 @@ fn s04() -> Result<Value, String> {
     action(
         &mut h.ws,
         WorkspaceAction::SetAlwaysOnTop {
+            window_id: second,
+            enabled: true,
+        },
+    )?;
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetPinned {
             window_id: second,
             enabled: true,
         },

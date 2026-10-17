@@ -706,6 +706,7 @@ impl Workspace {
             }
             if body.drag_started_by(PointerButton::Primary)
                 && !picking
+                && !self.drag_pinned(window_id)
                 && let Some(window) = self.windows.get_mut(&window_id)
             {
                 window.commands.push(ViewportCommand::StartDrag);
@@ -964,6 +965,7 @@ impl Workspace {
         controls.record(ControlKey::EmptyBody, &body);
         if body.drag_started_by(PointerButton::Primary)
             && !picking
+            && !self.drag_pinned(window_id)
             && let Some(window) = self.windows.get_mut(&window_id)
         {
             window.commands.push(ViewportCommand::StartDrag);

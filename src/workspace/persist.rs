@@ -297,11 +297,11 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// Always-on-top state and desktop position (logical points, scale) of the
+    /// Always-on-top, pin and desktop position (logical points, scale) of the
     /// first window, for the default window that replaces the content.
-    fn first_placement(&self) -> (bool, Option<(Pos2, f32)>) {
+    fn first_placement(&self) -> (bool, bool, Option<(Pos2, f32)>) {
         let Some(window) = self.windows.values().next() else {
-            return (false, None);
+            return (false, false, None);
         };
         let ppp = window.pixels_per_point;
         let position = window
@@ -309,7 +309,7 @@ impl Workspace {
             .outer
             .map(|outer| (outer.min / ppp, ppp))
             .or(window.initial_position.map(|position| (position, ppp)));
-        (window.always_on_top, position)
+        (window.always_on_top, window.pinned, position)
     }
 
     /// Replace everything with one default Spectrum window and the Dark theme. The
@@ -317,7 +317,7 @@ impl Workspace {
     /// the current content stays as it was.
     fn replace_with_default(
         &mut self,
-        (always_on_top, position): (bool, Option<(Pos2, f32)>),
+        (always_on_top, pinned, position): (bool, bool, Option<(Pos2, f32)>),
     ) -> Result<(), WorkspaceError> {
         let first = self.create_module(SPECTRUM_MODULE_ID)?;
         let window_id = match Self::allocate(&mut self.next_window_id) {
@@ -342,6 +342,7 @@ impl Workspace {
             always_on_top,
         );
         window.active = Some(first);
+        window.pinned = pinned;
         if let Some((position, ppp)) = position {
             window.initial_position = Some(position);
             window.pixels_per_point = ppp;
@@ -430,6 +431,7 @@ impl Workspace {
         };
         let mut window = WindowState::new(layout, size, file.always_on_top);
         window.initial_min_size = min_size;
+        window.pinned = file.pinned;
         let ppp = if file.pixels_per_point.is_finite() {
             file.pixels_per_point.clamp(0.25, 8.0)
         } else {
@@ -659,6 +661,7 @@ impl Workspace {
                     pixels_per_point: window.pixels_per_point,
                     inner_size: [window.content_size.x, window.content_size.y],
                     always_on_top: window.always_on_top,
+                    pinned: window.pinned,
                     maximized: window.maximized,
                     group,
                     active: window

@@ -780,6 +780,47 @@ fn w07() -> Result<Value, String> {
         group.is_some() && o.window(FIRST_WINDOW).and_then(|w| w.group) == group,
         "touching windows were not grouped",
     )?;
+    // Pinning the member keeps the whole group in place: neither body starts a
+    // native move until it is unpinned.
+    h.settings(
+        ControlKey::LeafBody(b),
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Pin],
+    )?;
+    let mut pinned_drags = Vec::new();
+    for (window, leaf) in [(second, b), (FIRST_WINDOW, a)] {
+        h.focus = window;
+        h.take_commands(window);
+        let start = h.locate(&ControlKey::LeafBody(leaf))?.rect.center();
+        h.drag(
+            ControlKey::LeafBody(leaf),
+            &[start + vec2(20.0, 10.0), start + vec2(40.0, 20.0)],
+            egui::Modifiers::NONE,
+            None,
+        )?;
+        pinned_drags.push(count_start_drag(&h.take_commands(window)));
+    }
+    check(
+        h.ws.observation().window(second).is_some_and(|w| w.pinned) && pinned_drags == [0, 0],
+        &format!("a pinned group still started native moves: {pinned_drags:?}"),
+    )?;
+    h.focus = second;
+    h.settings(
+        ControlKey::LeafBody(b),
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Pin],
+    )?;
+    h.take_commands(second);
+    let start = h.locate(&ControlKey::LeafBody(b))?.rect.center();
+    h.drag(
+        ControlKey::LeafBody(b),
+        &[start + vec2(20.0, 10.0), start + vec2(40.0, 20.0)],
+        egui::Modifiers::NONE,
+        None,
+    )?;
+    let unpinned_drags = count_start_drag(&h.take_commands(second));
+    check(
+        unpinned_drags == 1,
+        &format!("an unpinned window did not start a native move: {unpinned_drags}"),
+    )?;
     // Moving the root moves the member by the same physical delta.
     h.desktop.button_down.set(true);
     h.window_mut(FIRST_WINDOW)?.position = pos2(150.0, 130.0);
@@ -867,6 +908,7 @@ fn w07() -> Result<Value, String> {
     )?;
     Ok(
         json!({"snap_physical":[1000,100],"group_follow":[1050,130],"ungrouped":"independent",
+        "pinned_group_start_drag":[0,0],"unpinned_start_drag":1,
         "grid_2x_logical":528,"scale_change":"drag canceled"}),
     )
 }

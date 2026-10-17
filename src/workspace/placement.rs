@@ -51,6 +51,29 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
+    pub(super) fn set_pinned(
+        &mut self,
+        window_id: WindowId,
+        enabled: bool,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        self.window_mut(window_id)?.pinned = enabled;
+        Ok(ActionOutcome::Applied)
+    }
+
+    /// A body drag in this window may not start a native move: the window is
+    /// pinned, or a member of its group is (a group moves as one).
+    pub(super) fn drag_pinned(&self, window_id: WindowId) -> bool {
+        let Some(window) = self.windows.get(&window_id) else {
+            return false;
+        };
+        window.pinned
+            || window.group.is_some_and(|group| {
+                self.windows
+                    .values()
+                    .any(|other| other.group == Some(group) && other.pinned)
+            })
+    }
+
     pub(super) fn toggle_maximized(
         &mut self,
         window_id: WindowId,

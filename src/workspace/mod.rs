@@ -161,6 +161,11 @@ pub(crate) enum WorkspaceAction {
         window_id: WindowId,
         enabled: bool,
     },
+    /// A pinned window does not move when its body is dragged; nor does its group.
+    SetPinned {
+        window_id: WindowId,
+        enabled: bool,
+    },
     ToggleMaximized {
         window_id: WindowId,
     },
@@ -359,6 +364,8 @@ pub(crate) struct WindowState {
     layout: Layout,
     active: Option<ModuleInstanceId>,
     always_on_top: bool,
+    /// Body drags do not move the window (or its group).
+    pinned: bool,
     maximized: bool,
     /// Logical content size from the last UI pass (initially the requested size).
     content_size: Vec2,
@@ -390,6 +397,7 @@ impl WindowState {
             layout,
             active: None,
             always_on_top,
+            pinned: false,
             maximized: false,
             content_size: size,
             pixels_per_point: 1.0,
@@ -759,6 +767,9 @@ impl Workspace {
             WorkspaceAction::CloseWindow { window_id } => self.close_window_action(window_id),
             WorkspaceAction::SetAlwaysOnTop { window_id, enabled } => {
                 self.set_always_on_top(window_id, enabled)
+            }
+            WorkspaceAction::SetPinned { window_id, enabled } => {
+                self.set_pinned(window_id, enabled)
             }
             WorkspaceAction::ToggleMaximized { window_id } => self.toggle_maximized(window_id),
             WorkspaceAction::GroupTouching { window_id } => self.group_touching(window_id),
