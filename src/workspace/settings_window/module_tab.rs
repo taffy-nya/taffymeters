@@ -40,12 +40,13 @@ impl Workspace {
         self.layout_actions(ui, instance_id, controls, actions);
         card(ui, "Module", |ui| {
             self.type_row(ui, instance_id, controls, actions);
-            if let Some(file) = &entry.preserved {
+            if let Some(preserved) = &entry.preserved {
+                let name = self.saved_type_name(&preserved.file.type_id);
                 warning(
                     ui,
                     &format!(
-                        "Module type {} cannot be used here; its saved configuration is kept unchanged.",
-                        file.type_id
+                        "{name} unavailable: {}; saved settings kept",
+                        preserved.reason
                     ),
                 );
             } else {
@@ -90,12 +91,7 @@ impl Workspace {
             }
         });
         if self.move_source == Some(instance_id) {
-            ui.label(
-                RichText::new(
-                    "Click an edge target in any window (Esc or right click there cancels).",
-                )
-                .weak(),
-            );
+            ui.label(RichText::new("Click a highlighted edge in any window").weak());
         }
     }
 
@@ -168,10 +164,7 @@ impl Workspace {
                 }
             });
             if let Some(kept) = &entry.preserved_style {
-                warning(
-                    ui,
-                    &format!("Saved style {kept} is not available; showing the default"),
-                );
+                warning(ui, &format!("Style {kept} unavailable; showing default"));
             }
         }
         // The channel is one row however the Module implements it (an analysis

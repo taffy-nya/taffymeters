@@ -149,10 +149,12 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn group_touching(
-        &mut self,
+    /// Windows touching `window_id` on the desktop; fails while its position is
+    /// not known yet.
+    pub(super) fn touching_windows(
+        &self,
         window_id: WindowId,
-    ) -> Result<ActionOutcome, WorkspaceError> {
+    ) -> Result<Vec<WindowId>, WorkspaceError> {
         let outer = self
             .window(window_id)?
             .desktop
@@ -160,7 +162,7 @@ impl Workspace {
             .ok_or(WorkspaceError::Unsupported(
                 "group before the window position is known",
             ))?;
-        let touching: Vec<WindowId> = self
+        Ok(self
             .windows
             .iter()
             .filter(|(id, window)| {
@@ -171,7 +173,14 @@ impl Workspace {
                         .is_some_and(|other| desktop::touching(outer, other))
             })
             .map(|(id, _)| *id)
-            .collect();
+            .collect())
+    }
+
+    pub(super) fn group_touching(
+        &mut self,
+        window_id: WindowId,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let touching = self.touching_windows(window_id)?;
         if touching.is_empty() {
             return Err(WorkspaceError::Unsupported(
                 "group without a touching window",

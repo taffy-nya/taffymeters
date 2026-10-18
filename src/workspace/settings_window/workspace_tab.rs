@@ -118,10 +118,8 @@ impl Workspace {
             let builtin = builtin_presets().any(|builtin| same_name(builtin, &name));
             if !name.is_empty() && !valid {
                 warning(ui, "Not a valid name");
-            } else if exists {
-                warning(ui, "A preset with this name exists");
-            } else if builtin {
-                warning(ui, "A built-in preset has this name");
+            } else if exists || builtin {
+                warning(ui, "Name already used");
             }
             ui.horizontal(|ui| {
                 let allowed = has_store && valid && !exists && !builtin;
@@ -197,9 +195,7 @@ impl Workspace {
                     } else {
                         "Copy"
                     };
-                    let response = ui
-                        .button(label)
-                        .on_hover_text("Copy every notice to the clipboard");
+                    let response = ui.button(label);
                     record(controls, SettingsItem::CopyNotices, &response);
                     if response.clicked() {
                         ui.ctx().copy_text(self.notices.join("\n"));

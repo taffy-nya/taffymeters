@@ -1,14 +1,13 @@
 //! Module instance lifecycle and per-instance analysis and view parameters.
 
 use super::{
-    ActionOutcome, ModuleEntry, ModuleInstanceId, WindowId, Workspace, WorkspaceError,
+    ActionOutcome, ModuleEntry, ModuleInstanceId, Preserved, WindowId, Workspace, WorkspaceError,
     layout::LayoutError,
 };
 use crate::{
     dataflow::{ChannelSelection, Keep, NodeRef, NodeSpec, OutputId},
     extensions::RegistryError,
     module::Module,
-    persistence::ModuleFile,
     settings::SettingValue,
     theme::RoleOverrides,
 };
@@ -50,7 +49,7 @@ impl Workspace {
         type_id: &'static str,
         label: &'static str,
         module: Box<dyn Module>,
-        preserved: Option<ModuleFile>,
+        preserved: Option<Preserved>,
     ) {
         self.modules_created += 1;
         self.modules.insert(

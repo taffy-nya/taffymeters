@@ -1316,32 +1316,36 @@ fn s05() -> Result<Value, String> {
             &format!("no notice about {expected}: {notices}"),
         )?;
     }
-    // The badge shows the notices and an operation error for a while, then drops
-    // them; the notices stay listed in the settings until cleared.
+    // The badge shows an operation error and counts the notices for a while,
+    // then drops them; the notices stay listed in the settings until cleared.
     let placeholder = o.modules[0].instance_id;
     let rejected = h.ws.apply_action(WorkspaceAction::SplitModule {
         instance_id: placeholder,
         side: Side::Right,
     });
     h.frame_all()?;
-    let shown = h.ws.badge_messages().count();
+    let error = h.ws.observation().control_error.unwrap_or_default();
+    let badge = h.ws.badge_text(|_| true);
     check(
-        rejected.is_err() && shown == o.notices.len() + 1,
-        &format!(
-            "badge shows {shown} of the error and {} notices",
-            o.notices.len()
-        ),
+        rejected.is_err()
+            && error.starts_with(char::is_uppercase)
+            && badge
+                == Some(format!(
+                    "{error} | {} notices · Settings › Workspace",
+                    o.notices.len()
+                )),
+        &format!("badge {badge:?} for the error {error:?}"),
     )?;
     h.display_time += crate::workspace::MESSAGE_LIFETIME;
     h.frame_all()?;
     let after = h.ws.observation();
     check(
-        h.ws.badge_messages().next().is_none()
+        h.ws.badge_text(|_| true).is_none()
             && after.control_error.is_none()
             && after.notices == o.notices,
         &format!(
             "badge kept {:?}; notices {:?}",
-            h.ws.badge_messages().collect::<Vec<_>>(),
+            h.ws.badge_text(|_| true),
             after.notices
         ),
     )?;
@@ -1414,6 +1418,15 @@ fn s05() -> Result<Value, String> {
         copied.as_slice() == [expected.clone()],
         &format!("Copy put {copied:?} on the clipboard, not {expected:?}"),
     )?;
+    // Neither window touches the other: Group is not offered.
+    h.in_settings(&[SettingsItem::Tab(Tab::Window)])?;
+    let group = h.locate(&ControlKey::Settings(SettingsItem::Group));
+    check(
+        group
+            .as_ref()
+            .is_err_and(|error| error.starts_with("Disabled")),
+        &format!("Group without a touching window: {group:?}"),
+    )?;
     let placeholder = o.modules[0].instance_id;
     check(
         action(
@@ -1433,11 +1446,22 @@ fn s05() -> Result<Value, String> {
     fs::write(dir.session(), future).map_err(|e| e.to_string())?;
     let (mut ws, _driver) = reopen(&dir)?;
     let o = ws.observation();
+    let notice = o.notices.first().cloned().unwrap_or_default();
     check(
-        o.notices.iter().any(|n| n.contains("version 99"))
+        o.notices.len() == 1
+            && notice.contains("newer version (99)")
             && o.windows.len() == 1
             && o.preset == Some(builtin("Default")),
         "an unreadable session did not open as the protected Default preset",
+    )?;
+    // A single notice shows in full when the line fits, else as a count.
+    let fits = ws.badge_text(|_| true).unwrap_or_default();
+    let narrow = ws.badge_text(|_| false).unwrap_or_default();
+    check(
+        fits.ends_with(&notice)
+            && narrow.ends_with("1 notice · Settings › Workspace")
+            && !narrow.contains(&notice),
+        &format!("one notice: {fits:?} when it fits, {narrow:?} when not"),
     )?;
     ws.autosave();
     check(

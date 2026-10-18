@@ -421,18 +421,13 @@ impl Workspace {
                             self.module_tab(ui, instance, &mut controls, &mut actions)
                         }
                         None => {
-                            ui.label(
-                                RichText::new(
-                                    "No module selected. Right-click a module to edit it.",
-                                )
-                                .weak(),
-                            );
+                            ui.label(RichText::new("Right-click a module to edit it").weak());
                         }
                     },
                     Tab::Window => match window {
                         Some(window) => self.window_tab(ui, window, &mut controls, &mut actions),
                         None => {
-                            ui.label(RichText::new("No window selected.").weak());
+                            ui.label(RichText::new("No window selected").weak());
                         }
                     },
                     Tab::Workspace => {

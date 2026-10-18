@@ -60,7 +60,7 @@ impl fmt::Display for LiveAudioError {
             Self::Input(error) => write!(f, "system audio input failed: {error}"),
             Self::Synthetic(error) => write!(f, "synthetic audio input failed: {error}"),
             Self::Transport(error) => write!(f, "audio transport failed: {error}"),
-            Self::Control(error) => write!(f, "dataflow control failed: {error}"),
+            Self::Control(error) => error.fmt(f),
             Self::Stopped => f.write_str("live audio source is stopped"),
         }
     }

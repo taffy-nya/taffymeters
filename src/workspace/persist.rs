@@ -122,7 +122,19 @@ impl Workspace {
             Ok(None) => workspace.default_preset()?,
             Err(error) => {
                 workspace.protected = true;
-                workspace.push_notice(format!("{error}; it will not be overwritten"));
+                let problem = match &error {
+                    PersistError::Version(_, version) if *version > FORMAT_VERSION => {
+                        format!("Session is from a newer version ({version})")
+                    }
+                    PersistError::Version(_, version) => {
+                        format!("Session is from an older version ({version})")
+                    }
+                    PersistError::Parse(_, reason) => format!("Session file unreadable: {reason}"),
+                    PersistError::Io(..) | PersistError::InvalidName(_) => {
+                        format!("Couldn't read the session: {error}")
+                    }
+                };
+                workspace.push_notice(format!("{problem}; opened Default, file left untouched"));
                 workspace.default_preset()?
             }
         };
@@ -212,8 +224,11 @@ impl Workspace {
         {
             match entry.module.set_style(style, &self.registry) {
                 Ok(()) => {}
-                Err(error) => {
-                    warnings.push(format!("{} #{}: style {style}: {error}", entry.label, id.0));
+                Err(_) => {
+                    warnings.push(format!(
+                        "{} #{}: style {style} unavailable; showing default",
+                        entry.label, id.0
+                    ));
                     entry.preserved_style = Some(style.clone());
                 }
             }
@@ -247,7 +262,7 @@ impl Workspace {
         let file = self.saved_file();
         let store = self.store.as_ref().expect("can_save checked the store");
         if let Err(error) = store.save_session(&file) {
-            self.push_notice(format!("could not save the workspace: {error}"));
+            self.push_notice(format!("Couldn't save the session: {error}"));
         }
     }
 
@@ -363,14 +378,14 @@ impl Workspace {
         self.theme = file.theme;
         if crate::theme::Preset::from_id(&self.theme.preset).is_none() {
             self.push_notice(format!(
-                "theme preset {:?} is not available; showing Dark",
+                "Theme {:?} unavailable; showing Dark",
                 self.theme.preset
             ));
         }
         self.refresh_palettes();
         if file.input.kind != SYSTEM_INPUT {
             self.push_notice(format!(
-                "input {:?} is not available in this build; using system audio and keeping the saved input",
+                "Input {:?} unavailable; using system audio (saved input kept)",
                 file.input.kind
             ));
         }
@@ -613,21 +628,34 @@ impl Workspace {
             .ok_or(WorkspaceError::IdExhausted)?;
         let id = ModuleInstanceId(self.next_instance_id);
         self.next_instance_id = next;
+        let name = self.saved_type_name(&file.type_id).to_owned();
         self.push_notice(format!(
-            "module {} #{} could not be restored ({reason}); its configuration is kept",
-            file.type_id, id.0
+            "{name} #{} not restored: {reason}; settings kept",
+            id.0
         ));
         let module = Box::new(MissingModule {
-            message: format!("{}: {reason}. Configuration kept.", file.type_id),
+            message: format!("{name} unavailable"),
         });
         self.insert_entry(
             id,
             MISSING_MODULE_ID,
             "Missing module",
             module,
-            Some(file.clone()),
+            Some(super::Preserved {
+                file: file.clone(),
+                reason,
+            }),
         );
         Ok(id)
+    }
+
+    /// How a saved instance's type is named to the user: its display name when
+    /// this build has the type (its saved configuration is what it cannot use),
+    /// else the saved type ID.
+    pub(super) fn saved_type_name<'a>(&self, type_id: &'a str) -> &'a str {
+        self.registry
+            .module_type(type_id)
+            .map_or(type_id, |(_, label)| label)
     }
 
     /// The saved form of the whole workspace.
@@ -652,8 +680,8 @@ impl Workspace {
             .retain(|binding, _| live.contains(binding));
         let mut used: HashSet<u64> = self.binding_numbers.values().copied().collect();
         for entry in self.modules.values() {
-            if let Some(file) = &entry.preserved {
-                used.extend(file.bindings());
+            if let Some(preserved) = &entry.preserved {
+                used.extend(preserved.file.bindings());
             }
         }
         let mut numbers = std::mem::take(&mut self.binding_numbers);
@@ -752,7 +780,7 @@ impl Workspace {
         used: &mut HashSet<u64>,
     ) -> ModuleFile {
         if let Some(preserved) = &entry.preserved {
-            return preserved.clone();
+            return preserved.file.clone();
         }
         let data = entry.module.data().map(|controller| {
             let mut spec = controller.spec();

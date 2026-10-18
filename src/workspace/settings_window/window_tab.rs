@@ -48,10 +48,9 @@ impl Workspace {
                 });
             }
             let mut locked = window.locked;
-            let response = ui.checkbox(&mut locked, "Lock").on_hover_text(
-                "Takes right clicks only: no moving, resizing, splitting, dividers, \
-                 wheel or hover. Its group does not move when dragged.",
-            );
+            let response = ui
+                .checkbox(&mut locked, "Lock")
+                .on_hover_text("Right click only: no moving, resizing or splitting");
             record(controls, SettingsItem::Lock, &response);
             if response.changed() {
                 actions.push(WorkspaceAction::SetLocked {
@@ -70,22 +69,28 @@ impl Workspace {
         });
         card(ui, "Group", |ui| {
             let status = if window.group.is_none() {
-                "Not grouped. Windows that touch can move as one."
+                "Not grouped"
             } else if self.drag_locked(window_id) {
-                "Locked with its group: dragging moves none of them."
+                "Grouped · locked"
             } else {
-                "Moves together with the windows of its group."
+                "Grouped"
             };
             ui.label(RichText::new(status).weak());
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if button(
-                    ui,
-                    true,
-                    "Group with touching windows",
-                    SettingsItem::Group,
-                    controls,
-                ) {
+                let unavailable = match self.touching_windows(window_id) {
+                    Ok(touching) if touching.is_empty() => Some("No window touches this one"),
+                    Ok(_) => None,
+                    Err(_) => Some("Window position not known yet"),
+                };
+                let response = ui
+                    .add_enabled(
+                        unavailable.is_none(),
+                        egui::Button::new("Group with touching windows"),
+                    )
+                    .on_disabled_hover_text(unavailable.unwrap_or_default());
+                record(controls, SettingsItem::Group, &response);
+                if response.clicked() {
                     actions.push(WorkspaceAction::GroupTouching { window_id });
                 }
                 if window.group.is_some()

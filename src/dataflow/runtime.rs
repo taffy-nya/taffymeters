@@ -75,7 +75,7 @@ pub enum ControlError {
 impl fmt::Display for ControlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Busy => f.write_str("dataflow control queue is busy"),
+            Self::Busy => f.write_str("audio engine busy; try again"),
             Self::Stopped => f.write_str("dataflow worker has stopped"),
             Self::SubscriptionClosed => f.write_str("data subscription is closed"),
             Self::SharedBindingMismatch(id) => {

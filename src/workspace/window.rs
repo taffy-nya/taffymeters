@@ -341,11 +341,11 @@ pub(crate) fn source_status_text(status: &SourceStatus) -> String {
     use std::fmt::Write as _;
 
     let state = match status.state {
-        SourceState::Starting => "STARTING",
-        SourceState::Running => "RUNNING",
-        SourceState::Paused => "PAUSED",
-        SourceState::DeviceLost => "DEVICE LOST",
-        SourceState::Stopped => "STOPPED",
+        SourceState::Starting => "starting",
+        SourceState::Running => "running",
+        SourceState::Paused => "paused",
+        SourceState::DeviceLost => "device lost",
+        SourceState::Stopped => "stopped",
     };
     let mut text = format!("Source: {state}");
     if status.dropped_blocks > 0 {
@@ -1100,7 +1100,7 @@ impl Workspace {
                         painter.text(
                             leaf_rect.center(),
                             Align2::CENTER_CENTER,
-                            "Moving this module",
+                            "Moving",
                             FontId::proportional(14.0),
                             Color32::WHITE,
                         );
@@ -1145,7 +1145,7 @@ impl Workspace {
                 painter.text(
                     rect.center_top() + egui::vec2(0.0, 12.0),
                     Align2::CENTER_TOP,
-                    "Move: click an edge target · Esc or right click cancels",
+                    "Click an edge to move here · Esc cancels",
                     FontId::proportional(13.0),
                     Color32::WHITE,
                 );
@@ -1155,23 +1155,54 @@ impl Workspace {
         }
     }
 
-    fn status_badge(&self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
+    /// Text of the status badge: the source state when it is not running, the
+    /// operation error and the notices. A single notice shows in full when the
+    /// whole line `fits`; otherwise the badge counts them and points to where
+    /// they are listed.
+    pub(crate) fn badge_text(&self, fits: impl Fn(&str) -> bool) -> Option<String> {
         let status = self.source_status();
-        let mut text = String::new();
+        let mut parts = Vec::new();
         if status.state != SourceState::Running {
-            text = source_status_text(&status);
+            parts.push(source_status_text(&status));
         }
-        for message in self.badge_messages() {
-            if !text.is_empty() {
-                text.push_str(" | ");
+        if let Some((error, _)) = &self.control_error {
+            parts.push(error.clone());
+        }
+        let notices = self.badge_notices();
+        if let [notice] = notices {
+            let mut full = parts.clone();
+            full.push(notice.clone());
+            let full = full.join(" | ");
+            if fits(&full) {
+                return Some(full);
             }
-            text.push_str(message);
         }
-        if text.is_empty() || !self.windows.contains_key(&window_id) {
+        match notices.len() {
+            0 => {}
+            1 => parts.push("1 notice · Settings › Workspace".to_owned()),
+            count => parts.push(format!("{count} notices · Settings › Workspace")),
+        }
+        (!parts.is_empty()).then(|| parts.join(" | "))
+    }
+
+    fn status_badge(&self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
+        if !self.windows.contains_key(&window_id) {
             return;
         }
         let painter = ui.painter_at(rect);
-        let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), MOCHA_PEACH);
+        let font = FontId::proportional(12.0);
+        // Inside the window with the badge's margin and padding on both sides.
+        let room = rect.width() - 24.0;
+        let Some(text) = self.badge_text(|text| {
+            painter
+                .layout_no_wrap(text.to_owned(), font.clone(), MOCHA_PEACH)
+                .size()
+                .x
+                <= room
+        }) else {
+            return;
+        };
+        let galley = painter.layout_no_wrap(text, font, MOCHA_PEACH);
         let origin = pos2(rect.min.x + 8.0, rect.max.y - galley.size().y - 8.0);
         painter.rect_filled(
             Rect::from_min_size(origin, galley.size()).expand(4.0),
@@ -1245,7 +1276,7 @@ mod tests {
         };
         assert_eq!(
             source_status_text(&status),
-            "Source: DEVICE LOST | dropped 3 | invalid 7 | endpoint unavailable"
+            "Source: device lost | dropped 3 | invalid 7 | endpoint unavailable"
         );
     }
 

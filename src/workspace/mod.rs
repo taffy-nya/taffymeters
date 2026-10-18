@@ -288,7 +288,7 @@ impl std::fmt::Display for WorkspaceError {
             Self::NoSavedPreset => {
                 f.write_str("this workspace does not come from a saved preset; use Save as")
             }
-            Self::CopyIncomplete(reason) => write!(f, "could not copy the module: {reason}"),
+            Self::CopyIncomplete(reason) => write!(f, "copy incomplete: {reason}"),
         }
     }
 }
@@ -337,9 +337,15 @@ struct ModuleEntry {
     palette: Palette,
     /// Saved configuration of an instance this build could not restore; written
     /// back unchanged.
-    preserved: Option<ModuleFile>,
+    preserved: Option<Preserved>,
     /// Saved style this build does not provide; kept until the user picks one.
     preserved_style: Option<String>,
+}
+
+/// A saved instance this build could not restore and why.
+struct Preserved {
+    file: ModuleFile,
+    reason: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -627,20 +633,22 @@ impl Workspace {
     }
 
     fn set_control_error(&mut self, message: String) {
+        // Error texts follow Rust's lowercase convention; on screen they start a
+        // sentence.
+        let mut chars = message.chars();
+        let message = chars.next().map_or_else(String::new, |first| {
+            first.to_uppercase().chain(chars).collect()
+        });
         self.control_error = Some((message, self.display_time));
     }
 
-    /// The operation error and notices the status badge shows now.
-    pub(crate) fn badge_messages(&self) -> impl Iterator<Item = &str> {
-        let notices = if self.display_time < self.notices_shown_until {
-            self.notices.as_slice()
+    /// The notices the status badge reports now.
+    fn badge_notices(&self) -> &[String] {
+        if self.display_time < self.notices_shown_until {
+            &self.notices
         } else {
             &[]
-        };
-        self.control_error
-            .iter()
-            .map(|(message, _)| message.as_str())
-            .chain(notices.iter().map(String::as_str))
+        }
     }
 
     /// Display time until the badge next drops a message, if it shows one.

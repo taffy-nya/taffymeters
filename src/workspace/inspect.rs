@@ -99,7 +99,10 @@ impl Workspace {
                     .collect(),
                 colors: entry.colors.clone(),
                 palette: entry.palette,
-                missing: entry.preserved.as_ref().map(|file| file.type_id.clone()),
+                missing: entry
+                    .preserved
+                    .as_ref()
+                    .map(|preserved| preserved.file.type_id.clone()),
                 object: std::ptr::from_ref::<dyn Module>(entry.module.as_ref()).cast::<u8>()
                     as usize,
             })
