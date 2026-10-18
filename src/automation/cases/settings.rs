@@ -1665,10 +1665,12 @@ fn s07() -> Result<Value, String> {
     )?;
     commands(&mut h);
     h.frame(vec![]);
+    h.desktop.take_placed();
     h.window_mut(FIRST_WINDOW)?.position = pos2(1500.0, 300.0);
     h.frame(vec![]);
     check(
         h.window(FIRST_WINDOW)?.position == pos2(1500.0, 300.0)
+            && h.desktop.take_placed().is_empty()
             && !commands(&mut h)
                 .iter()
                 .any(|c| matches!(c, ViewportCommand::OuterPosition(_))),

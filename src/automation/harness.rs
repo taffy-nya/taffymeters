@@ -5,7 +5,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -15,7 +15,7 @@ use eframe::egui::{self, Event, PointerButton, Pos2, Rect, Vec2, ViewportCommand
 
 use crate::workspace::{
     ControlKey, ControlTarget, DesktopProbe, Display, FIRST_WINDOW, INITIAL_WINDOW_SIZE,
-    SettingsItem, WindowId, Workspace,
+    MoveRequest, SettingsItem, WindowId, WindowTracker, Workspace,
 };
 
 /// The settings window in the harness's window map. It is not a Workspace window;
@@ -25,10 +25,23 @@ pub(super) const SETTINGS: WindowId = WindowId(u64::MAX);
 const SETTINGS_SIM_SIZE: Vec2 = vec2(460.0, 1600.0);
 
 /// Simulated desktop facts for the snapping logic and window placement. Shared
-/// with the Workspace, which owns its desktop probe.
+/// with the Workspace, which owns its desktop probe. Window moves run the same
+/// [`WindowTracker`] the native layer runs; the harness applies the moves to its
+/// simulated windows after each pass, as the OS would within the call.
 pub(super) struct FakeDesktop {
     button_down: AtomicBool,
     displays: Mutex<Vec<Display>>,
+    native: Mutex<FakeNative>,
+}
+
+#[derive(Default)]
+struct FakeNative {
+    tracker: WindowTracker,
+    /// Moves to apply to the simulated windows.
+    pending: Vec<(WindowId, Pos2)>,
+    /// Every `place` so far.
+    placed: Vec<(WindowId, Pos2)>,
+    moves_started: usize,
 }
 
 impl FakeDesktop {
@@ -45,11 +58,66 @@ impl FakeDesktop {
         Arc::new(Self {
             button_down: AtomicBool::new(false),
             displays: Mutex::new(displays),
+            native: Mutex::default(),
         })
     }
 
     pub fn set_button_down(&self, down: bool) {
         self.button_down.store(down, Ordering::Relaxed);
+    }
+
+    fn native(&self) -> MutexGuard<'_, FakeNative> {
+        self.native.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Body drags that started a move so far.
+    pub fn moves_started(&self) -> usize {
+        self.native().moves_started
+    }
+
+    /// Take the positions `place` set so far.
+    pub fn take_placed(&self) -> Vec<(WindowId, Pos2)> {
+        std::mem::take(&mut self.native().placed)
+    }
+
+    /// The pointer of a move in progress is at `cursor`; `free`: Alt is held.
+    fn pointer(&self, cursor: Pos2, free: bool) {
+        let mut native = self.native();
+        let FakeNative {
+            tracker, pending, ..
+        } = &mut *native;
+        tracker.motion(cursor, free, pending);
+    }
+
+    fn escape(&self) {
+        let mut native = self.native();
+        let FakeNative {
+            tracker, pending, ..
+        } = &mut *native;
+        tracker.cancel(pending);
+    }
+
+    fn release(&self) {
+        self.native().tracker.end();
+    }
+
+    /// A window's frame is now `frame`; `ours` when this desktop put it there.
+    fn observed(&self, window: WindowId, frame: Rect, ours: bool) {
+        let mut native = self.native();
+        let FakeNative {
+            tracker, pending, ..
+        } = &mut *native;
+        if tracker.frame(window) != Some(frame) {
+            tracker.observed(window, frame, ours, Pos2::ZERO, pending);
+        }
+    }
+
+    fn forget(&self, window: WindowId) {
+        self.native().tracker.forget(window);
+    }
+
+    fn take_pending(&self) -> Vec<(WindowId, Pos2)> {
+        std::mem::take(&mut self.native().pending)
     }
 }
 
@@ -68,6 +136,42 @@ impl DesktopProbe for FakeDesktop {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn attach(&self, window: WindowId) -> bool {
+        self.native().tracker.frame(window).is_some()
+    }
+
+    fn set_groups(&self, groups: &[(WindowId, u64)]) {
+        self.native().tracker.set_groups(groups);
+    }
+
+    fn frame(&self, window: WindowId) -> Option<Rect> {
+        self.native().tracker.frame(window)
+    }
+
+    fn begin_move(&self, request: MoveRequest) -> bool {
+        let work_areas = self.displays().iter().map(|display| display.work).collect();
+        let mut native = self.native();
+        native.moves_started += 1;
+        native.tracker.begin(&request, work_areas)
+    }
+
+    fn moving(&self) -> bool {
+        self.native().tracker.moving()
+    }
+
+    fn place(&self, moves: &[(WindowId, Pos2)]) -> bool {
+        let mut native = self.native();
+        if moves
+            .iter()
+            .any(|(id, _)| native.tracker.frame(*id).is_none())
+        {
+            return false;
+        }
+        native.pending.extend_from_slice(moves);
+        native.placed.extend_from_slice(moves);
+        true
     }
 }
 
@@ -127,6 +231,8 @@ pub(super) struct Harness {
     pub new_window_ppp: f32,
     /// Modifier state reported in every frame's RawInput.
     pub modifiers: egui::Modifiers,
+    /// Where `grab` holds the pointer in the focused window (logical).
+    grabbed: Option<Pos2>,
 }
 
 impl Harness {
@@ -154,6 +260,7 @@ impl Harness {
             blocked: HashSet::new(),
             new_window_ppp,
             modifiers: egui::Modifiers::NONE,
+            grabbed: None,
         };
         // The initial default window opens at a fixed spot; restored windows open
         // where their builder says.
@@ -201,8 +308,14 @@ impl Harness {
     fn sync_windows(&mut self) {
         let live: Vec<_> = self.ws.windows();
         let settings_open = self.ws.settings_open();
+        let desktop = Arc::clone(&self.desktop);
         self.windows.retain(|id, _| {
-            (*id == SETTINGS && settings_open) || live.iter().any(|window| window.id == *id)
+            let keep =
+                (*id == SETTINGS && settings_open) || live.iter().any(|window| window.id == *id);
+            if !keep {
+                desktop.forget(*id);
+            }
+            keep
         });
         for summary in live {
             if self.windows.contains_key(&summary.id) || self.blocked.contains(&summary.id) {
@@ -234,6 +347,98 @@ impl Harness {
         self.windows.iter().filter(|(id, _)| **id != SETTINGS)
     }
 
+    /// Outer frame of a simulated window, physical pixels.
+    fn frame_of(window: &SimWindow) -> Rect {
+        Rect::from_min_size(window.position, window.size * window.ppp)
+    }
+
+    /// Tell the fake desktop where every Workspace window is (as the native layer
+    /// sees every frame change), then apply the moves it made in response.
+    fn sync_desktop(&mut self) {
+        for (id, window) in self.windows.iter().filter(|(id, _)| **id != SETTINGS) {
+            self.desktop.observed(*id, Self::frame_of(window), true);
+        }
+        self.apply_moves();
+    }
+
+    /// Apply the moves the fake desktop made (placements, a move in progress, a
+    /// group following), as the OS would within the call.
+    fn apply_moves(&mut self) {
+        loop {
+            let moves = self.desktop.take_pending();
+            if moves.is_empty() {
+                return;
+            }
+            for (id, position) in moves {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.position = position;
+                    self.desktop.observed(id, Self::frame_of(window), true);
+                }
+            }
+        }
+    }
+
+    /// Another program (or the OS) moves a window to `position`: its group
+    /// follows.
+    pub fn external_move(&mut self, id: WindowId, position: Pos2) -> Result<(), String> {
+        let window = self.window_mut(id)?;
+        window.position = position;
+        let frame = Self::frame_of(window);
+        self.desktop.observed(id, frame, false);
+        self.apply_moves();
+        Ok(())
+    }
+
+    /// Press on a body control of the focused window and drag it past egui's
+    /// threshold: the pass that sees the drag asks the desktop to move the window
+    /// (and its group) with the pointer. Returns the pointer on the desktop
+    /// (physical) at the press; `move_pointer` continues from there.
+    pub fn grab(&mut self, key: ControlKey) -> Result<Pos2, String> {
+        let target = self.locate(&key)?;
+        let start = self.hover(&key, target)?;
+        self.desktop.set_button_down(true);
+        let none = egui::Modifiers::NONE;
+        self.frame(vec![Self::button(
+            start,
+            PointerButton::Primary,
+            true,
+            none,
+        )]);
+        self.frame(vec![Event::PointerMoved(start + vec2(10.0, 0.0))]);
+        self.grabbed = Some(start + vec2(10.0, 0.0));
+        let window = self.window(self.focus)?;
+        Ok(window.position + start.to_vec2() * window.ppp)
+    }
+
+    /// The pointer of the move in progress is at `cursor` (desktop, physical);
+    /// `alt`: Alt is held. Every window then runs a pass.
+    pub fn move_pointer(&mut self, cursor: Pos2, alt: bool) -> Result<(), String> {
+        self.desktop.pointer(cursor, alt);
+        self.apply_moves();
+        self.frame_all()
+    }
+
+    /// Escape during the move: the windows go back and the move ends.
+    pub fn cancel_move(&mut self) -> Result<(), String> {
+        self.desktop.escape();
+        self.apply_moves();
+        self.frame_all()
+    }
+
+    /// Release the button that `grab` pressed.
+    pub fn release(&mut self) -> Result<(), String> {
+        self.desktop.release();
+        self.desktop.set_button_down(false);
+        let at = self.grabbed.take().unwrap_or_default();
+        self.frame(vec![Self::button(
+            at,
+            PointerButton::Primary,
+            false,
+            egui::Modifiers::NONE,
+        )]);
+        self.frame_all()
+    }
+
     /// Run one UI pass of `id` with `events`.
     pub fn frame_window(
         &mut self,
@@ -241,6 +446,7 @@ impl Harness {
         events: Vec<Event>,
     ) -> Result<egui::FullOutput, String> {
         self.frame += 1;
+        self.sync_desktop();
         let display_time = self.display_time;
         let window = self
             .windows
@@ -309,6 +515,7 @@ impl Harness {
             }
         }
         self.sync_windows();
+        self.apply_moves();
         Ok(output)
     }
 
@@ -502,6 +709,8 @@ impl Harness {
             modifiers,
         )]);
         self.modifiers = previous;
+        // A body drag's move ends with the button.
+        self.desktop.release();
         self.frame(vec![]);
         Ok(start)
     }
@@ -556,11 +765,16 @@ impl Harness {
         }
     }
 
+    /// Press and release `key` with `modifiers` held (also in the frames' modifier
+    /// state, which egui's shortcuts read).
     pub fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+        let previous = self.modifiers;
+        self.modifiers = previous | modifiers;
         self.frame(vec![Self::key_event(key, true, modifiers)]);
         if self.windows.contains_key(&self.focus) {
             self.frame(vec![Self::key_event(key, false, modifiers)]);
         }
+        self.modifiers = previous;
     }
 
     pub fn key(&mut self, key: egui::Key) {

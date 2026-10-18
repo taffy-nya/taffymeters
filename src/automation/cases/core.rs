@@ -692,11 +692,16 @@ fn c06() -> Result<Value, String> {
     )?;
     h.key(egui::Key::Escape);
     check(
+        h.ws.windows().len() == 1 && !h.ws.observation().modules.is_empty(),
+        "idle Escape closed the window",
+    )?;
+    h.key_with(egui::Key::W, egui::Modifiers::COMMAND);
+    check(
         h.ws.windows().is_empty() && h.ws.observation().modules.is_empty(),
-        "idle Escape did not close the window and its modules",
+        "Ctrl+W did not close the window and its modules",
     )?;
     Ok(json!({"spectrum":a.0,"non_channel_modules":non_channel,
-        "escape":"settings window closes itself; idle Escape closes this Workspace window; native close is the adapter's"}))
+        "escape":"settings window closes itself; idle Escape leaves this Workspace window open; Ctrl+W closes it; native close is the adapter's"}))
 }
 
 fn c07() -> Result<Value, String> {

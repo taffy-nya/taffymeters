@@ -9,6 +9,9 @@ mod desktop;
 mod inspect;
 mod instances;
 mod layout;
+mod moving;
+#[cfg(windows)]
+mod native;
 mod persist;
 mod placement;
 mod settings_window;
@@ -37,17 +40,19 @@ use crate::{
 
 pub(crate) use desktop::{DesktopProbe, NativeDesktop};
 #[cfg(feature = "automation")]
-pub(crate) use desktop::{Display, display_at};
+pub(crate) use desktop::{Display, Edge, display_at};
 #[cfg(feature = "automation")]
 pub(crate) use layout::Axis;
 use layout::{Layout, LayoutError};
 pub(crate) use layout::{Side, SplitId};
+#[cfg(feature = "automation")]
+pub(crate) use moving::{MoveRequest, WindowTracker};
 use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
 pub(crate) use settings_window::{SWATCHES, SettingsItem, Tab};
 use window::WindowUiState;
 #[cfg(feature = "automation")]
-pub(crate) use window::{ControlKey, ControlTarget, ResizeEdge};
+pub(crate) use window::{ControlKey, ControlTarget, EdgeLine, ResizeEdge};
 
 /// Initial logical size of the first window.
 pub(crate) const INITIAL_WINDOW_SIZE: Vec2 = vec2(900.0, 420.0);
@@ -355,18 +360,6 @@ struct PendingDetach {
     requested_at: Duration,
 }
 
-/// Desktop placement observed from the native window, in physical pixels.
-#[derive(Clone, Copy, Debug, Default)]
-struct DesktopState {
-    outer: Option<Rect>,
-    /// Position this application commanded and has not seen applied yet.
-    expected: Option<Pos2>,
-    /// The user moved the window and the move has not been snapped yet.
-    moving: bool,
-    /// This window asked the OS to start a native move loop (body drag).
-    native_drag: bool,
-}
-
 pub(crate) struct WindowState {
     layout: Layout,
     active: Option<ModuleInstanceId>,
@@ -389,7 +382,10 @@ pub(crate) struct WindowState {
     initial_resizable: bool,
     pending_detach: Option<PendingDetach>,
     opened: bool,
-    desktop: DesktopState,
+    /// Outer frame observed from the native window, physical pixels.
+    outer: Option<Rect>,
+    /// The desktop tracks the native window: moves go through it (`DesktopProbe`).
+    tracked: bool,
     group: Option<u64>,
     commands: Vec<ViewportCommand>,
     ui: WindowUiState,
@@ -418,7 +414,8 @@ impl WindowState {
             initial_resizable: true,
             pending_detach: None,
             opened: false,
-            desktop: DesktopState::default(),
+            outer: None,
+            tracked: false,
             group: None,
             commands: Vec::new(),
             ui: WindowUiState::default(),
@@ -477,8 +474,11 @@ pub struct Workspace {
     store: Option<WorkspaceStore>,
     /// The session file could not be read; saving must not replace it.
     protected: bool,
-    /// Monitors and pointer state; owned so restoring and saving can place windows.
+    /// Monitors, pointer state and native window moves; owned so restoring and
+    /// saving can place windows.
     desktop: Arc<dyn DesktopProbe + Send + Sync>,
+    /// Groups last told to the desktop (`DesktopProbe::set_groups`).
+    published_groups: Vec<(WindowId, u64)>,
     theme: ThemeSettings,
     /// Colors of the window chrome (global roles).
     chrome: Palette,
@@ -532,6 +532,7 @@ impl Workspace {
             store: None,
             protected: false,
             desktop,
+            published_groups: Vec::new(),
             chrome: theme.global_palette(),
             theme,
             input: InputConfig::default(),
@@ -564,6 +565,10 @@ impl Workspace {
     #[cfg(feature = "automation")]
     pub(crate) fn set_desktop(&mut self, desktop: Arc<dyn DesktopProbe + Send + Sync>) {
         self.desktop = desktop;
+        self.published_groups.clear();
+        for window in self.windows.values_mut() {
+            window.tracked = false;
+        }
     }
 
     /// Drop every Module before stopping capture and the worker.

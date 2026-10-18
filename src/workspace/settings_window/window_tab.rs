@@ -10,13 +10,15 @@ use super::{
 use crate::workspace::{WindowId, Workspace, WorkspaceAction, window::Controls};
 
 impl Workspace {
+    /// Returns whether the Group button is hovered (the windows then outline the
+    /// windows it would add).
     pub(super) fn window_tab(
         &self,
         ui: &mut egui::Ui,
         window_id: WindowId,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
-    ) {
+    ) -> bool {
         let window = &self.windows[&window_id];
         let leaves = window.layout.leaves().len();
         let detail = match leaves {
@@ -67,6 +69,7 @@ impl Workspace {
                 actions.push(WorkspaceAction::ToggleMaximized { window_id });
             }
         });
+        let mut group_hovered = false;
         card(ui, "Group", |ui| {
             let status = if window.group.is_none() {
                 "Not grouped"
@@ -90,6 +93,7 @@ impl Workspace {
                     )
                     .on_disabled_hover_text(unavailable.unwrap_or_default());
                 record(controls, SettingsItem::Group, &response);
+                group_hovered = response.hovered();
                 if response.clicked() {
                     actions.push(WorkspaceAction::GroupTouching { window_id });
                 }
@@ -106,5 +110,6 @@ impl Workspace {
                 actions.push(WorkspaceAction::CloseWindow { window_id });
             }
         });
+        group_hovered
     }
 }

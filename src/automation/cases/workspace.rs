@@ -1,6 +1,6 @@
-//! W01–W10: Workspace / BSP / multi-window behavior through the real Workspace,
+//! W01–W11: Workspace / BSP / multi-window behavior through the real Workspace,
 //! Module factories, manual source and egui events. Native window management, real
-//! DPI changes and the OS move loop are verified separately on a desktop.
+//! DPI changes and the Win32 window moves are verified separately on a desktop.
 
 use std::time::Duration;
 
@@ -12,8 +12,8 @@ use crate::{
     module::MIN_EXTENT,
     modules::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     workspace::{
-        ActionOutcome, ControlKey, FIRST_WINDOW, ModuleInstanceId, MoveTarget, ResizeEdge,
-        SettingsItem, Side, SplitId, Tab, WindowId, Workspace, WorkspaceAction,
+        ActionOutcome, ControlKey, Edge, EdgeLine, FIRST_WINDOW, ModuleInstanceId, MoveTarget,
+        ResizeEdge, SettingsItem, Side, SplitId, Tab, WindowId, Workspace, WorkspaceAction,
     },
 };
 
@@ -24,7 +24,7 @@ use crate::automation::{
 
 type Scenario = fn() -> Result<Value, String>;
 
-pub(super) const CASES: [(&str, Scenario); 10] = [
+pub(super) const CASES: [(&str, Scenario); 11] = [
     ("W01", w01),
     ("W02", w02),
     ("W03", w03),
@@ -35,6 +35,7 @@ pub(super) const CASES: [(&str, Scenario); 10] = [
     ("W08", w08),
     ("W09", w09),
     ("W10", w10),
+    ("W11", w11),
 ];
 
 fn split(
@@ -74,13 +75,6 @@ fn subscriptions_settle(ws: &Workspace, expected: u64) -> Result<(), String> {
     wait_until(deadline(), &format!("{expected} subscriptions"), || {
         (handle.metrics().subscriptions == expected).then_some(())
     })
-}
-
-fn count_start_drag(commands: &[ViewportCommand]) -> usize {
-    commands
-        .iter()
-        .filter(|command| matches!(command, ViewportCommand::StartDrag))
-        .count()
 }
 
 fn new_window(outcome: ActionOutcome) -> Result<WindowId, String> {
@@ -223,7 +217,7 @@ fn w02() -> Result<Value, String> {
     let (split_id, _, _) = root_split(&h.ws, 0)?;
     let divider = ControlKey::Divider(split_id);
     let y = 210.0;
-    h.take_commands(FIRST_WINDOW);
+    let moves = h.desktop.moves_started();
     h.drag(
         divider,
         &[pos2(470.0, y), pos2(523.0, y)],
@@ -239,8 +233,8 @@ fn w02() -> Result<Value, String> {
         ),
     )?;
     check(
-        count_start_drag(&h.take_commands(FIRST_WINDOW)) == 0,
-        "divider drag also started a window drag",
+        h.desktop.moves_started() == moves,
+        "divider drag also started a window move",
     )?;
     h.drag(
         divider,
@@ -309,17 +303,17 @@ fn w02() -> Result<Value, String> {
         (reset - 0.5).abs() < 1e-6 && !reset_manual,
         "double click did not reset the split",
     )?;
-    h.take_commands(FIRST_WINDOW);
+    let moves = h.desktop.moves_started();
     h.drag(
         ControlKey::LeafBody(a),
         &[pos2(120.0, 120.0), pos2(160.0, 140.0)],
         egui::Modifiers::NONE,
         None,
     )?;
-    let commands = h.take_commands(FIRST_WINDOW);
+    let started = h.desktop.moves_started() - moves;
     check(
-        count_start_drag(&commands) == 1 && (root_split(&h.ws, 0)?.1 - 0.5).abs() < 1e-6,
-        &format!("body drag should start exactly one native move: {commands:?}"),
+        started == 1 && (root_split(&h.ws, 0)?.1 - 0.5).abs() < 1e-6,
+        &format!("body drag should start exactly one window move: {started}"),
     )?;
     Ok(
         json!({"grid_position":528,"alt_position":601,"far_position":900.0 - MIN_EXTENT,
@@ -337,7 +331,7 @@ fn w03() -> Result<Value, String> {
     let mut h = Harness::new(ws);
     h.frame(vec![]);
     let before = leaves(&h.ws, FIRST_WINDOW);
-    h.take_commands(FIRST_WINDOW);
+    let moves = h.desktop.moves_started();
     let zone = ControlKey::SplitZone {
         instance_id: a,
         side: Side::Right,
@@ -349,10 +343,9 @@ fn w03() -> Result<Value, String> {
         egui::Modifiers::NONE,
         None,
     )?;
-    let commands = h.take_commands(FIRST_WINDOW);
     check(
-        leaves(&h.ws, FIRST_WINDOW) == before && count_start_drag(&commands) == 1,
-        &format!("drag on a split entry split or did not move the window: {commands:?}"),
+        leaves(&h.ws, FIRST_WINDOW) == before && h.desktop.moves_started() == moves + 1,
+        "drag on a split entry split or did not move the window",
     )?;
     let mut resize = Vec::new();
     for edge in [
@@ -362,6 +355,7 @@ fn w03() -> Result<Value, String> {
     ] {
         let rect = h.locate(&ControlKey::Resize(edge))?.rect;
         let from = rect.center();
+        let moves = h.desktop.moves_started();
         h.drag(
             ControlKey::Resize(edge),
             &[from + vec2(-15.0, -15.0), from + vec2(-30.0, -30.0)],
@@ -374,7 +368,7 @@ fn w03() -> Result<Value, String> {
             .filter(|command| matches!(command, ViewportCommand::BeginResize(_)))
             .collect();
         check(
-            resizes.len() == 1 && count_start_drag(&commands) == 0,
+            resizes.len() == 1 && h.desktop.moves_started() == moves,
             &format!(
                 "{edge:?} gesture had {} owners: {commands:?}",
                 resizes.len()
@@ -403,7 +397,9 @@ fn w03() -> Result<Value, String> {
         leaves(&h.ws, FIRST_WINDOW) == before,
         "a click on the divider over a split entry split the leaf",
     )?;
-    Ok(json!({"split_entry_drag":"StartDrag only","resize":resize,"divider_over_entry":"divider"}))
+    Ok(
+        json!({"split_entry_drag":"window move only","resize":resize,"divider_over_entry":"divider"}),
+    )
 }
 
 /// Detach: the instance moves only once the new window shows its first frame;
@@ -717,7 +713,7 @@ fn w06() -> Result<Value, String> {
         "closing the root window stopped another window",
     )?;
     h.focus = third;
-    h.key(egui::Key::Escape);
+    h.key_with(egui::Key::W, egui::Modifiers::COMMAND);
     check(
         h.ws.windows().is_empty(),
         "closing the last window left windows",
@@ -737,8 +733,10 @@ fn w06() -> Result<Value, String> {
     )
 }
 
-/// Desktop placement in physical pixels across scales: snapping, grouping and group
-/// movement; logical hit testing and grid at 2x; scale change cancels a divider drag.
+/// Desktop placement in physical pixels across scales: snapping while dragged, the
+/// divider between touching windows, grouping (outlined on the Window tab) and
+/// group movement; logical hit testing and grid at 2x; scale change cancels a
+/// divider drag.
 fn w07() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -755,34 +753,94 @@ fn w07() -> Result<Value, String> {
         leaves(&h.ws, second) == vec![b],
         "detach to a 2x window failed",
     )?;
-    // Native move of the 2x window close to the root's right edge, then release.
-    h.desktop.set_button_down(true);
-    h.window_mut(second)?.position = pos2(1007.0, 120.0);
-    h.frame_window(second, vec![])?;
-    check(
-        h.window(second)?.position == pos2(1007.0, 120.0),
-        "snapped while the button was still held",
-    )?;
-    h.desktop.set_button_down(false);
-    h.frame_window(second, vec![])?;
-    let snapped = h.window(second)?.position;
-    check(
-        snapped == pos2(1000.0, 100.0),
-        &format!("2x window did not snap to the 1x neighbor in physical pixels: {snapped:?}"),
-    )?;
+    // Drag the 2x window close to the root's right edge: it snaps while the button
+    // is still held, in physical pixels; Alt moves it freely.
     h.focus = second;
+    let start = h.window(second)?.position;
+    let grab = h.grab(ControlKey::LeafBody(b))?;
+    let near = grab + (pos2(1007.0, 120.0) - start);
+    h.move_pointer(near, false)?;
+    check(
+        h.window(second)?.position == pos2(1000.0, 100.0),
+        &format!(
+            "2x window did not snap to the 1x neighbor while dragged: {:?}",
+            h.window(second)?.position
+        ),
+    )?;
+    // Both windows draw the divider in the passes the move ran.
+    let dividers = |h: &Harness, window| edge_lines(h, window, EdgeLine::Divider);
+    check(
+        dividers(&h, FIRST_WINDOW) == [(Edge::Right, 100.0, 520.0)]
+            && dividers(&h, second) == [(Edge::Left, 100.0, 520.0)],
+        &format!(
+            "snapped windows draw no divider: root {:?}, 2x {:?}",
+            dividers(&h, FIRST_WINDOW),
+            dividers(&h, second)
+        ),
+    )?;
+    h.move_pointer(near, true)?;
+    check(
+        h.window(second)?.position == pos2(1007.0, 120.0)
+            && dividers(&h, FIRST_WINDOW).is_empty()
+            && dividers(&h, second).is_empty(),
+        "Alt did not move freely, or apart windows kept a divider",
+    )?;
+    h.move_pointer(near, false)?;
+    h.release()?;
+    for _ in 0..3 {
+        h.frame_all()?;
+    }
+    check(
+        h.window(second)?.position == pos2(1000.0, 100.0)
+            && h.window(FIRST_WINDOW)?.position == pos2(100.0, 100.0),
+        "windows moved after the release",
+    )?;
+    let outline = |h: &Harness, window| edge_lines(h, window, EdgeLine::Outline);
+    check(
+        outline(&h, FIRST_WINDOW).is_empty() && outline(&h, second).is_empty(),
+        "windows outlined without the Window tab",
+    )?;
     h.settings(
         ControlKey::LeafBody(b),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::Group],
     )?;
+    h.frame_all()?;
     let o = h.ws.observation();
     let group = o.window(second).and_then(|w| w.group);
     check(
         group.is_some() && o.window(FIRST_WINDOW).and_then(|w| w.group) == group,
         "touching windows were not grouped",
     )?;
+    // The Window tab outlines the group: its outer boundary, not the shared edge.
+    check(
+        outline(&h, FIRST_WINDOW)
+            == [
+                (Edge::Left, 100.0, 520.0),
+                (Edge::Top, 100.0, 1000.0),
+                (Edge::Bottom, 100.0, 1000.0),
+            ]
+            && outline(&h, second)
+                == [
+                    (Edge::Left, 520.0, 940.0),
+                    (Edge::Top, 1000.0, 1900.0),
+                    (Edge::Right, 100.0, 940.0),
+                    (Edge::Bottom, 1000.0, 1900.0),
+                ],
+        &format!(
+            "group outline: root {:?}, 2x {:?}",
+            outline(&h, FIRST_WINDOW),
+            outline(&h, second)
+        ),
+    )?;
+    h.in_settings(&[SettingsItem::Tab(Tab::Module)])?;
+    h.frame_all()?;
+    check(
+        outline(&h, FIRST_WINDOW).is_empty() && outline(&h, second).is_empty(),
+        "the outline stayed after leaving the Window tab",
+    )?;
     // Locking the member keeps the whole group in place: neither body starts a
-    // native move until it is unlocked.
+    // move until it is unlocked.
+    h.focus = second;
     h.settings(
         ControlKey::LeafBody(b),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
@@ -790,7 +848,7 @@ fn w07() -> Result<Value, String> {
     let mut locked_drags = Vec::new();
     for (window, leaf) in [(second, b), (FIRST_WINDOW, a)] {
         h.focus = window;
-        h.take_commands(window);
+        let moves = h.desktop.moves_started();
         let start = h.locate(&ControlKey::LeafBody(leaf))?.rect.center();
         h.drag(
             ControlKey::LeafBody(leaf),
@@ -798,38 +856,21 @@ fn w07() -> Result<Value, String> {
             egui::Modifiers::NONE,
             None,
         )?;
-        locked_drags.push(count_start_drag(&h.take_commands(window)));
+        locked_drags.push(h.desktop.moves_started() - moves);
     }
     check(
         h.ws.observation().window(second).is_some_and(|w| w.locked) && locked_drags == [0, 0],
-        &format!("a locked group still started native moves: {locked_drags:?}"),
+        &format!("a locked group still started moves: {locked_drags:?}"),
     )?;
     h.focus = second;
     h.settings(
         ControlKey::LeafBody(b),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
     )?;
-    h.take_commands(second);
-    let start = h.locate(&ControlKey::LeafBody(b))?.rect.center();
-    h.drag(
-        ControlKey::LeafBody(b),
-        &[start + vec2(20.0, 10.0), start + vec2(40.0, 20.0)],
-        egui::Modifiers::NONE,
-        None,
-    )?;
-    let unlocked_drags = count_start_drag(&h.take_commands(second));
-    check(
-        unlocked_drags == 1,
-        &format!("an unlocked window did not start a native move: {unlocked_drags}"),
-    )?;
-    // Moving the root moves the member by the same physical delta.
-    h.desktop.set_button_down(true);
-    h.window_mut(FIRST_WINDOW)?.position = pos2(150.0, 130.0);
-    h.frame_window(FIRST_WINDOW, vec![])?;
-    h.frame_window(second, vec![])?;
-    h.desktop.set_button_down(false);
-    h.frame_window(FIRST_WINDOW, vec![])?;
-    h.frame_window(second, vec![])?;
+    // Dragging the root moves the member by the same physical delta, at once.
+    h.focus = FIRST_WINDOW;
+    let grab = h.grab(ControlKey::LeafBody(a))?;
+    h.move_pointer(grab + vec2(50.0, 30.0), false)?;
     check(
         h.window(second)?.position == pos2(1050.0, 130.0)
             && h.window(FIRST_WINDOW)?.position == pos2(150.0, 130.0),
@@ -839,6 +880,18 @@ fn w07() -> Result<Value, String> {
             h.window(second)?.position
         ),
     )?;
+    h.release()?;
+    // Another program moving the root takes the member along too.
+    h.external_move(FIRST_WINDOW, pos2(200.0, 160.0))?;
+    h.frame_all()?;
+    check(
+        h.window(second)?.position == pos2(1100.0, 160.0),
+        &format!(
+            "group did not follow an external move: {:?}",
+            h.window(second)?.position
+        ),
+    )?;
+    h.focus = second;
     h.settings(
         ControlKey::LeafBody(b),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::LeaveGroup],
@@ -847,14 +900,14 @@ fn w07() -> Result<Value, String> {
         h.ws.observation().windows.iter().all(|w| w.group.is_none()),
         "Leave group left a one-member group",
     )?;
-    h.desktop.set_button_down(true);
-    h.window_mut(FIRST_WINDOW)?.position = pos2(400.0, 300.0);
-    h.frame_window(FIRST_WINDOW, vec![])?;
-    h.desktop.set_button_down(false);
-    h.frame_window(FIRST_WINDOW, vec![])?;
-    h.frame_window(second, vec![])?;
+    h.external_move(FIRST_WINDOW, pos2(400.0, 300.0))?;
+    h.focus = FIRST_WINDOW;
+    let grab = h.grab(ControlKey::LeafBody(a))?;
+    h.move_pointer(grab + vec2(-100.0, 0.0), false)?;
+    h.release()?;
     check(
-        h.window(second)?.position == pos2(1050.0, 130.0),
+        h.window(second)?.position == pos2(1100.0, 160.0)
+            && h.window(FIRST_WINDOW)?.position == pos2(300.0, 300.0),
         "ungrouped window followed",
     )?;
     // Logical hit testing and grid on a 2x window.
@@ -908,8 +961,9 @@ fn w07() -> Result<Value, String> {
         &format!("scale change kept a stale drag: {after} vs {start}"),
     )?;
     Ok(
-        json!({"snap_physical":[1000,100],"group_follow":[1050,130],"ungrouped":"independent",
-        "locked_group_start_drag":[0,0],"unlocked_start_drag":1,
+        json!({"snap_while_dragged":[1000,100],"divider":"both sides of the shared edge",
+        "group_outline":"Window tab only","group_follow":[1050,130],"external_follow":[1100,160],
+        "ungrouped":"independent","locked_group_moves":[0,0],
         "grid_2x_logical":528,"scale_change":"drag canceled"}),
     )
 }
@@ -1247,6 +1301,7 @@ fn w10() -> Result<Value, String> {
     // Every left gesture, the wheel and pinch change nothing.
     let before = h.ws.observation().window(FIRST_WINDOW).cloned();
     let view_before = view(&h, a)?;
+    let moves = h.desktop.moves_started();
     raw_clicks(&mut h, entry, 1);
     raw_clicks(&mut h, body_b, 1);
     raw_clicks(&mut h, divider, 2);
@@ -1257,7 +1312,10 @@ fn w10() -> Result<Value, String> {
     let commands = h.take_commands(FIRST_WINDOW);
     let after = h.ws.observation().window(FIRST_WINDOW).cloned();
     check(
-        after == before && view(&h, a)? == view_before && gestures(&commands) == 0,
+        after == before
+            && view(&h, a)? == view_before
+            && gestures(&commands) == 0
+            && h.desktop.moves_started() == moves,
         &format!(
             "a locked window reacted to the left button, wheel or pinch: \
              {before:?} -> {after:?}, commands {commands:?}"
@@ -1303,4 +1361,130 @@ fn w10() -> Result<Value, String> {
         "unlocked": {"resizable": true, "chrome": registered, "selected": selected.map(|id| id.0),
                      "ratio": moved_ratio, "resizes": resizes},
     }))
+}
+
+/// Lines a window's last pass drew along its frame, of one kind.
+fn edge_lines(h: &Harness, window: WindowId, line: EdgeLine) -> Vec<(Edge, f32, f32)> {
+    h.ws.observation()
+        .window(window)
+        .map(|w| {
+            w.edges
+                .iter()
+                .filter(|e| e.line == line)
+                .map(|e| (e.edge, e.start, e.end))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A group moves as one: the Window tab's Group button previews the windows it
+/// would add; dragged past the work area the group stops with every member still
+/// reachable; Escape puts it back; it snaps to the work area while dragged and
+/// stays put after the release; a group left off every monitor comes back as one.
+fn w11() -> Result<Value, String> {
+    let (mut ws, _driver) = workspace()?;
+    let a = first_leaf(&ws)?;
+    let b = split(&mut ws, a, Side::Right)?;
+    let c = split(&mut ws, b, Side::Below)?;
+    let mut h = Harness::new(ws);
+    h.frame(vec![]);
+    let detach = |h: &mut Harness, instance_id| -> Result<WindowId, String> {
+        let window = new_window(action(
+            &mut h.ws,
+            WorkspaceAction::DetachModule { instance_id },
+        )?)?;
+        h.frame_all()?;
+        Ok(window)
+    };
+    let right = detach(&mut h, b)?;
+    let below = detach(&mut h, c)?;
+    // The root (900×420) at (100, 100); `right` (450×210) touches its right edge,
+    // `below` stands apart.
+    h.window_mut(right)?.position = pos2(1000.0, 100.0);
+    h.window_mut(below)?.position = pos2(100.0, 700.0);
+    h.frame_all()?;
+    h.frame_all()?;
+    let positions = |h: &Harness| -> Result<[Pos2; 3], String> {
+        Ok([
+            h.window(FIRST_WINDOW)?.position,
+            h.window(right)?.position,
+            h.window(below)?.position,
+        ])
+    };
+
+    // Hovering Group previews the window it would add; grouping keeps the outline.
+    h.focus = FIRST_WINDOW;
+    h.settings(ControlKey::LeafBody(a), &[SettingsItem::Tab(Tab::Window)])?;
+    h.focus = SETTINGS;
+    h.point_at(ControlKey::Settings(SettingsItem::Group))?;
+    h.frame_all()?;
+    let previewed = [
+        !edge_lines(&h, FIRST_WINDOW, EdgeLine::Outline).is_empty(),
+        !edge_lines(&h, right, EdgeLine::Candidate).is_empty(),
+        edge_lines(&h, below, EdgeLine::Candidate).is_empty()
+            && edge_lines(&h, below, EdgeLine::Outline).is_empty(),
+    ];
+    check(
+        previewed == [true, true, true],
+        &format!("Group hover preview (root outlined, right previewed, below not): {previewed:?}"),
+    )?;
+    h.in_settings(&[SettingsItem::Group])?;
+    h.frame_all()?;
+    let o = h.ws.observation();
+    check(
+        o.window(right).and_then(|w| w.group).is_some()
+            && o.window(right).and_then(|w| w.group)
+                == o.window(FIRST_WINDOW).and_then(|w| w.group)
+            && o.window(below).and_then(|w| w.group).is_none()
+            && !edge_lines(&h, right, EdgeLine::Outline).is_empty(),
+        "Group did not join the touching window, or its outline is missing",
+    )?;
+
+    // Far past the right edge of the work area: the group stops with `right`
+    // 32 px on screen, the members exactly as far apart as before.
+    h.focus = FIRST_WINDOW;
+    let grab = h.grab(ControlKey::LeafBody(a))?;
+    h.move_pointer(grab + vec2(3000.0, 0.0), false)?;
+    let held = positions(&h)?;
+    check(
+        held[0] == pos2(988.0, 100.0) && held[1] == pos2(1888.0, 100.0),
+        &format!("group past the edge: {held:?}"),
+    )?;
+    // Escape puts the group back.
+    h.cancel_move()?;
+    h.release()?;
+    check(
+        positions(&h)? == [pos2(100.0, 100.0), pos2(1000.0, 100.0), pos2(100.0, 700.0)],
+        &format!("Escape did not put the group back: {:?}", positions(&h)?),
+    )?;
+
+    // 10 px below the work area's top: snapped there while held, and nothing moves
+    // after the release.
+    let grab = h.grab(ControlKey::LeafBody(a))?;
+    h.move_pointer(grab + vec2(0.0, -90.0), false)?;
+    let snapped = positions(&h)?;
+    h.release()?;
+    for _ in 0..5 {
+        h.frame_all()?;
+    }
+    let settled = positions(&h)?;
+    check(
+        snapped == [pos2(100.0, 0.0), pos2(1000.0, 0.0), pos2(100.0, 700.0)] && settled == snapped,
+        &format!("snap to the work area: held {snapped:?}, settled {settled:?}"),
+    )?;
+
+    // The group's monitor is gone: it comes back as one.
+    h.window_mut(FIRST_WINDOW)?.position = pos2(-3000.0, 0.0);
+    h.window_mut(right)?.position = pos2(-2100.0, 0.0);
+    h.frame_all()?;
+    h.frame_all()?;
+    let rescued = positions(&h)?;
+    check(
+        rescued == [pos2(0.0, 0.0), pos2(900.0, 0.0), pos2(100.0, 700.0)],
+        &format!("group not brought back as one: {rescued:?}"),
+    )?;
+    Ok(json!({"preview":"Group hover outlines the touching window",
+        "past_edge":[[held[0].x,held[0].y],[held[1].x,held[1].y]],"escape":"back to start",
+        "snap_top":[[snapped[0].x,snapped[0].y],[snapped[1].x,snapped[1].y]],
+        "rescued":[[rescued[0].x,rescued[0].y],[rescued[1].x,rescued[1].y]]}))
 }

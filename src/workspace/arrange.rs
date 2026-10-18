@@ -171,7 +171,7 @@ impl Workspace {
             .map_or(INITIAL_WINDOW_SIZE, |rect| rect.size())
             .max(self.module_min_size(instance_id));
         let ppp = source.pixels_per_point;
-        let position = source.desktop.outer.map(|outer| {
+        let position = source.outer.map(|outer| {
             let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
             pos2(physical.x / ppp, physical.y / ppp)
         });

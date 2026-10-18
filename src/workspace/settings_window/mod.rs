@@ -174,6 +174,9 @@ pub(crate) struct SettingsWindow {
     /// last pass: Escape belongs to it. egui drops the focus on Escape before the
     /// next pass runs, so the pass that sees Escape cannot ask egui itself.
     text_focus: bool,
+    /// What the Workspace windows outline for this window (see
+    /// `window_tab_target`) as of the last pass.
+    highlight: Option<(WindowId, bool)>,
     /// Builder inputs stay fixed while the window lives.
     initial_position: Option<Pos2>,
     /// Distinguishes each opening: a reopened window is a new viewport that starts
@@ -200,6 +203,7 @@ impl SettingsWindow {
             confirm_delete: None,
             notices_copied: false,
             text_focus: false,
+            highlight: None,
             initial_position,
             opening,
             placed: false,
@@ -290,7 +294,7 @@ impl Workspace {
         }
         // Beside the source window, in logical points of its scale; a position off
         // every monitor is corrected on the first frame.
-        let position = source.desktop.outer.map(|outer| {
+        let position = source.outer.map(|outer| {
             let ppp = source.pixels_per_point;
             pos2((outer.max.x + SETTINGS_GAP_PX) / ppp, outer.min.y / ppp)
         });
@@ -322,6 +326,12 @@ impl Workspace {
             .and_then(|id| self.window_of(id))
             .or(settings.window.filter(|id| self.windows.contains_key(id)));
         (instance, window)
+    }
+
+    /// While the Window tab is open: the window it edits, and whether its Group
+    /// button is hovered. The Workspace windows outline what these affect.
+    pub(super) fn window_tab_target(&self) -> Option<(WindowId, bool)> {
+        self.settings.as_ref()?.highlight
     }
 
     /// One UI pass of the settings window inside its own viewport.
@@ -369,6 +379,7 @@ impl Workspace {
             actions.push(WorkspaceAction::CloseSettings);
         }
         let mut controls = Controls::default();
+        let mut group_hovered = false;
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(10));
         frame.show(ui, |ui| {
             ui.set_min_size(ui.available_size());
@@ -425,7 +436,10 @@ impl Workspace {
                         }
                     },
                     Tab::Window => match window {
-                        Some(window) => self.window_tab(ui, window, &mut controls, &mut actions),
+                        Some(window) => {
+                            group_hovered =
+                                self.window_tab(ui, window, &mut controls, &mut actions);
+                        }
                         None => {
                             ui.label(RichText::new("No window selected").weak());
                         }
@@ -455,12 +469,20 @@ impl Workspace {
         for command in settings.commands.drain(..) {
             ctx.send_viewport_cmd(command);
         }
+        // The Workspace windows draw the Window tab's outline from this; they ran
+        // before this pass, so a change needs another host pass.
+        let highlight = window
+            .filter(|_| settings.tab == Tab::Window)
+            .map(|window| (window, group_hovered));
+        let mut repaint = settings.highlight != highlight;
+        settings.highlight = highlight;
         self.settings = Some(settings);
         let windows_before = self.windows.len();
+        repaint |= !actions.is_empty();
         for action in actions {
             let _ = self.apply_action(action);
         }
-        if windows_before != self.windows.len() || self.settings.is_none() {
+        if repaint || windows_before != self.windows.len() || self.settings.is_none() {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }

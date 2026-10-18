@@ -10,6 +10,7 @@ use eframe::egui::{
 
 use super::{
     ModuleInstanceId, MoveTarget, Side, SplitId, WindowId, Workspace, WorkspaceAction,
+    desktop::{self, Edge},
     layout::{Axis, DividerGeometry},
     settings_window::SettingsItem,
 };
@@ -30,8 +31,6 @@ pub(crate) const RESIZE_EDGE: f32 = 6.0;
 pub(crate) const RESIZE_CORNER: f32 = 12.0;
 /// Poll interval for state that changes without new audio data or input.
 const STATE_POLL: Duration = Duration::from_millis(250);
-/// Poll interval while a native move may still be in progress.
-const MOVE_POLL: Duration = Duration::from_millis(50);
 /// How long a left press in a locked window shows the "locked" hint.
 const LOCK_HINT: Duration = Duration::from_secs(2);
 
@@ -247,6 +246,37 @@ pub(crate) struct DividerDrag {
     cancelled: bool,
 }
 
+/// A line drawn along a window's frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EdgeLine {
+    /// Another window touches this edge.
+    Divider,
+    /// The window moves with the one the settings' Window tab edits.
+    Outline,
+    /// Grouping (its button hovered) would add the window.
+    Candidate,
+}
+
+impl EdgeLine {
+    fn color(self, chrome: &crate::theme::Palette) -> Color32 {
+        match self {
+            Self::Divider => color32(chrome.color(ColorRole::Divider)),
+            Self::Outline => color32(chrome.color(ColorRole::Accent)),
+            Self::Candidate => color32(chrome.color(ColorRole::Accent)).gamma_multiply(0.5),
+        }
+    }
+}
+
+/// A line one pass drew along the window's frame (physical span along `edge`).
+#[cfg(any(test, feature = "automation"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DrawnEdge {
+    pub(crate) line: EdgeLine,
+    pub(crate) edge: Edge,
+    pub(crate) start: f32,
+    pub(crate) end: f32,
+}
+
 #[derive(Default)]
 pub(crate) struct WindowUiState {
     pub(crate) divider_drag: Option<DividerDrag>,
@@ -262,6 +292,9 @@ pub(crate) struct WindowUiState {
     frame_token: u64,
     #[cfg(any(test, feature = "automation"))]
     pass_token: u64,
+    /// Lines the last pass drew along the frame.
+    #[cfg(any(test, feature = "automation"))]
+    pub(crate) edges: Vec<DrawnEdge>,
 }
 
 /// Responses of probe-visible controls collected during one pass.
@@ -502,14 +535,11 @@ impl Workspace {
                 viewport.minimized.unwrap_or(false),
             )
         });
-        let wake = self.observe_placement(window_id, outer, pixels_per_point, maximized, minimized);
-        if !wake.is_empty() {
+        if self.observe_placement(window_id, outer, pixels_per_point, maximized, minimized) {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+        self.publish_groups();
         let window = self.windows.get_mut(&window_id).expect("checked above");
-        if window.desktop.moving {
-            ctx.request_repaint_after_for(MOVE_POLL, egui::ViewportId::ROOT);
-        }
         if let Some(drag) = window.ui.divider_drag
             && (drag.pixels_per_point - pixels_per_point).abs() > f32::EPSILON
         {
@@ -560,6 +590,7 @@ impl Workspace {
                 &mut actions,
             );
         }
+        self.window_edges(window_id, ui, rect);
         if self.move_source.is_some() {
             self.move_targets(window_id, ui, rect, &mut controls, &mut actions);
         }
@@ -629,9 +660,6 @@ impl Workspace {
                 let _ = self.apply_action(WorkspaceAction::CancelMove);
             } else if let Some(pending) = pending_detach {
                 let _ = self.apply_action(WorkspaceAction::CancelDetach { window_id: pending });
-            } else {
-                let _ = self.apply_action(WorkspaceAction::CloseWindow { window_id });
-                return;
             }
         }
         if close {
@@ -730,10 +758,11 @@ impl Workspace {
             if body.drag_started_by(PointerButton::Primary)
                 && !picking
                 && !self.drag_locked(window_id)
-                && let Some(window) = self.windows.get_mut(&window_id)
             {
-                window.commands.push(ViewportCommand::StartDrag);
-                window.desktop.native_drag = true;
+                let press = ui
+                    .input(|input| input.pointer.press_origin())
+                    .unwrap_or(leaf_rect.center());
+                self.start_move(window_id, press);
             }
             if !picking && body.secondary_clicked() {
                 // Right click edits the module in the settings window.
@@ -837,16 +866,132 @@ impl Workspace {
         }
 
         self.dividers(window_id, ui, &geometry.dividers, locked, controls, actions);
-
-        if self.windows[&window_id].group.is_some() {
-            ui.painter().rect_stroke(
-                rect,
-                0.0,
-                Stroke::new(1.0_f32, color32(self.chrome.color(ColorRole::Accent))),
-                StrokeKind::Inside,
-            );
-        }
         repaint
+    }
+
+    /// Lines along this window's frame. Where another window touches it, the
+    /// divider Modules have between them (each window draws its half of the
+    /// width). While the settings' Window tab is open, the outline of the windows
+    /// that move with the window it edits, and, dimmer while its Group button is
+    /// hovered, of the windows grouping would add; edges they share are dividers.
+    fn window_edges(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
+        #[cfg(any(test, feature = "automation"))]
+        let mut drawn = Vec::new();
+        let window = &self.windows[&window_id];
+        if let Some(own) = window.outer.filter(|_| !window.maximized) {
+            let ppp = window.pixels_per_point;
+            let painter = ui.painter();
+            // One logical point in whole pixels, as the dividers inside a window.
+            let width = ppp.round().max(1.0);
+            let strip = |edge: Edge, start: f32, end: f32, pixels: f32| {
+                let thickness = pixels / ppp;
+                let x = |value: f32| rect.min.x + (value - own.min.x) / ppp;
+                let y = |value: f32| rect.min.y + (value - own.min.y) / ppp;
+                match edge {
+                    Edge::Left => Rect::from_min_max(
+                        pos2(rect.min.x, y(start)),
+                        pos2(rect.min.x + thickness, y(end)),
+                    ),
+                    Edge::Right => Rect::from_min_max(
+                        pos2(rect.max.x - thickness, y(start)),
+                        pos2(rect.max.x, y(end)),
+                    ),
+                    Edge::Top => Rect::from_min_max(
+                        pos2(x(start), rect.min.y),
+                        pos2(x(end), rect.min.y + thickness),
+                    ),
+                    Edge::Bottom => Rect::from_min_max(
+                        pos2(x(start), rect.max.y - thickness),
+                        pos2(x(end), rect.max.y),
+                    ),
+                }
+            };
+            let this: &Self = self;
+            let neighbors = move || {
+                this.windows.iter().filter_map(move |(id, other)| {
+                    (*id != window_id && !other.minimized && !other.maximized)
+                        .then(|| this.frame_of(*id).map(|frame| (*id, frame)))
+                        .flatten()
+                })
+            };
+            let divider = EdgeLine::Divider.color(&self.chrome);
+            for (_, other) in neighbors() {
+                let Some((edge, start, end)) = desktop::shared_edge(own, other) else {
+                    continue;
+                };
+                // The left / top window takes the odd pixel.
+                let pixels = if matches!(edge, Edge::Right | Edge::Bottom) {
+                    (width / 2.0).ceil()
+                } else {
+                    (width / 2.0).floor()
+                };
+                if pixels > 0.0 {
+                    painter.rect_filled(strip(edge, start, end, pixels), 0.0, divider);
+                }
+                #[cfg(any(test, feature = "automation"))]
+                drawn.push(DrawnEdge {
+                    line: EdgeLine::Divider,
+                    edge,
+                    start,
+                    end,
+                });
+            }
+            let highlight = &self.window_highlight();
+            if let Some(line) = highlight(window_id) {
+                let color = line.color(&self.chrome);
+                for edge in Edge::ALL {
+                    let covered = || {
+                        neighbors()
+                            .filter(move |(id, _)| highlight(*id).is_some())
+                            .filter_map(move |(_, other)| desktop::shared_edge(own, other))
+                            .filter(move |(side, ..)| *side == edge)
+                            .map(|(_, start, end)| (start, end))
+                    };
+                    desktop::uncovered(edge.span(own), covered, |start, end| {
+                        painter.rect_filled(strip(edge, start, end, width), 0.0, color);
+                        #[cfg(any(test, feature = "automation"))]
+                        drawn.push(DrawnEdge {
+                            line,
+                            edge,
+                            start,
+                            end,
+                        });
+                    });
+                }
+            }
+        }
+        #[cfg(any(test, feature = "automation"))]
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.ui.edges = drawn;
+        }
+    }
+
+    /// Which outline a window gets: the windows that move with the one the
+    /// settings' Window tab edits, and, while its Group button is hovered, the
+    /// windows grouping would add.
+    fn window_highlight(&self) -> impl Fn(WindowId) -> Option<EdgeLine> + '_ {
+        let target = self.window_tab_target();
+        move |id| {
+            let (target, group_hovered) = target?;
+            let edited = self.windows.get(&target)?;
+            let window = self.windows.get(&id)?;
+            if id == target || (edited.group.is_some() && window.group == edited.group) {
+                return Some(EdgeLine::Outline);
+            }
+            let edited_frame = self.frame_of(target);
+            let touches = |other: WindowId| {
+                edited_frame
+                    .zip(self.frame_of(other))
+                    .is_some_and(|(a, b)| desktop::touching(a, b))
+            };
+            let joins = touches(id)
+                || window.group.is_some_and(|group| {
+                    self.windows
+                        .iter()
+                        .any(|(other_id, other)| other.group == Some(group) && touches(*other_id))
+                });
+            (group_hovered && joins).then_some(EdgeLine::Candidate)
+        }
     }
 
     /// Draw the dividers; outside a locked window they also take hover, drags and
@@ -1003,12 +1148,12 @@ impl Workspace {
             },
         );
         controls.record(ControlKey::EmptyBody, &body);
-        if body.drag_started_by(PointerButton::Primary)
-            && !picking
-            && !self.drag_locked(window_id)
-            && let Some(window) = self.windows.get_mut(&window_id)
+        if body.drag_started_by(PointerButton::Primary) && !picking && !self.drag_locked(window_id)
         {
-            window.commands.push(ViewportCommand::StartDrag);
+            let press = ui
+                .input(|input| input.pointer.press_origin())
+                .unwrap_or(rect.center());
+            self.start_move(window_id, press);
         }
         if self.windows[&window_id].pending_detach.is_some() {
             ui.painter().text(

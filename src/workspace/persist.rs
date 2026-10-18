@@ -196,7 +196,7 @@ impl Workspace {
     /// Physical outer frame of a window: where it is, else where it will open,
     /// else centered on `fallback`.
     fn outer_frame(window: &WindowState, fallback: &Display) -> Rect {
-        window.desktop.outer.unwrap_or_else(|| {
+        window.outer.unwrap_or_else(|| {
             let ppp = window.pixels_per_point;
             match window.initial_position {
                 Some(position) => Rect::from_min_size(position * ppp, window.content_size * ppp),

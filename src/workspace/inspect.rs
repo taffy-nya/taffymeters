@@ -53,6 +53,10 @@ pub(crate) struct ObservedWindow {
     pub(crate) pending_detach: Option<ModuleInstanceId>,
     pub(crate) min_size: Vec2,
     pub(crate) divider_drag: Option<SplitId>,
+    /// Outer frame, physical pixels.
+    pub(crate) outer: Option<Rect>,
+    /// Lines the last pass drew along the frame.
+    pub(crate) edges: Vec<super::window::DrawnEdge>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -142,6 +146,8 @@ impl Workspace {
                         pending_detach: window.pending_detach.map(|p| p.instance_id),
                         min_size: self.window_min_size(window),
                         divider_drag: window.ui.divider_drag.map(|drag| drag.split_id),
+                        outer: window.outer,
+                        edges: window.ui.edges.clone(),
                     }
                 })
                 .collect(),

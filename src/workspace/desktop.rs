@@ -5,6 +5,8 @@
 
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
+use super::{WindowId, moving::MoveRequest};
+
 /// Snap distance in logical points of the window being moved.
 pub(crate) const SNAP_DISTANCE_POINTS: f32 = 12.0;
 /// Two outer frames closer than this (physical pixels) count as touching.
@@ -13,7 +15,10 @@ pub(crate) const TOUCH_TOLERANCE_PX: f32 = 2.0;
 /// of a smaller window) on a monitor to count as reachable.
 pub(crate) const MIN_VISIBLE_POINTS: f32 = 32.0;
 
-/// Facts about the desktop the egui viewport info does not carry.
+/// The desktop beyond what egui's viewport info carries: monitors, the mouse
+/// button, and moving the Workspace windows' native windows. Moves go through
+/// here so a whole group moves at once, synchronously with the pointer; a
+/// desktop that cannot (`false`) leaves them to egui's viewport commands.
 pub(crate) trait DesktopProbe {
     /// Whether the primary mouse button is currently held anywhere on the desktop.
     fn primary_button_down(&self) -> bool;
@@ -21,6 +26,33 @@ pub(crate) trait DesktopProbe {
     fn work_area(&self, point: Pos2) -> Option<Rect>;
     /// Every monitor (empty when the platform does not tell).
     fn displays(&self) -> Vec<Display>;
+    /// Track the native window of a Workspace window; `false` while it cannot be
+    /// found.
+    fn attach(&self, _window: WindowId) -> bool {
+        false
+    }
+    /// Windows of each group (only those that move: not maximized or minimized).
+    /// Another program moving one of them moves the others by as much.
+    fn set_groups(&self, _groups: &[(WindowId, u64)]) {}
+    /// Outer frame (physical pixels) of a tracked window as the desktop has it
+    /// now, which may be newer than the window's last pass saw.
+    fn frame(&self, _window: WindowId) -> Option<Rect> {
+        None
+    }
+    /// Move `request.members` with the pointer until the button is released;
+    /// `false` when the native windows are not tracked.
+    fn begin_move(&self, _request: MoveRequest) -> bool {
+        false
+    }
+    /// A move started by `begin_move` is in progress.
+    fn moving(&self) -> bool {
+        false
+    }
+    /// Move windows (outer top-left, physical pixels) at once; their groups do
+    /// not follow. `false` when one of them is not tracked.
+    fn place(&self, _moves: &[(WindowId, Pos2)]) -> bool {
+        false
+    }
 }
 
 /// A monitor as saved windows are placed on it.
@@ -47,7 +79,8 @@ pub(crate) const FALLBACK_DISPLAY: Display = Display {
     primary: true,
 };
 
-/// The native desktop, queried through Win32.
+/// The native desktop, queried through Win32; window moves go through the
+/// subclassed native windows (`super::native`).
 pub(crate) struct NativeDesktop;
 
 #[cfg(windows)]
@@ -171,6 +204,31 @@ impl DesktopProbe for NativeDesktop {
             })
             .collect()
     }
+
+    fn attach(&self, window: WindowId) -> bool {
+        super::native::attach(window)
+    }
+
+    fn set_groups(&self, groups: &[(WindowId, u64)]) {
+        super::native::set_groups(groups);
+    }
+
+    fn frame(&self, window: WindowId) -> Option<Rect> {
+        super::native::frame(window)
+    }
+
+    fn begin_move(&self, request: MoveRequest) -> bool {
+        let work_areas = self.displays().iter().map(|display| display.work).collect();
+        super::native::begin_move(&request, work_areas)
+    }
+
+    fn moving(&self) -> bool {
+        super::native::moving()
+    }
+
+    fn place(&self, moves: &[(WindowId, Pos2)]) -> bool {
+        super::native::place(moves)
+    }
 }
 
 #[cfg(not(windows))]
@@ -188,13 +246,14 @@ impl DesktopProbe for NativeDesktop {
     }
 }
 
-/// Best offset (per axis) that aligns `moving` with an edge of another window or of
-/// the work area, when within `threshold`. Other windows only count when they are
-/// within `threshold` of the moving window on both axes.
-pub(crate) fn snap_offset(
-    moving: Rect,
+/// Best offset (per axis) that aligns an edge of one of `members` (windows moving
+/// together) with an edge of another window, or of the work area nearest the
+/// member's center, when within `threshold`. Other windows only count for a member
+/// within `threshold` of it on both axes.
+pub(crate) fn snap_group(
+    members: impl Iterator<Item = Rect>,
     others: &[Rect],
-    work_area: Option<Rect>,
+    work_areas: &[Rect],
     threshold: f32,
 ) -> Vec2 {
     let mut best_x: Option<f32> = None;
@@ -204,59 +263,183 @@ pub(crate) fn snap_offset(
             *best = Some(delta);
         }
     };
-    for other in others {
-        // Only windows within the threshold on both axes interact: side by side they
-        // offer adjacent x edges and aligned y edges, stacked the converse.
-        let near = moving.min.x <= other.max.x + threshold
-            && other.min.x <= moving.max.x + threshold
-            && moving.min.y <= other.max.y + threshold
-            && other.min.y <= moving.max.y + threshold;
-        if !near {
-            continue;
+    for moving in members {
+        for other in others {
+            // Only windows within the threshold on both axes interact: side by side
+            // they offer adjacent x edges and aligned y edges, stacked the converse.
+            let near = moving.min.x <= other.max.x + threshold
+                && other.min.x <= moving.max.x + threshold
+                && moving.min.y <= other.max.y + threshold
+                && other.min.y <= moving.max.y + threshold;
+            if !near {
+                continue;
+            }
+            for (edge, target) in [
+                (moving.min.x, other.max.x),
+                (moving.max.x, other.min.x),
+                (moving.min.x, other.min.x),
+                (moving.max.x, other.max.x),
+            ] {
+                consider(&mut best_x, target - edge);
+            }
+            for (edge, target) in [
+                (moving.min.y, other.max.y),
+                (moving.max.y, other.min.y),
+                (moving.min.y, other.min.y),
+                (moving.max.y, other.max.y),
+            ] {
+                consider(&mut best_y, target - edge);
+            }
         }
-        for (edge, target) in [
-            (moving.min.x, other.max.x),
-            (moving.max.x, other.min.x),
-            (moving.min.x, other.min.x),
-            (moving.max.x, other.max.x),
-        ] {
-            consider(&mut best_x, target - edge);
-        }
-        for (edge, target) in [
-            (moving.min.y, other.max.y),
-            (moving.max.y, other.min.y),
-            (moving.min.y, other.min.y),
-            (moving.max.y, other.max.y),
-        ] {
-            consider(&mut best_y, target - edge);
-        }
-    }
-    if let Some(area) = work_area {
-        for (edge, target) in [(moving.min.x, area.min.x), (moving.max.x, area.max.x)] {
-            consider(&mut best_x, target - edge);
-        }
-        for (edge, target) in [(moving.min.y, area.min.y), (moving.max.y, area.max.y)] {
-            consider(&mut best_y, target - edge);
+        if let Some(area) = nearest_area(work_areas, moving.center()) {
+            for (edge, target) in [(moving.min.x, area.min.x), (moving.max.x, area.max.x)] {
+                consider(&mut best_x, target - edge);
+            }
+            for (edge, target) in [(moving.min.y, area.min.y), (moving.max.y, area.max.y)] {
+                consider(&mut best_y, target - edge);
+            }
         }
     }
     vec2(best_x.unwrap_or(0.0), best_y.unwrap_or(0.0))
 }
 
+/// Shift (per axis, as small as possible) after which every one of `members` shows
+/// at least `min_visible` of itself (or all of a smaller window) inside the work
+/// area nearest its center. When they cannot all, earlier members win. Zero when
+/// they all do already.
+pub(crate) fn keep_reachable(
+    members: impl Iterator<Item = Rect>,
+    work_areas: &[Rect],
+    min_visible: f32,
+) -> Vec2 {
+    let mut x = (f32::NEG_INFINITY, f32::INFINITY);
+    let mut y = (f32::NEG_INFINITY, f32::INFINITY);
+    // Allowed shifts of the span [min, max] so that `visible` of it lies in
+    // [low, high], intersected with those of the earlier members.
+    let narrow = |range: &mut (f32, f32), min: f32, max: f32, low: f32, high: f32| {
+        let visible = min_visible.min(max - min);
+        let allowed = (low + visible - max, high - visible - min);
+        let both = (range.0.max(allowed.0), range.1.min(allowed.1));
+        if allowed.0 <= allowed.1 && both.0 <= both.1 {
+            *range = both;
+        }
+    };
+    for member in members {
+        let Some(work) = nearest_area(work_areas, member.center()) else {
+            continue;
+        };
+        narrow(&mut x, member.min.x, member.max.x, work.min.x, work.max.x);
+        narrow(&mut y, member.min.y, member.max.y, work.min.y, work.max.y);
+    }
+    vec2(0.0_f32.clamp(x.0, x.1), 0.0_f32.clamp(y.0, y.1))
+}
+
+/// The work area containing `point`, else the nearest one.
+fn nearest_area(areas: &[Rect], point: Pos2) -> Option<Rect> {
+    nearest_index(areas.len(), |index| areas[index], point).map(|index| areas[index])
+}
+
+/// Index of the area (of `count`) containing `point`, else of the nearest one.
+fn nearest_index(count: usize, area: impl Fn(usize) -> Rect, point: Pos2) -> Option<usize> {
+    (0..count)
+        .find(|index| area(*index).contains(point))
+        .or_else(|| {
+            (0..count).min_by(|a, b| {
+                area(*a)
+                    .distance_sq_to_pos(point)
+                    .total_cmp(&area(*b).distance_sq_to_pos(point))
+            })
+        })
+}
+
+/// A side of a window frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Edge {
+    Left,
+    Top,
+    Right,
+    Bottom,
+}
+
+impl Edge {
+    pub(crate) const ALL: [Self; 4] = [Self::Left, Self::Top, Self::Right, Self::Bottom];
+
+    /// The span of `frame` along this edge.
+    pub(crate) fn span(self, frame: Rect) -> (f32, f32) {
+        match self {
+            Self::Left | Self::Right => (frame.min.y, frame.max.y),
+            Self::Top | Self::Bottom => (frame.min.x, frame.max.x),
+        }
+    }
+}
+
+/// Where `other` touches `own` (edges at most the touch tolerance apart, sharing
+/// more than a corner): the edge of `own` and the shared span along it.
+pub(crate) fn shared_edge(own: Rect, other: Rect) -> Option<(Edge, f32, f32)> {
+    shared_edge_within(own, other, TOUCH_TOLERANCE_PX)
+}
+
+fn shared_edge_within(own: Rect, other: Rect, tolerance: f32) -> Option<(Edge, f32, f32)> {
+    let t = tolerance;
+    let along_y = (own.min.y.max(other.min.y), own.max.y.min(other.max.y));
+    let along_x = (own.min.x.max(other.min.x), own.max.x.min(other.max.x));
+    if along_y.1 - along_y.0 > t {
+        if (own.max.x - other.min.x).abs() <= t {
+            return Some((Edge::Right, along_y.0, along_y.1));
+        }
+        if (other.max.x - own.min.x).abs() <= t {
+            return Some((Edge::Left, along_y.0, along_y.1));
+        }
+    }
+    if along_x.1 - along_x.0 > t {
+        if (own.max.y - other.min.y).abs() <= t {
+            return Some((Edge::Bottom, along_x.0, along_x.1));
+        }
+        if (other.max.y - own.min.y).abs() <= t {
+            return Some((Edge::Top, along_x.0, along_x.1));
+        }
+    }
+    None
+}
+
 /// Whether two outer frames share an edge segment.
 pub(crate) fn touching(a: Rect, b: Rect) -> bool {
-    touching_within(a, b, TOUCH_TOLERANCE_PX)
+    shared_edge(a, b).is_some()
 }
 
 /// Whether two frames share an edge segment, edges `tolerance` apart counting as
 /// one.
 fn touching_within(a: Rect, b: Rect, tolerance: f32) -> bool {
-    let t = tolerance;
-    let overlap_y = a.min.y < b.max.y - t && b.min.y < a.max.y - t;
-    let overlap_x = a.min.x < b.max.x - t && b.min.x < a.max.x - t;
-    let side_by_side =
-        overlap_y && ((a.max.x - b.min.x).abs() <= t || (b.max.x - a.min.x).abs() <= t);
-    let stacked = overlap_x && ((a.max.y - b.min.y).abs() <= t || (b.max.y - a.min.y).abs() <= t);
-    side_by_side || stacked
+    shared_edge_within(a, b, tolerance).is_some()
+}
+
+/// The parts of `span` that none of `covered` (spans, in any order) covers, in
+/// order.
+pub(crate) fn uncovered<I>(
+    span: (f32, f32),
+    covered: impl Fn() -> I,
+    mut each: impl FnMut(f32, f32),
+) where
+    I: Iterator<Item = (f32, f32)>,
+{
+    let mut at = span.0;
+    while at < span.1 {
+        let next = covered()
+            .filter(|(_, end)| *end > at)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match next {
+            Some((start, end)) => {
+                if start > at {
+                    each(at, start.min(span.1));
+                }
+                at = at.max(end);
+            }
+            None => {
+                each(at, span.1);
+                break;
+            }
+        }
+    }
 }
 
 /// New top-left for `outer` inside `work` when less than `min_visible` (or the
@@ -264,15 +447,21 @@ fn touching_within(a: Rect, b: Rect, tolerance: f32) -> bool {
 /// it is reachable where it is. Windows larger than `work` keep their top-left
 /// edge inside it.
 pub(crate) fn reachable_position(outer: Rect, work: Rect, min_visible: f32) -> Option<Pos2> {
+    (!reachable(outer, work, min_visible)).then(|| fit_inside(outer, work))
+}
+
+/// Whether at least `min_visible` of `outer` (or all of a smaller window) is inside
+/// `work` on both axes.
+pub(crate) fn reachable(outer: Rect, work: Rect, min_visible: f32) -> bool {
     let visible = outer.intersect(work);
-    let visible_x = visible.width().max(0.0);
-    let visible_y = visible.height().max(0.0);
-    if visible_x + 0.5 >= min_visible.min(outer.width())
-        && visible_y + 0.5 >= min_visible.min(outer.height())
-    {
-        return None;
-    }
-    Some(pos2(
+    visible.width().max(0.0) + 0.5 >= min_visible.min(outer.width())
+        && visible.height().max(0.0) + 0.5 >= min_visible.min(outer.height())
+}
+
+/// Top-left that puts `outer` inside `work`, or its top-left edge when it is
+/// larger.
+pub(crate) fn fit_inside(outer: Rect, work: Rect) -> Pos2 {
+    pos2(
         outer
             .min
             .x
@@ -281,20 +470,12 @@ pub(crate) fn reachable_position(outer: Rect, work: Rect, min_visible: f32) -> O
             .min
             .y
             .clamp(work.min.y, (work.max.y - outer.height()).max(work.min.y)),
-    ))
+    )
 }
 
 /// Index of the display whose work area contains `point`, else the nearest one.
 pub(crate) fn display_at(displays: &[Display], point: Pos2) -> Option<usize> {
-    displays
-        .iter()
-        .position(|display| display.work.contains(point))
-        .or_else(|| {
-            (0..displays.len()).min_by(|a, b| {
-                let distance = |index: usize| displays[index].work.distance_sq_to_pos(point);
-                distance(*a).total_cmp(&distance(*b))
-            })
-        })
+    nearest_index(displays.len(), |index| displays[index].work, point)
 }
 
 /// The saved frame of `outer` (physical pixels) on `display`: logical points from
@@ -538,28 +719,76 @@ mod tests {
         Rect::from_min_size(pos2(x, y), vec2(w, h))
     }
 
+    fn snap(moving: Rect, others: &[Rect], work: &[Rect]) -> Vec2 {
+        snap_group(std::iter::once(moving), others, work, 24.0)
+    }
+
     #[test]
     fn snaps_to_nearest_window_edge_and_work_area_independently_per_axis() {
         let other = rect(0.0, 0.0, 400.0, 300.0);
         let moving = rect(410.0, 7.0, 200.0, 100.0);
-        assert_eq!(snap_offset(moving, &[other], None, 24.0), vec2(-10.0, -7.0));
+        assert_eq!(snap(moving, &[other], &[]), vec2(-10.0, -7.0));
         // Beyond the threshold: no snap.
         let far = rect(450.0, 40.0, 200.0, 100.0);
-        assert_eq!(snap_offset(far, &[other], None, 24.0), Vec2::ZERO);
+        assert_eq!(snap(far, &[other], &[]), Vec2::ZERO);
         // Not overlapping vertically: the other's right edge is not a target.
         let below = rect(410.0, 500.0, 200.0, 100.0);
-        assert_eq!(snap_offset(below, &[other], None, 24.0), Vec2::ZERO);
+        assert_eq!(snap(below, &[other], &[]), Vec2::ZERO);
         // Side by side just beyond the x threshold: nothing to align the tops with.
         let beside = rect(429.0, 9.0, 200.0, 100.0);
-        assert_eq!(snap_offset(beside, &[other], None, 24.0), Vec2::ZERO);
+        assert_eq!(snap(beside, &[other], &[]), Vec2::ZERO);
         // Side by side within it: adjacent x edge and aligned top.
         let beside = rect(415.0, 9.0, 200.0, 100.0);
-        assert_eq!(snap_offset(beside, &[other], None, 24.0), vec2(-15.0, -9.0));
+        assert_eq!(snap(beside, &[other], &[]), vec2(-15.0, -9.0));
+        // The work area of the window's own monitor, not of another one.
         let work = rect(-1920.0, 0.0, 1920.0, 1040.0);
+        let primary = rect(0.0, 0.0, 1920.0, 1040.0);
         let near_corner = rect(-1910.0, 935.0, 200.0, 100.0);
+        assert_eq!(snap(near_corner, &[], &[primary, work]), vec2(-10.0, 5.0));
+    }
+
+    #[test]
+    fn the_nearest_edge_of_any_member_snaps_the_whole_group() {
+        let other = rect(1000.0, 0.0, 300.0, 300.0);
+        // The right member is 10 px from the other window, the left one 20 px
+        // from the work area's left edge.
+        let members = [
+            rect(20.0, 50.0, 400.0, 200.0),
+            rect(420.0, 50.0, 570.0, 200.0),
+        ];
+        let work = [rect(0.0, 0.0, 1920.0, 1040.0)];
         assert_eq!(
-            snap_offset(near_corner, &[], Some(work), 24.0),
-            vec2(-10.0, 5.0)
+            snap_group(members.into_iter(), &[other], &work, 24.0),
+            vec2(10.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn reachability_shifts_as_little_as_possible_and_earlier_members_win() {
+        let work = [rect(0.0, 0.0, 1920.0, 1040.0)];
+        // Inside: no shift.
+        let inside = [rect(100.0, 100.0, 400.0, 300.0)];
+        assert_eq!(keep_reachable(inside.into_iter(), &work, 32.0), Vec2::ZERO);
+        // 10 px left on the right, 5 px below the bottom: up to 32 px shown.
+        let corner = [rect(1910.0, 1035.0, 400.0, 300.0)];
+        assert_eq!(
+            keep_reachable(corner.into_iter(), &work, 32.0),
+            vec2(-22.0, -27.0)
+        );
+        // A small window shows all of itself.
+        let small = [rect(-30.0, 100.0, 20.0, 20.0)];
+        assert_eq!(
+            keep_reachable(small.into_iter(), &work, 32.0),
+            vec2(30.0, 0.0)
+        );
+        // Members 3000 px apart cannot both show: the first one wins.
+        let apart = [
+            rect(-500.0, 100.0, 400.0, 300.0),
+            rect(2500.0, 100.0, 400.0, 300.0),
+        ];
+        assert_eq!(
+            keep_reachable(apart.into_iter(), &work, 32.0),
+            vec2(132.0, 0.0)
         );
     }
 
@@ -570,6 +799,44 @@ mod tests {
         assert!(touching(a, rect(10.0, 100.0, 50.0, 50.0)));
         assert!(!touching(a, rect(105.0, 20.0, 50.0, 50.0)));
         assert!(!touching(a, rect(100.0, 100.0, 50.0, 50.0)), "corner only");
+    }
+
+    #[test]
+    fn shared_edges_name_the_side_and_the_common_span() {
+        let a = rect(100.0, 100.0, 200.0, 100.0);
+        assert_eq!(
+            shared_edge(a, rect(301.0, 150.0, 50.0, 200.0)),
+            Some((Edge::Right, 150.0, 200.0))
+        );
+        assert_eq!(
+            shared_edge(a, rect(0.0, 0.0, 100.0, 300.0)),
+            Some((Edge::Left, 100.0, 200.0))
+        );
+        assert_eq!(
+            shared_edge(a, rect(250.0, 198.0, 100.0, 50.0)),
+            Some((Edge::Bottom, 250.0, 300.0))
+        );
+        assert_eq!(
+            shared_edge(a, rect(50.0, 0.0, 100.0, 100.0)),
+            Some((Edge::Top, 100.0, 150.0))
+        );
+        // Two pixels of overlap along the edge are a corner, not an edge.
+        assert_eq!(shared_edge(a, rect(300.0, 198.0, 50.0, 50.0)), None);
+    }
+
+    #[test]
+    fn uncovered_lists_the_gaps_between_covered_spans_in_order() {
+        let mut gaps = Vec::new();
+        let covered = [(40.0, 60.0), (0.0, 10.0), (55.0, 70.0), (90.0, 120.0)];
+        uncovered(
+            (0.0, 100.0),
+            || covered.into_iter(),
+            |a, b| gaps.push((a, b)),
+        );
+        assert_eq!(gaps, vec![(10.0, 40.0), (70.0, 90.0)]);
+        gaps.clear();
+        uncovered((0.0, 100.0), std::iter::empty, |a, b| gaps.push((a, b)));
+        assert_eq!(gaps, vec![(0.0, 100.0)]);
     }
 
     #[test]

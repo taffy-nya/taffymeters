@@ -1,12 +1,13 @@
-//! Native window state and desktop sync: minimize, close, always-on-top, groups and placement.
+//! Native window state and desktop sync: minimize, close, always-on-top, groups,
+//! body drags and placement.
 
 use std::time::Duration;
 
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2};
+use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand};
 
 use super::{
-    ActionOutcome, DETACH_TIMEOUT, DesktopProbe, WindowId, WindowState, Workspace, WorkspaceError,
-    desktop,
+    ActionOutcome, DETACH_TIMEOUT, WindowId, WindowState, Workspace, WorkspaceError, desktop,
+    moving::MoveRequest,
 };
 
 impl Workspace {
@@ -149,30 +150,34 @@ impl Workspace {
         Ok(())
     }
 
+    /// Outer frame of a window as the desktop has it now, else as its last pass
+    /// saw it. Other windows' passes may not have run since the desktop moved them.
+    pub(super) fn frame_of(&self, window_id: WindowId) -> Option<Rect> {
+        self.desktop
+            .frame(window_id)
+            .or_else(|| self.windows.get(&window_id)?.outer)
+    }
+
     /// Windows touching `window_id` on the desktop; fails while its position is
     /// not known yet.
     pub(super) fn touching_windows(
         &self,
         window_id: WindowId,
     ) -> Result<Vec<WindowId>, WorkspaceError> {
-        let outer = self
-            .window(window_id)?
-            .desktop
-            .outer
-            .ok_or(WorkspaceError::Unsupported(
-                "group before the window position is known",
-            ))?;
+        self.window(window_id)?;
+        let outer = self.frame_of(window_id).ok_or(WorkspaceError::Unsupported(
+            "group before the window position is known",
+        ))?;
         Ok(self
             .windows
-            .iter()
-            .filter(|(id, window)| {
+            .keys()
+            .filter(|id| {
                 **id != window_id
-                    && window
-                        .desktop
-                        .outer
+                    && self
+                        .frame_of(**id)
                         .is_some_and(|other| desktop::touching(outer, other))
             })
-            .map(|(id, _)| *id)
+            .copied()
             .collect())
     }
 
@@ -239,8 +244,52 @@ impl Workspace {
         }
     }
 
-    /// Apply one window's observed native placement. Returns windows that received
-    /// position commands and need a pass to deliver them.
+    /// A body drag in `window_id`, pressed at `press` (logical, in the window):
+    /// the window and its group follow the pointer until the button is released.
+    /// A maximized window, or one the desktop does not track, gets the OS move
+    /// loop instead (the OS restores a maximized window as it moves).
+    pub(super) fn start_move(&mut self, window_id: WindowId, press: Pos2) {
+        let Some(window) = self.windows.get(&window_id) else {
+            return;
+        };
+        if window.maximized || !window.tracked {
+            self.windows
+                .get_mut(&window_id)
+                .expect("checked above")
+                .commands
+                .push(ViewportCommand::StartDrag);
+            return;
+        }
+        let ppp = window.pixels_per_point;
+        let group = window.group;
+        let movable = |other: &WindowState| other.tracked && !other.maximized && !other.minimized;
+        let mut members = Vec::new();
+        let mut others = Vec::new();
+        for (id, other) in &self.windows {
+            if *id == window_id || (group.is_some() && other.group == group && movable(other)) {
+                members.push(*id);
+            } else if movable(other) {
+                others.push(*id);
+            }
+        }
+        let request = MoveRequest {
+            leader: window_id,
+            grab: press.to_vec2() * ppp,
+            members,
+            others,
+            threshold: desktop::SNAP_DISTANCE_POINTS * ppp,
+            min_visible: desktop::MIN_VISIBLE_POINTS * ppp,
+        };
+        if !self.desktop.begin_move(request)
+            && let Some(window) = self.windows.get_mut(&window_id)
+        {
+            window.commands.push(ViewportCommand::StartDrag);
+        }
+    }
+
+    /// Apply one window's observed native placement. Returns whether the host must
+    /// run another pass: other windows got position commands to deliver, or this
+    /// window moved and the others draw the edges they share with it.
     pub(super) fn observe_placement(
         &mut self,
         window_id: WindowId,
@@ -248,163 +297,133 @@ impl Workspace {
         pixels_per_point: f32,
         maximized: bool,
         minimized: bool,
-    ) -> Vec<WindowId> {
+    ) -> bool {
         let probe = std::sync::Arc::clone(&self.desktop);
-        let probe = probe.as_ref();
-        let mut followers_to_wake = Vec::new();
         let Some(window) = self.windows.get_mut(&window_id) else {
-            return followers_to_wake;
+            return false;
         };
         window.maximized = maximized;
         window.pixels_per_point = pixels_per_point;
+        if !window.tracked {
+            window.tracked = probe.attach(window_id);
+        }
         let Some(outer_points) = outer_points else {
-            return followers_to_wake;
+            return false;
         };
+        // Whole physical pixels: the native frame, without the logical round trip.
         let outer = Rect::from_min_max(
-            outer_points.min * pixels_per_point,
-            outer_points.max * pixels_per_point,
+            (outer_points.min * pixels_per_point).round(),
+            (outer_points.max * pixels_per_point).round(),
         );
-        let previous = window.desktop.outer.replace(outer);
-        let Some(previous) = previous else {
-            // First placement: land on the saved desktop position, or bring a window
-            // that opened off every monitor back where it can be used. The OS owns
-            // the placement of maximized and minimized windows; during a drag the
-            // correction waits for the release (handled below on later passes).
-            if maximized || minimized {
+        let previous = window.outer.replace(outer);
+        let changed = previous != Some(outer);
+        if maximized || minimized {
+            // The OS owns the placement of maximized and minimized windows.
+            if previous.is_none() {
                 window.restore_target = None;
             }
-            let target = (!maximized && !minimized && !probe.primary_button_down())
-                .then(|| Self::placement_target(window, outer, pixels_per_point, probe))
-                .flatten();
-            if let Some(target) = target {
-                window.desktop.expected = Some(target);
-                window
-                    .commands
-                    .push(ViewportCommand::OuterPosition(target / pixels_per_point));
-                followers_to_wake.push(window_id);
+            return changed;
+        }
+        // The user places the window (or corrects it during a drag): wait for the
+        // release, and the saved position no longer applies.
+        if probe.primary_button_down() {
+            if previous.is_some() && changed {
+                window.restore_target = None;
             }
-            return followers_to_wake;
-        };
-        let delta = outer.min - previous.min;
-        let button_down = probe.primary_button_down();
-        let mut user_delta = None;
-        // Maximize, minimize and edge resizes change the frame without being a move:
-        // they neither snap nor drag the group along.
-        let reframed = maximized || minimized || previous.size() != outer.size();
-        if delta.length() > 0.5 && !reframed {
-            if window.desktop.native_drag || window.desktop.expected.is_none() {
-                // The OS move loop this window started, or an external move.
-                window.desktop.expected = None;
-                window.desktop.moving = true;
-                user_delta = Some(delta);
-            } else if window.desktop.expected.is_some_and(|expected| {
-                (expected - outer.min).length() <= desktop::TOUCH_TOLERANCE_PX
-            }) {
-                window.desktop.expected = None;
-            }
-            // Otherwise an earlier position command is still landing: never echoed
-            // back to the group.
-        } else if window.desktop.expected.is_some() && !window.desktop.native_drag && !button_down {
-            // A command landed elsewhere (the OS adjusted it) and nothing moves now.
-            window.desktop.expected = None;
+            return changed;
         }
-        if !button_down && !window.desktop.moving {
-            window.desktop.native_drag = false;
+        if probe.moving() {
+            return changed;
         }
-        let mut snap = Vec2::ZERO;
-        if window.desktop.moving && !button_down && !maximized && !minimized {
-            window.desktop.moving = false;
-            window.desktop.native_drag = false;
-            let group = window.group;
-            let others: Vec<Rect> = self
-                .windows
-                .iter()
-                .filter(|(id, other)| {
-                    **id != window_id && (group.is_none() || other.group != group)
-                })
-                .filter_map(|(_, other)| other.desktop.outer)
-                .collect();
-            let threshold = desktop::SNAP_DISTANCE_POINTS * pixels_per_point;
-            snap = desktop::snap_offset(outer, &others, probe.work_area(outer.center()), threshold);
-            if snap != Vec2::ZERO {
-                let window = self.windows.get_mut(&window_id).expect("checked above");
-                let target = outer.min + snap;
-                window.desktop.expected = Some(target);
-                window.commands.push(ViewportCommand::OuterPosition(pos2(
-                    target.x / pixels_per_point,
-                    target.y / pixels_per_point,
-                )));
-                followers_to_wake.push(window_id);
-            }
-        }
-        let shift = user_delta.unwrap_or(Vec2::ZERO) + snap;
-        if shift != Vec2::ZERO
-            && let Some(group) = self.windows[&window_id].group
-        {
-            for (id, follower) in &mut self.windows {
-                if *id == window_id || follower.group != Some(group) || follower.maximized {
-                    continue;
-                }
-                let Some(base) = follower
-                    .desktop
-                    .expected
-                    .or(follower.desktop.outer.map(|r| r.min))
-                else {
-                    continue;
-                };
-                let target = base + shift;
-                let ppp = follower.pixels_per_point;
-                follower.desktop.expected = Some(target);
-                follower.commands.push(ViewportCommand::OuterPosition(pos2(
-                    target.x / ppp,
-                    target.y / ppp,
-                )));
-                followers_to_wake.push(*id);
-            }
-        }
-        // A restore correction that waited for a release, then a window left
-        // without a usable area on any monitor (its display was disconnected, or it
-        // was restored there): it comes back into the nearest one.
-        let window = self.windows.get_mut(&window_id).expect("checked above");
-        if user_delta.is_some() {
-            // The user placed the window; the saved position no longer applies.
-            window.restore_target = None;
-        }
-        if !button_down
-            && !maximized
-            && !minimized
-            && !window.desktop.moving
-            && window.desktop.expected.is_none()
-            && let Some(target) = Self::placement_target(window, outer, pixels_per_point, probe)
-        {
-            window.desktop.expected = Some(target);
-            window
-                .commands
-                .push(ViewportCommand::OuterPosition(target / pixels_per_point));
-            followers_to_wake.push(window_id);
-        }
-        followers_to_wake
+        let moves = self.placement_moves(window_id, outer, pixels_per_point, probe.as_ref());
+        self.place_windows(&moves) || changed
     }
 
-    /// Where `outer` (physical pixels) must go to show enough of itself on the
-    /// nearest monitor, if it does not already.
-    fn rescue_target(outer: Rect, pixels_per_point: f32, probe: &dyn DesktopProbe) -> Option<Pos2> {
-        let work = probe.work_area(outer.center())?;
-        desktop::reachable_position(outer, work, desktop::MIN_VISIBLE_POINTS * pixels_per_point)
-    }
-
-    /// The saved position still to land on (once), otherwise a position that makes
-    /// the window reachable again.
-    fn placement_target(
-        window: &mut WindowState,
+    /// Where windows must go after `window_id` was seen at `outer`: the saved
+    /// position still to land on (once), or, when it shows too little of itself on
+    /// the nearest monitor, its group moved as one into that monitor's work area.
+    fn placement_moves(
+        &mut self,
+        window_id: WindowId,
         outer: Rect,
         pixels_per_point: f32,
-        probe: &dyn DesktopProbe,
-    ) -> Option<Pos2> {
-        window
+        probe: &dyn desktop::DesktopProbe,
+    ) -> Vec<(WindowId, Pos2)> {
+        let window = self.windows.get_mut(&window_id).expect("observed above");
+        if let Some(target) = window
             .restore_target
             .take()
             .filter(|target| (*target - outer.min).length() > desktop::TOUCH_TOLERANCE_PX)
-            .or_else(|| Self::rescue_target(outer, pixels_per_point, probe))
+        {
+            return vec![(window_id, target)];
+        }
+        let Some(work) = probe.work_area(outer.center()) else {
+            return Vec::new();
+        };
+        if desktop::reachable(outer, work, desktop::MIN_VISIBLE_POINTS * pixels_per_point) {
+            return Vec::new();
+        }
+        let group = window.group;
+        let members: Vec<(WindowId, Rect)> = self
+            .windows
+            .iter()
+            .filter(|(id, other)| {
+                **id != window_id
+                    && group.is_some()
+                    && other.group == group
+                    && !other.maximized
+                    && !other.minimized
+            })
+            .filter_map(|(id, _)| self.frame_of(*id).map(|frame| (*id, frame)))
+            .chain(std::iter::once((window_id, outer)))
+            .collect();
+        let bounds = members
+            .iter()
+            .fold(outer, |bounds, (_, frame)| bounds.union(*frame));
+        let shift = desktop::fit_inside(bounds, work) - bounds.min;
+        if shift == Vec2::ZERO {
+            return Vec::new();
+        }
+        members
+            .into_iter()
+            .map(|(id, frame)| (id, frame.min + shift))
+            .collect()
+    }
+
+    /// Move windows (outer top-left, physical pixels) together without their
+    /// groups following. Returns whether some got viewport commands instead (the
+    /// desktop does not track them), which need a pass to be sent.
+    pub(super) fn place_windows(&mut self, moves: &[(WindowId, Pos2)]) -> bool {
+        if moves.is_empty() || self.desktop.place(moves) {
+            return false;
+        }
+        for (id, target) in moves {
+            if let Some(window) = self.windows.get_mut(id) {
+                let ppp = window.pixels_per_point;
+                window
+                    .commands
+                    .push(ViewportCommand::OuterPosition(*target / ppp));
+            }
+        }
+        true
+    }
+
+    /// Tell the desktop which windows move with their group, when that changed:
+    /// grouped windows that are neither maximized nor minimized.
+    pub(super) fn publish_groups(&mut self) {
+        let current = || {
+            self.windows.iter().filter_map(|(id, window)| {
+                window
+                    .group
+                    .filter(|_| !window.maximized && !window.minimized)
+                    .map(|group| (*id, group))
+            })
+        };
+        if current().eq(self.published_groups.iter().copied()) {
+            return;
+        }
+        let groups: Vec<(WindowId, u64)> = current().collect();
+        self.desktop.set_groups(&groups);
+        self.published_groups = groups;
     }
 }
