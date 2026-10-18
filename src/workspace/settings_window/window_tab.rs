@@ -1,4 +1,4 @@
-//! The Window tab: adding to an empty window, always-on-top, pin, maximize,
+//! The Window tab: adding to an empty window, always-on-top, lock, maximize,
 //! grouping and closing the targeted window.
 
 use eframe::egui::{self, RichText};
@@ -47,15 +47,16 @@ impl Workspace {
                     enabled: on_top,
                 });
             }
-            let mut pinned = window.pinned;
-            let response = ui
-                .checkbox(&mut pinned, "Pin")
-                .on_hover_text("Dragging does not move the window or its group");
-            record(controls, SettingsItem::Pin, &response);
+            let mut locked = window.locked;
+            let response = ui.checkbox(&mut locked, "Lock").on_hover_text(
+                "Takes right clicks only: no moving, resizing, splitting, dividers, \
+                 wheel or hover. Its group does not move when dragged.",
+            );
+            record(controls, SettingsItem::Lock, &response);
             if response.changed() {
-                actions.push(WorkspaceAction::SetPinned {
+                actions.push(WorkspaceAction::SetLocked {
                     window_id,
-                    enabled: pinned,
+                    enabled: locked,
                 });
             }
             let label = if window.maximized {
@@ -63,15 +64,15 @@ impl Workspace {
             } else {
                 "Maximize"
             };
-            if button(ui, true, label, SettingsItem::Maximize, controls) {
+            if button(ui, !window.locked, label, SettingsItem::Maximize, controls) {
                 actions.push(WorkspaceAction::ToggleMaximized { window_id });
             }
         });
         card(ui, "Group", |ui| {
             let status = if window.group.is_none() {
                 "Not grouped. Windows that touch can move as one."
-            } else if self.drag_pinned(window_id) {
-                "Pinned with its group: dragging moves none of them."
+            } else if self.drag_locked(window_id) {
+                "Locked with its group: dragging moves none of them."
             } else {
                 "Moves together with the windows of its group."
             };

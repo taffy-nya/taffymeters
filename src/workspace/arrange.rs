@@ -43,6 +43,7 @@ impl Workspace {
             && fits(area, side.axis(), min, min)
     }
 
+    /// A target in a locked window is never valid: it takes no clicks.
     pub(crate) fn move_target_valid(&self, source: ModuleInstanceId, target: MoveTarget) -> bool {
         if !self.modules.contains_key(&source) || self.window_of(source).is_none() {
             return false;
@@ -50,12 +51,16 @@ impl Workspace {
         match target {
             MoveTarget::Beside { instance_id, side } => {
                 instance_id != source
+                    && self
+                        .window_of(instance_id)
+                        .is_some_and(|window_id| !self.windows[&window_id].locked)
                     && self.can_place_beside(instance_id, side, self.module_min_size(source))
             }
-            MoveTarget::EmptyWindow(window_id) => self
-                .windows
-                .get(&window_id)
-                .is_some_and(|window| window.layout.is_empty() && window.pending_detach.is_none()),
+            MoveTarget::EmptyWindow(window_id) => {
+                self.windows.get(&window_id).is_some_and(|window| {
+                    !window.locked && window.layout.is_empty() && window.pending_detach.is_none()
+                })
+            }
         }
     }
 

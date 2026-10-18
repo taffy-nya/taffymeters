@@ -1,10 +1,10 @@
-//! W01–W09: Workspace / BSP / multi-window behavior through the real Workspace,
+//! W01–W10: Workspace / BSP / multi-window behavior through the real Workspace,
 //! Module factories, manual source and egui events. Native window management, real
 //! DPI changes and the OS move loop are verified separately on a desktop.
 
 use std::time::Duration;
 
-use eframe::egui::{self, Event, PointerButton, ViewportCommand, pos2, vec2};
+use eframe::egui::{self, Event, PointerButton, Pos2, ViewportCommand, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::{
@@ -18,13 +18,13 @@ use crate::{
 };
 
 use crate::automation::{
-    harness::Harness,
+    harness::{Harness, SETTINGS},
     support::{action, add_module, check, created, deadline, first_leaf, wait_until, workspace},
 };
 
 type Scenario = fn() -> Result<Value, String>;
 
-pub(super) const CASES: [(&str, Scenario); 9] = [
+pub(super) const CASES: [(&str, Scenario); 10] = [
     ("W01", w01),
     ("W02", w02),
     ("W03", w03),
@@ -34,6 +34,7 @@ pub(super) const CASES: [(&str, Scenario); 9] = [
     ("W07", w07),
     ("W08", w08),
     ("W09", w09),
+    ("W10", w10),
 ];
 
 fn split(
@@ -780,13 +781,13 @@ fn w07() -> Result<Value, String> {
         group.is_some() && o.window(FIRST_WINDOW).and_then(|w| w.group) == group,
         "touching windows were not grouped",
     )?;
-    // Pinning the member keeps the whole group in place: neither body starts a
-    // native move until it is unpinned.
+    // Locking the member keeps the whole group in place: neither body starts a
+    // native move until it is unlocked.
     h.settings(
         ControlKey::LeafBody(b),
-        &[SettingsItem::Tab(Tab::Window), SettingsItem::Pin],
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
     )?;
-    let mut pinned_drags = Vec::new();
+    let mut locked_drags = Vec::new();
     for (window, leaf) in [(second, b), (FIRST_WINDOW, a)] {
         h.focus = window;
         h.take_commands(window);
@@ -797,16 +798,16 @@ fn w07() -> Result<Value, String> {
             egui::Modifiers::NONE,
             None,
         )?;
-        pinned_drags.push(count_start_drag(&h.take_commands(window)));
+        locked_drags.push(count_start_drag(&h.take_commands(window)));
     }
     check(
-        h.ws.observation().window(second).is_some_and(|w| w.pinned) && pinned_drags == [0, 0],
-        &format!("a pinned group still started native moves: {pinned_drags:?}"),
+        h.ws.observation().window(second).is_some_and(|w| w.locked) && locked_drags == [0, 0],
+        &format!("a locked group still started native moves: {locked_drags:?}"),
     )?;
     h.focus = second;
     h.settings(
         ControlKey::LeafBody(b),
-        &[SettingsItem::Tab(Tab::Window), SettingsItem::Pin],
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
     )?;
     h.take_commands(second);
     let start = h.locate(&ControlKey::LeafBody(b))?.rect.center();
@@ -816,10 +817,10 @@ fn w07() -> Result<Value, String> {
         egui::Modifiers::NONE,
         None,
     )?;
-    let unpinned_drags = count_start_drag(&h.take_commands(second));
+    let unlocked_drags = count_start_drag(&h.take_commands(second));
     check(
-        unpinned_drags == 1,
-        &format!("an unpinned window did not start a native move: {unpinned_drags}"),
+        unlocked_drags == 1,
+        &format!("an unlocked window did not start a native move: {unlocked_drags}"),
     )?;
     // Moving the root moves the member by the same physical delta.
     h.desktop.set_button_down(true);
@@ -908,7 +909,7 @@ fn w07() -> Result<Value, String> {
     )?;
     Ok(
         json!({"snap_physical":[1000,100],"group_follow":[1050,130],"ungrouped":"independent",
-        "pinned_group_start_drag":[0,0],"unpinned_start_drag":1,
+        "locked_group_start_drag":[0,0],"unlocked_start_drag":1,
         "grid_2x_logical":528,"scale_change":"drag canceled"}),
     )
 }
@@ -1022,5 +1023,284 @@ fn w09() -> Result<Value, String> {
         "visible_spectrum_nodes": shown.active_spectrum_nodes,
         "hidden_spectrum_nodes": while_hidden.active_spectrum_nodes,
         "hidden_pcm_frames": while_hidden.pcm_frames - hidden.pcm_frames,
+    }))
+}
+
+fn primary(pos: Pos2, pressed: bool) -> Event {
+    Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
+/// Left clicks at a fixed point. The harness's own gestures need a registered
+/// control; a locked window registers no chrome, so W10 aims at remembered points.
+fn raw_clicks(h: &mut Harness, at: Pos2, count: usize) {
+    h.frame(vec![Event::PointerMoved(at)]);
+    for _ in 0..count {
+        h.frame(vec![primary(at, true)]);
+        h.frame(vec![primary(at, false)]);
+    }
+    h.frame(vec![]);
+}
+
+/// Left press at `from`, move to `to` in two frames, release there.
+fn raw_drag(h: &mut Harness, from: Pos2, to: Pos2) {
+    h.frame(vec![Event::PointerMoved(from)]);
+    h.frame(vec![primary(from, true)]);
+    h.frame(vec![Event::PointerMoved(from + (to - from) / 2.0)]);
+    h.frame(vec![Event::PointerMoved(to)]);
+    h.frame(vec![primary(to, false)]);
+    h.frame(vec![]);
+}
+
+/// A wheel notch and a pinch over `at`; display time advances so egui's smoothed
+/// scrolling delivers the notch.
+fn wheel_and_pinch(h: &mut Harness, at: Pos2) {
+    h.frame(vec![Event::PointerMoved(at)]);
+    h.frame(vec![
+        Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, 40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        },
+        Event::Zoom(1.5),
+    ]);
+    for _ in 0..30 {
+        h.display_time += Duration::from_millis(16);
+        h.frame(vec![]);
+    }
+}
+
+fn gestures(commands: &[ViewportCommand]) -> usize {
+    commands
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                ViewportCommand::StartDrag | ViewportCommand::BeginResize(_)
+            )
+        })
+        .count()
+}
+
+fn view(h: &Harness, id: ModuleInstanceId) -> Result<Vec<(&'static str, String)>, String> {
+    h.ws.observation()
+        .module(id)
+        .map(|module| {
+            module
+                .view
+                .iter()
+                .map(|(key, value)| (*key, format!("{value:?}")))
+                .collect()
+        })
+        .ok_or_else(|| format!("instance {} missing", id.0))
+}
+
+/// Whether a present control of the focused window is enabled.
+fn enabled(h: &Harness, key: &ControlKey) -> Result<bool, String> {
+    match h.locate(key) {
+        Ok(_) => Ok(true),
+        Err(error) if error.starts_with("Disabled control") => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the settings window's Maximize button is enabled; focus stays.
+fn maximize_enabled(h: &mut Harness) -> Result<bool, String> {
+    let origin = h.focus;
+    h.focus = SETTINGS;
+    h.frame(vec![]);
+    let enabled = enabled(h, &ControlKey::Settings(SettingsItem::Maximize));
+    h.focus = origin;
+    enabled
+}
+
+/// Whether "Move to…" offers the right edge of `beside` to `source`.
+fn move_target_enabled(
+    h: &mut Harness,
+    source: ModuleInstanceId,
+    beside: ModuleInstanceId,
+) -> Result<bool, String> {
+    action(
+        &mut h.ws,
+        WorkspaceAction::BeginMove {
+            instance_id: source,
+        },
+    )?;
+    h.frame(vec![]);
+    let enabled = enabled(
+        h,
+        &ControlKey::MoveTarget(MoveTarget::Beside {
+            instance_id: beside,
+            side: Side::Right,
+        }),
+    );
+    action(&mut h.ws, WorkspaceAction::CancelMove)?;
+    h.frame(vec![]);
+    enabled
+}
+
+/// Lock: a locked window takes right clicks only. Left clicks, drags and double
+/// clicks, the wheel and pinch reach nothing (no split entry, divider or resize
+/// edge, no selection, no window move, no Module input); native sizing, Maximize
+/// and move targets in it are off; locking ends a divider drag at its start.
+/// Unlocking brings all of it back.
+fn w10() -> Result<Value, String> {
+    let (mut ws, mut driver) = workspace()?;
+    let a = first_leaf(&ws)?;
+    let b = split(&mut ws, a, Side::Right)?;
+    let mut h = Harness::new(ws);
+    // The Spectrum takes wheel and pinch only once it has a spectrum to show.
+    driver
+        .advance_frames(4800, deadline())
+        .map_err(|e| e.to_string())?;
+    h.frame(vec![]);
+    let (split_id, ratio, _) = root_split(&h.ws, 0)?;
+    let entry_key = ControlKey::SplitZone {
+        instance_id: a,
+        side: Side::Below,
+    };
+    let chrome = [
+        entry_key,
+        ControlKey::Divider(split_id),
+        ControlKey::Resize(ResizeEdge::SouthEast),
+    ];
+    let entry = h.locate(&entry_key)?.rect.center();
+    let divider = h.locate(&ControlKey::Divider(split_id))?.rect.center();
+    let corner = h
+        .locate(&ControlKey::Resize(ResizeEdge::SouthEast))?
+        .rect
+        .center();
+    let body_a = h.locate(&ControlKey::LeafBody(a))?.rect.center();
+    let body_b = h.locate(&ControlKey::LeafBody(b))?.rect.center();
+
+    // Locking in the middle of a divider drag ends the drag at its start.
+    let aside = divider + vec2(-80.0, 0.0);
+    h.frame(vec![Event::PointerMoved(divider)]);
+    h.frame(vec![primary(divider, true)]);
+    h.frame(vec![Event::PointerMoved(divider + vec2(-40.0, 0.0))]);
+    h.frame(vec![Event::PointerMoved(aside)]);
+    let dragged = root_split(&h.ws, 0)?.1;
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetLocked {
+            window_id: FIRST_WINDOW,
+            enabled: true,
+        },
+    )?;
+    h.frame(vec![primary(aside, false)]);
+    h.frame(vec![]);
+    let o = h.ws.observation();
+    let window = o.window(FIRST_WINDOW).ok_or("root window missing")?;
+    check(
+        (dragged - ratio).abs() > 0.01
+            && root_split(&h.ws, 0)?.1 == ratio
+            && window.divider_drag.is_none(),
+        &format!(
+            "locking did not end the divider drag at its start: {ratio} -> {dragged} -> {:?}",
+            root_split(&h.ws, 0)?
+        ),
+    )?;
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetLocked {
+            window_id: FIRST_WINDOW,
+            enabled: false,
+        },
+    )?;
+    h.frame(vec![]);
+    h.take_commands(FIRST_WINDOW);
+
+    // Lock through the settings window: the right click still opens it.
+    h.settings(
+        ControlKey::LeafBody(a),
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
+    )?;
+    let commands = h.take_commands(FIRST_WINDOW);
+    let registered: Vec<_> = chrome.iter().filter(|key| h.locate(key).is_ok()).collect();
+    let refused = action(
+        &mut h.ws,
+        WorkspaceAction::ToggleMaximized {
+            window_id: FIRST_WINDOW,
+        },
+    )
+    .is_err();
+    check(
+        h.ws.observation()
+            .window(FIRST_WINDOW)
+            .is_some_and(|w| w.locked)
+            && commands.contains(&ViewportCommand::Resizable(false))
+            && registered.is_empty()
+            && !maximize_enabled(&mut h)?
+            && refused
+            && !move_target_enabled(&mut h, a, b)?,
+        &format!(
+            "locked window: commands {commands:?}, chrome still registered {registered:?}, \
+             maximize refused {refused}"
+        ),
+    )?;
+
+    // Every left gesture, the wheel and pinch change nothing.
+    let before = h.ws.observation().window(FIRST_WINDOW).cloned();
+    let view_before = view(&h, a)?;
+    raw_clicks(&mut h, entry, 1);
+    raw_clicks(&mut h, body_b, 1);
+    raw_clicks(&mut h, divider, 2);
+    raw_drag(&mut h, divider, aside);
+    raw_drag(&mut h, corner, corner + vec2(-30.0, -30.0));
+    raw_drag(&mut h, body_b, body_b + vec2(40.0, 20.0));
+    wheel_and_pinch(&mut h, body_a);
+    let commands = h.take_commands(FIRST_WINDOW);
+    let after = h.ws.observation().window(FIRST_WINDOW).cloned();
+    check(
+        after == before && view(&h, a)? == view_before && gestures(&commands) == 0,
+        &format!(
+            "a locked window reacted to the left button, wheel or pinch: \
+             {before:?} -> {after:?}, commands {commands:?}"
+        ),
+    )?;
+
+    // Unlocking brings everything back, through the same raw gestures.
+    h.settings(
+        ControlKey::LeafBody(a),
+        &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
+    )?;
+    let commands = h.take_commands(FIRST_WINDOW);
+    let registered = chrome.iter().filter(|key| h.locate(key).is_ok()).count();
+    check(
+        commands.contains(&ViewportCommand::Resizable(true))
+            && registered == chrome.len()
+            && maximize_enabled(&mut h)?
+            && move_target_enabled(&mut h, a, b)?,
+        &format!("unlocked window: commands {commands:?}, {registered} chrome controls"),
+    )?;
+    raw_clicks(&mut h, body_b, 1);
+    let selected =
+        h.ws.observation()
+            .window(FIRST_WINDOW)
+            .and_then(|w| w.active);
+    raw_drag(&mut h, divider, aside);
+    let moved_ratio = root_split(&h.ws, 0)?.1;
+    raw_drag(&mut h, corner, corner + vec2(-30.0, -30.0));
+    let resizes = gestures(&h.take_commands(FIRST_WINDOW));
+    wheel_and_pinch(&mut h, body_a);
+    let view_after = view(&h, a)?;
+    check(
+        selected == Some(b) && moved_ratio != ratio && resizes == 1 && view_after != view_before,
+        &format!(
+            "unlocked gestures: selected {selected:?}, ratio {ratio} -> {moved_ratio}, \
+             {resizes} resizes, view {view_before:?} -> {view_after:?}"
+        ),
+    )?;
+    Ok(json!({
+        "lock_ends_divider_drag": [ratio, dragged, ratio],
+        "locked": {"resizable": false, "chrome": 0, "maximize": "disabled",
+                   "move_target": "disabled", "left_wheel_pinch": "no effect"},
+        "unlocked": {"resizable": true, "chrome": registered, "selected": selected.map(|id| id.0),
+                     "ratio": moved_ratio, "resizes": resizes},
     }))
 }

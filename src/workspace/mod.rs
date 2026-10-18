@@ -164,8 +164,9 @@ pub(crate) enum WorkspaceAction {
         window_id: WindowId,
         enabled: bool,
     },
-    /// A pinned window does not move when its body is dragged; nor does its group.
-    SetPinned {
+    /// Lock a window (settings "Lock"): it takes right clicks only, cannot be
+    /// resized or maximized, and body drags move neither it nor its group.
+    SetLocked {
         window_id: WindowId,
         enabled: bool,
     },
@@ -364,8 +365,9 @@ pub(crate) struct WindowState {
     layout: Layout,
     active: Option<ModuleInstanceId>,
     always_on_top: bool,
-    /// Body drags do not move the window (or its group).
-    pinned: bool,
+    /// Locked ("Lock" in the settings): the window takes right clicks only, cannot
+    /// be resized natively, and body drags move neither it nor its group.
+    locked: bool,
     maximized: bool,
     /// Logical content size from the last UI pass (initially the requested size).
     content_size: Vec2,
@@ -377,6 +379,8 @@ pub(crate) struct WindowState {
     /// Builder inputs stay fixed after creation; later changes are commands, so egui
     /// never sees a changed builder and recreates the native window.
     initial_always_on_top: bool,
+    /// Native resizability at creation: off for a restored locked window.
+    initial_resizable: bool,
     pending_detach: Option<PendingDetach>,
     opened: bool,
     desktop: DesktopState,
@@ -397,7 +401,7 @@ impl WindowState {
             layout,
             active: None,
             always_on_top,
-            pinned: false,
+            locked: false,
             maximized: false,
             content_size: size,
             pixels_per_point: 1.0,
@@ -405,6 +409,7 @@ impl WindowState {
             initial_size: size,
             initial_min_size: EMPTY_WINDOW_MIN_SIZE,
             initial_always_on_top: always_on_top,
+            initial_resizable: true,
             pending_detach: None,
             opened: false,
             desktop: DesktopState::default(),
@@ -423,7 +428,8 @@ impl WindowState {
             .with_icon(crate::icon::small())
             .with_inner_size(self.initial_size)
             .with_min_inner_size(self.initial_min_size)
-            .with_decorations(false);
+            .with_decorations(false)
+            .with_resizable(self.initial_resizable);
         if let Some(position) = self.initial_position {
             builder = builder.with_position(position);
         }
@@ -776,8 +782,8 @@ impl Workspace {
             WorkspaceAction::SetAlwaysOnTop { window_id, enabled } => {
                 self.set_always_on_top(window_id, enabled)
             }
-            WorkspaceAction::SetPinned { window_id, enabled } => {
-                self.set_pinned(window_id, enabled)
+            WorkspaceAction::SetLocked { window_id, enabled } => {
+                self.set_locked(window_id, enabled)
             }
             WorkspaceAction::ToggleMaximized { window_id } => self.toggle_maximized(window_id),
             WorkspaceAction::GroupTouching { window_id } => self.group_touching(window_id),

@@ -51,26 +51,34 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    pub(super) fn set_pinned(
+    /// Lock or unlock a window. Locking ends a divider drag in it, back to where the
+    /// drag started.
+    pub(super) fn set_locked(
         &mut self,
         window_id: WindowId,
         enabled: bool,
     ) -> Result<ActionOutcome, WorkspaceError> {
-        self.window_mut(window_id)?.pinned = enabled;
+        let window = self.window_mut(window_id)?;
+        window.locked = enabled;
+        if enabled && let Some(drag) = window.ui.divider_drag.take() {
+            let _ = window
+                .layout
+                .set_ratio(drag.split_id, drag.start_ratio, false);
+        }
         Ok(ActionOutcome::Applied)
     }
 
     /// A body drag in this window may not start a native move: the window is
-    /// pinned, or a member of its group is (a group moves as one).
-    pub(super) fn drag_pinned(&self, window_id: WindowId) -> bool {
+    /// locked, or a member of its group is (a group moves as one).
+    pub(super) fn drag_locked(&self, window_id: WindowId) -> bool {
         let Some(window) = self.windows.get(&window_id) else {
             return false;
         };
-        window.pinned
+        window.locked
             || window.group.is_some_and(|group| {
                 self.windows
                     .values()
-                    .any(|other| other.group == Some(group) && other.pinned)
+                    .any(|other| other.group == Some(group) && other.locked)
             })
     }
 
@@ -79,6 +87,9 @@ impl Workspace {
         window_id: WindowId,
     ) -> Result<ActionOutcome, WorkspaceError> {
         let window = self.window_mut(window_id)?;
+        if window.locked {
+            return Err(WorkspaceError::Unsupported("maximizing a locked window"));
+        }
         let maximized = !window.maximized;
         window.commands.push(ViewportCommand::Maximized(maximized));
         Ok(ActionOutcome::Applied)

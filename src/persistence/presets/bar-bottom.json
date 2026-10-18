@@ -24,7 +24,7 @@
         1032.0
       ],
       "always_on_top": true,
-      "pinned": true,
+      "locked": true,
       "layout": {
         "node": "split",
         "axis": "left_right",

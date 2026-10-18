@@ -461,7 +461,8 @@ impl Workspace {
         let size = (outer.size() / scale).max(min_size);
         let mut window = WindowState::new(layout, size, file.always_on_top);
         window.initial_min_size = min_size;
-        window.pinned = file.pinned;
+        window.locked = file.locked;
+        window.initial_resizable = !file.locked;
         window.pixels_per_point = scale;
         window.initial_position = Some(outer.min / scale);
         // A maximized window only needs the position to pick its monitor; the OS
@@ -685,7 +686,7 @@ impl Workspace {
                     display,
                     frame: [frame.min.x, frame.min.y, frame.max.x, frame.max.y],
                     always_on_top: window.always_on_top,
-                    pinned: window.pinned,
+                    locked: window.locked,
                     maximized: window.maximized,
                     group,
                     active: window

@@ -109,9 +109,9 @@ pub(crate) struct WindowFile {
     pub(crate) frame: [f32; 4],
     #[serde(default)]
     pub(crate) always_on_top: bool,
-    /// Body drags do not move the window (or its group).
+    /// Takes right clicks only; body drags move neither it nor its group.
     #[serde(default)]
-    pub(crate) pinned: bool,
+    pub(crate) locked: bool,
     #[serde(default)]
     pub(crate) maximized: bool,
     /// Windows with the same number move together.
@@ -444,7 +444,7 @@ mod tests {
                 display: 0,
                 frame: [100.0, 100.0, 500.0, 300.0],
                 always_on_top: false,
-                pinned: false,
+                locked: false,
                 maximized: false,
                 group: None,
                 active: None,

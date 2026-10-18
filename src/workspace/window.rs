@@ -32,6 +32,8 @@ pub(crate) const RESIZE_CORNER: f32 = 12.0;
 const STATE_POLL: Duration = Duration::from_millis(250);
 /// Poll interval while a native move may still be in progress.
 const MOVE_POLL: Duration = Duration::from_millis(50);
+/// How long a left press in a locked window shows the "locked" hint.
+const LOCK_HINT: Duration = Duration::from_secs(2);
 
 /// Catppuccin Mocha colors of chrome that has no theme role.
 const MOCHA_CRUST: Color32 = Color32::from_rgb(0x09, 0x09, 0x0d);
@@ -234,7 +236,7 @@ pub(crate) struct ControlTarget {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DividerDrag {
     pub(crate) split_id: SplitId,
-    start_ratio: f32,
+    pub(crate) start_ratio: f32,
     current_ratio: f32,
     pixels_per_point: f32,
     cancelled: bool,
@@ -245,6 +247,10 @@ pub(crate) struct WindowUiState {
     pub(crate) divider_drag: Option<DividerDrag>,
     pub(crate) display_time: Duration,
     min_size_sent: Option<Vec2>,
+    /// Native resizability last commanded (`None`: still the builder's).
+    resizable_sent: Option<bool>,
+    /// Display time until which the "locked" hint shows.
+    lock_hint_until: Option<Duration>,
     #[cfg(any(test, feature = "automation"))]
     targets: std::collections::HashMap<ControlKey, ControlTarget>,
     #[cfg(any(test, feature = "automation"))]
@@ -517,6 +523,15 @@ impl Workspace {
                 .commands
                 .push(ViewportCommand::MinInnerSize(min_size));
         }
+        // A locked window takes right clicks only and has no native sizing either.
+        let locked = window.locked;
+        if window.ui.resizable_sent.unwrap_or(window.initial_resizable) == locked {
+            window.commands.push(ViewportCommand::Resizable(!locked));
+        }
+        window.ui.resizable_sent = Some(!locked);
+        if locked && ui.input(|input| input.pointer.primary_pressed()) {
+            window.ui.lock_hint_until = Some(display_time + LOCK_HINT);
+        }
 
         self.handle_shortcuts(window_id, ui);
         if !self.windows.contains_key(&window_id) {
@@ -527,7 +542,7 @@ impl Workspace {
         let mut actions = Vec::new();
         let mut repaint = None;
         if self.windows[&window_id].layout.is_empty() {
-            self.empty_window(window_id, ui, rect, &mut controls, &mut actions);
+            self.empty_window(window_id, ui, rect, locked, &mut controls, &mut actions);
         } else {
             repaint = self.layout_ui(
                 window_id,
@@ -535,6 +550,7 @@ impl Workspace {
                 rect,
                 display_time,
                 maximized,
+                locked,
                 &mut controls,
                 &mut actions,
             );
@@ -542,10 +558,13 @@ impl Workspace {
         if self.move_source.is_some() {
             self.move_targets(window_id, ui, rect, &mut controls, &mut actions);
         }
-        if !maximized {
+        if !maximized && !locked {
             Self::resize_edges(ui, rect, &mut controls);
         }
         self.status_badge(window_id, ui, rect);
+        if let Some(remaining) = self.lock_hint(window_id, ui, rect) {
+            repaint = Some(repaint.map_or(remaining, |current: Duration| current.min(remaining)));
+        }
 
         #[cfg(any(test, feature = "automation"))]
         if let Some(window) = self.windows.get_mut(&window_id) {
@@ -649,16 +668,16 @@ impl Workspace {
         }
     }
 
-    /// Hit rect of a leaf's split entry, or `None` when it is hidden: while picking a
-    /// move target, or when a copy would not fit on that side.
+    /// Hit rect of a leaf's split entry, or `None` when it is hidden (`hidden`: while
+    /// picking a move target or in a locked window) or a copy would not fit there.
     fn split_entry(
         &self,
         leaf: ModuleInstanceId,
         leaf_rect: Rect,
         side: Side,
-        picking: bool,
+        hidden: bool,
     ) -> Option<Rect> {
-        (!picking && self.can_split_in(leaf, side, leaf_rect.size()))
+        (!hidden && self.can_split_in(leaf, side, leaf_rect.size()))
             .then(|| split_zone(leaf_rect, side))
     }
 
@@ -670,6 +689,7 @@ impl Workspace {
         rect: Rect,
         display_time: Duration,
         maximized: bool,
+        locked: bool,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) -> Option<Duration> {
@@ -680,23 +700,31 @@ impl Workspace {
             window.layout.geometry(rect, &|id| self.module_min_size(id))
         };
         let picking = self.move_source.is_some();
+        // No split entries while picking a move target or in a locked window.
+        let no_entries = picking || locked;
         let popup_open = egui::Popup::is_any_open(&ctx);
         let reference_dbfs = self.reference_dbfs();
 
-        // Leaf bodies first: everything registered later sits on top of them.
+        // Leaf bodies first: everything registered later sits on top of them. A
+        // locked window's bodies only take right clicks.
+        let body_sense = if locked {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        };
         for &(leaf, leaf_rect) in &geometry.leaves {
             let body = ui.interact(
                 leaf_rect,
                 Id::new(("taffymeters.leaf", window_id.0, leaf.0)),
-                Sense::click_and_drag(),
+                body_sense,
             );
             controls.record(ControlKey::LeafBody(leaf), &body);
-            if body.clicked() {
+            if body.clicked() && !locked {
                 actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
             }
             if body.drag_started_by(PointerButton::Primary)
                 && !picking
-                && !self.drag_pinned(window_id)
+                && !self.drag_locked(window_id)
                 && let Some(window) = self.windows.get_mut(&window_id)
             {
                 window.commands.push(ViewportCommand::StartDrag);
@@ -711,9 +739,11 @@ impl Workspace {
                 });
             }
             // The Module only sees the pointer over its own content, not over the
-            // window chrome drawn on top of it (split entries, dividers, resize edges).
-            let entries = SPLIT_SIDES.map(|side| self.split_entry(leaf, leaf_rect, side, picking));
-            let pointer = (body.contains_pointer() && !popup_open && !picking)
+            // window chrome drawn on top of it (split entries, dividers, resize edges);
+            // in a locked window it sees no pointer, wheel or zoom at all.
+            let entries =
+                SPLIT_SIDES.map(|side| self.split_entry(leaf, leaf_rect, side, no_entries));
+            let pointer = (body.contains_pointer() && !popup_open && !picking && !locked)
                 .then(|| ui.input(|input| input.pointer.hover_pos()))
                 .flatten()
                 .filter(|position| {
@@ -762,7 +792,7 @@ impl Workspace {
         let dragging = ui.input(|input| input.pointer.is_decidedly_dragging());
         for &(leaf, leaf_rect) in &geometry.leaves {
             for side in SPLIT_SIDES {
-                let Some(zone) = self.split_entry(leaf, leaf_rect, side, picking) else {
+                let Some(zone) = self.split_entry(leaf, leaf_rect, side, no_entries) else {
                     continue;
                 };
                 let response = ui.interact(
@@ -801,7 +831,7 @@ impl Workspace {
             }
         }
 
-        self.dividers(window_id, ui, &geometry.dividers, controls, actions);
+        self.dividers(window_id, ui, &geometry.dividers, locked, controls, actions);
 
         if self.windows[&window_id].group.is_some() {
             ui.painter().rect_stroke(
@@ -814,11 +844,14 @@ impl Workspace {
         repaint
     }
 
+    /// Draw the dividers; outside a locked window they also take hover, drags and
+    /// double clicks.
     fn dividers(
         &mut self,
         window_id: WindowId,
         ui: &mut egui::Ui,
         dividers: &[DividerGeometry],
+        locked: bool,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
@@ -826,6 +859,21 @@ impl Workspace {
         let grid = !ui.input(|input| input.modifiers.alt);
         let mut drag_seen = false;
         for divider in dividers {
+            let line = match divider.axis {
+                Axis::LeftRight => [
+                    pos2(divider.position, divider.parent.min.y),
+                    pos2(divider.position, divider.parent.max.y),
+                ],
+                Axis::TopBottom => [
+                    pos2(divider.parent.min.x, divider.position),
+                    pos2(divider.parent.max.x, divider.position),
+                ],
+            };
+            if locked {
+                let color = color32(self.chrome.color(ColorRole::Divider));
+                ui.painter().line_segment(line, Stroke::new(1.0_f32, color));
+                continue;
+            }
             let response = ui.interact(
                 divider.hit_rect(),
                 Id::new(("taffymeters.divider", window_id.0, divider.id.0)),
@@ -901,16 +949,6 @@ impl Workspace {
             } else {
                 color32(self.chrome.color(ColorRole::Divider))
             };
-            let line = match divider.axis {
-                Axis::LeftRight => [
-                    pos2(divider.position, divider.parent.min.y),
-                    pos2(divider.position, divider.parent.max.y),
-                ],
-                Axis::TopBottom => [
-                    pos2(divider.parent.min.x, divider.position),
-                    pos2(divider.parent.max.x, divider.position),
-                ],
-            };
             ui.painter().line_segment(line, Stroke::new(1.0_f32, color));
         }
         // The dragged split disappeared (closed leaf / moved module): end the capture.
@@ -938,11 +976,14 @@ impl Workspace {
         }
     }
 
+    /// An empty window: its body drags the window and an "Add module" button sits in
+    /// the middle; a locked one takes right clicks only and shows no button.
     fn empty_window(
         &mut self,
         window_id: WindowId,
         ui: &mut egui::Ui,
         rect: Rect,
+        locked: bool,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
@@ -950,12 +991,16 @@ impl Workspace {
         let body = ui.interact(
             rect,
             Id::new(("taffymeters.empty", window_id.0)),
-            Sense::click_and_drag(),
+            if locked {
+                Sense::click()
+            } else {
+                Sense::click_and_drag()
+            },
         );
         controls.record(ControlKey::EmptyBody, &body);
         if body.drag_started_by(PointerButton::Primary)
             && !picking
-            && !self.drag_pinned(window_id)
+            && !self.drag_locked(window_id)
             && let Some(window) = self.windows.get_mut(&window_id)
         {
             window.commands.push(ViewportCommand::StartDrag);
@@ -973,16 +1018,17 @@ impl Workspace {
         if picking {
             return;
         }
-        let button_rect = Rect::from_center_size(rect.center(), egui::vec2(140.0, 28.0));
-        let button = ui
-            .scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+        let button = !locked && {
+            let button_rect = Rect::from_center_size(rect.center(), egui::vec2(140.0, 28.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
                 let response = ui.menu_button("Add module", |ui| {
                     self.add_menu(ui, controls, actions, window_id);
                 });
                 controls.record(ControlKey::AddOpen, &response.response);
                 response.response.secondary_clicked()
             })
-            .inner;
+            .inner
+        };
         // A right click anywhere in the empty window opens its settings.
         if body.secondary_clicked() || button {
             actions.push(WorkspaceAction::OpenSettings {
@@ -1128,6 +1174,32 @@ impl Workspace {
             MOCHA_CRUST.gamma_multiply_u8(200),
         );
         painter.galley(origin, galley, Color32::WHITE);
+    }
+
+    /// The hint a left press in a locked window shows for a while; returns how long
+    /// it still shows.
+    fn lock_hint(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) -> Option<Duration> {
+        let window = self.windows.get_mut(&window_id)?;
+        let now = window.ui.display_time;
+        window.ui.lock_hint_until = window
+            .ui
+            .lock_hint_until
+            .filter(|until| window.locked && *until > now);
+        let remaining = window.ui.lock_hint_until? - now;
+        let painter = ui.painter_at(rect);
+        let galley = painter.layout_no_wrap(
+            "Locked · right-click for settings".to_owned(),
+            FontId::proportional(12.0),
+            Color32::WHITE,
+        );
+        let origin = rect.center() - galley.size() / 2.0;
+        painter.rect_filled(
+            Rect::from_min_size(origin, galley.size()).expand(4.0),
+            3.0,
+            MOCHA_CRUST.gamma_multiply_u8(200),
+        );
+        painter.galley(origin, galley, Color32::WHITE);
+        Some(remaining)
     }
 }
 
