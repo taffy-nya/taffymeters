@@ -122,6 +122,9 @@ pub(crate) enum SettingsItem {
     ConfirmDelete,
     CancelDelete,
     Pause,
+    /// A notice by index in the listed order.
+    Notice(u16),
+    CopyNotices,
     ClearNotices,
     Quit,
     Preset(Preset),
@@ -165,6 +168,8 @@ pub(crate) struct SettingsWindow {
     name: String,
     /// The user preset whose deletion waits for confirmation.
     confirm_delete: Option<String>,
+    /// The notices were copied; Copy reads "Copied" until the pointer leaves it.
+    notices_copied: bool,
     /// A text field (a name, a typed number) had keyboard focus at the end of the
     /// last pass: Escape belongs to it. egui drops the focus on Escape before the
     /// next pass runs, so the pass that sees Escape cannot ask egui itself.
@@ -193,6 +198,7 @@ impl SettingsWindow {
             type_style: None,
             name: String::new(),
             confirm_delete: None,
+            notices_copied: false,
             text_focus: false,
             initial_position,
             opening,

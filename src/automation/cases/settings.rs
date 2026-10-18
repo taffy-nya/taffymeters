@@ -30,7 +30,7 @@ use crate::{
 };
 
 use crate::automation::{
-    harness::{FakeDesktop, Harness},
+    harness::{FakeDesktop, Harness, SETTINGS},
     support::{action, check, created, deadline, first_leaf, wait_until, workspace},
 };
 
@@ -1397,6 +1397,22 @@ fn s05() -> Result<Value, String> {
         read_json(&dir.session())?["windows"][0]["layout"]["second"]["first"]["module"]["style"]
             == LINE_OSCILLOSCOPE_STYLE_ID,
         "an explicit style choice did not replace the kept one",
+    )?;
+    // Notices are plain text (no text cursor); Copy puts all of them on the
+    // clipboard, one per line.
+    h.in_settings(&[SettingsItem::Tab(Tab::Workspace)])?;
+    h.point_at(ControlKey::Settings(SettingsItem::Notice(0)))?;
+    let cursor = h.window(SETTINGS)?.cursor;
+    check(
+        cursor == egui::CursorIcon::Default,
+        &format!("a notice shows the {cursor:?} cursor"),
+    )?;
+    h.click(ControlKey::Settings(SettingsItem::CopyNotices))?;
+    let expected = h.ws.observation().notices.join("\n");
+    let copied = &h.window(SETTINGS)?.copied;
+    check(
+        copied.as_slice() == [expected.clone()],
+        &format!("Copy put {copied:?} on the clipboard, not {expected:?}"),
     )?;
     let placeholder = o.modules[0].instance_id;
     check(

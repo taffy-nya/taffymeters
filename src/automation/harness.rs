@@ -86,6 +86,10 @@ pub(super) struct SimWindow {
     pub min_size: Vec2,
     /// Every viewport command emitted since the last `take_commands`.
     pub commands: Vec<ViewportCommand>,
+    /// Cursor the last pass asked for.
+    pub cursor: egui::CursorIcon,
+    /// Every text the passes put on the clipboard.
+    pub copied: Vec<String>,
     targets: HashMap<ControlKey, ControlTarget>,
 }
 
@@ -102,6 +106,8 @@ impl SimWindow {
             minimized: false,
             min_size: Vec2::ZERO,
             commands: Vec::new(),
+            cursor: egui::CursorIcon::Default,
+            copied: Vec::new(),
             targets: HashMap::new(),
         }
     }
@@ -274,6 +280,17 @@ impl Harness {
         };
         if let Some(window) = self.windows.get_mut(&id) {
             window.targets = targets;
+            window.cursor = output.platform_output.cursor_icon;
+            window.copied.extend(
+                output
+                    .platform_output
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                        _ => None,
+                    }),
+            );
             for viewport in output.viewport_output.values() {
                 for command in &viewport.commands {
                     match command {
@@ -368,6 +385,12 @@ impl Harness {
         Err(format!(
             "No hit-testable point in control: {key:?}, target={target:?}"
         ))
+    }
+
+    /// Rest the pointer on a control (it reports hovered), without clicking.
+    pub fn point_at(&mut self, key: ControlKey) -> Result<Pos2, String> {
+        let target = self.locate(&key)?;
+        self.hover(&key, target)
     }
 
     fn button(

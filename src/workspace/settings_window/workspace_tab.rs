@@ -173,20 +173,41 @@ impl Workspace {
                 actions.push(WorkspaceAction::SetReferenceLevel { dbfs });
             }
         });
-        if !self.notices.is_empty() {
+        if self.notices.is_empty() {
+            settings.notices_copied = false;
+        } else {
             card(ui, "Notices", |ui| {
-                for notice in &self.notices {
-                    warning(ui, notice);
+                for (index, notice) in self.notices.iter().enumerate() {
+                    let response = warning(ui, notice);
+                    record(controls, SettingsItem::Notice(index as u16), &response);
                 }
-                if button(
-                    ui,
-                    true,
-                    "Clear notices",
-                    SettingsItem::ClearNotices,
-                    controls,
-                ) {
-                    actions.push(WorkspaceAction::ClearNotices);
-                }
+                ui.horizontal(|ui| {
+                    if button(
+                        ui,
+                        true,
+                        "Clear notices",
+                        SettingsItem::ClearNotices,
+                        controls,
+                    ) {
+                        actions.push(WorkspaceAction::ClearNotices);
+                    }
+                    // Last in the row: "Copied" is wider and moves nothing.
+                    let label = if settings.notices_copied {
+                        "Copied"
+                    } else {
+                        "Copy"
+                    };
+                    let response = ui
+                        .button(label)
+                        .on_hover_text("Copy every notice to the clipboard");
+                    record(controls, SettingsItem::CopyNotices, &response);
+                    if response.clicked() {
+                        ui.ctx().copy_text(self.notices.join("\n"));
+                        settings.notices_copied = true;
+                    } else if !response.hovered() {
+                        settings.notices_copied = false;
+                    }
+                });
             });
         }
         ui.add_space(4.0);

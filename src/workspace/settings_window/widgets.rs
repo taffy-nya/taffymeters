@@ -268,9 +268,9 @@ pub(super) fn danger_button(
 }
 
 /// A hint under a control, in the warning color.
-pub(super) fn warning(ui: &mut egui::Ui, text: &str) {
+pub(super) fn warning(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let color = ui.visuals().warn_fg_color;
-    ui.label(RichText::new(text).color(color));
+    ui.label(RichText::new(text).color(color))
 }
 
 /// `value` with a precision that suits its unit: kHz above 1000 Hz, whole

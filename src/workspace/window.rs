@@ -49,6 +49,10 @@ pub(crate) fn color32(color: crate::render::Color) -> Color32 {
 /// Make egui's widgets (menus, buttons, the settings window) follow the global
 /// palette. Every viewport shares one style, so each pass applies it; the style is
 /// only rebuilt when the palette differs from the one last applied to `ctx`.
+///
+/// Labels are plain text: egui's label selection is one state per `Context`, and
+/// every viewport's pass ends by dropping a selection it did not draw, so with
+/// several viewports it never selects anything and only showed a text cursor.
 pub(crate) fn apply_chrome_style(ctx: &egui::Context, palette: &crate::theme::Palette) {
     let id = Id::new("taffymeters.chrome_palette");
     if ctx.data(|data| data.get_temp::<crate::theme::Palette>(id)) == Some(*palette) {
@@ -62,6 +66,7 @@ pub(crate) fn apply_chrome_style(ctx: &egui::Context, palette: &crate::theme::Pa
     };
     ctx.set_theme(theme);
     ctx.set_visuals_of(theme, chrome_visuals(palette));
+    ctx.all_styles_mut(|style| style.interaction.selectable_labels = false);
 }
 
 fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
