@@ -24,7 +24,7 @@ use crate::automation::{
 
 type Scenario = fn() -> Result<Value, String>;
 
-pub(super) const CASES: [(&str, Scenario); 11] = [
+pub(super) const CASES: [(&str, Scenario); 12] = [
     ("W01", w01),
     ("W02", w02),
     ("W03", w03),
@@ -36,6 +36,7 @@ pub(super) const CASES: [(&str, Scenario); 11] = [
     ("W09", w09),
     ("W10", w10),
     ("W11", w11),
+    ("W12", w12),
 ];
 
 fn split(
@@ -1487,4 +1488,66 @@ fn w11() -> Result<Value, String> {
         "past_edge":[[held[0].x,held[0].y],[held[1].x,held[1].y]],"escape":"back to start",
         "snap_top":[[snapped[0].x,snapped[0].y],[snapped[1].x,snapped[1].y]],
         "rescued":[[rescued[0].x,rescued[0].y],[rescued[1].x,rescued[1].y]]}))
+}
+
+/// Window tab New: an empty window of the source's size, offset by the detach
+/// offset, on top like the source but neither locked nor grouped; the settings
+/// window moves on to it (Add module there fills it) and Close closes only it.
+fn w12() -> Result<Value, String> {
+    let (ws, _driver) = workspace()?;
+    let a = first_leaf(&ws)?;
+    let mut h = Harness::new(ws);
+    h.set_size(vec2(640.0, 300.0));
+    h.frame(vec![]);
+    h.settings(
+        ControlKey::LeafBody(a),
+        &[
+            SettingsItem::Tab(Tab::Window),
+            SettingsItem::AlwaysOnTop,
+            SettingsItem::Lock,
+            SettingsItem::NewWindow,
+        ],
+    )?;
+    h.frame_all()?;
+    let created: Vec<WindowId> =
+        h.ws.observation()
+            .windows
+            .iter()
+            .map(|w| w.id)
+            .filter(|id| *id != FIRST_WINDOW)
+            .collect();
+    let [new] = created[..] else {
+        return Err(format!("expected one new window, got {created:?}"));
+    };
+    let source = h.window(FIRST_WINDOW)?;
+    let sim = h.window(new)?;
+    let (offset, size) = (sim.position - source.position, sim.size);
+    let o = h.ws.observation();
+    let observed = o.window(new).ok_or("new window missing")?;
+    check(
+        offset == vec2(32.0, 32.0)
+            && size == vec2(640.0, 300.0)
+            && observed.leaves.is_empty()
+            && observed.always_on_top
+            && !observed.locked
+            && observed.group.is_none(),
+        &format!("new window: offset {offset:?}, size {size:?}, {observed:?}"),
+    )?;
+    // The settings window now edits the new window: adding fills it, not the source.
+    h.in_settings(&[SettingsItem::AddModule(WAVEFORM_MODULE_ID)])?;
+    let filled = leaves(&h.ws, new).len();
+    let source_leaves = leaves(&h.ws, FIRST_WINDOW);
+    check(
+        filled == 1 && source_leaves == vec![a],
+        &format!("Add module after New: new window {filled} leaves, source {source_leaves:?}"),
+    )?;
+    h.in_settings(&[SettingsItem::CloseWindow])?;
+    check(
+        !h.ws.has_window(new) && h.ws.has_window(FIRST_WINDOW),
+        "Close did not close only the new window",
+    )?;
+    h.ws.check_ownership()?;
+    Ok(json!({"offset":[offset.x,offset.y],"size":[size.x,size.y],
+        "inherits":"always on top","not_inherited":["lock","group"],
+        "settings_target":"new window","close":"new window only"}))
 }

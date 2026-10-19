@@ -3,10 +3,11 @@
 
 use std::time::Duration;
 
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand};
+use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2};
 
 use super::{
-    ActionOutcome, DETACH_TIMEOUT, WindowId, WindowState, Workspace, WorkspaceError, desktop,
+    ActionOutcome, DETACH_OFFSET_POINTS, DETACH_TIMEOUT, EMPTY_WINDOW_MIN_SIZE,
+    INITIAL_WINDOW_SIZE, WindowId, WindowState, Workspace, WorkspaceError, desktop, layout::Layout,
     moving::MoveRequest,
 };
 
@@ -33,6 +34,35 @@ impl Workspace {
         }
         self.close_window(window_id)?;
         Ok(ActionOutcome::Applied)
+    }
+
+    /// An empty window the size of `window_id` (its restored size is unknown while
+    /// maximized: then the default size), down-right of it by the detach offset.
+    /// Always-on-top carries over as for a detached window; lock and group do not.
+    /// The settings window, when open, moves on to the new window's Window tab.
+    pub(super) fn new_window(
+        &mut self,
+        window_id: WindowId,
+    ) -> Result<ActionOutcome, WorkspaceError> {
+        let source = self.window(window_id)?;
+        let size = if source.maximized {
+            INITIAL_WINDOW_SIZE
+        } else {
+            source.content_size
+        }
+        .max(EMPTY_WINDOW_MIN_SIZE);
+        let ppp = source.pixels_per_point;
+        let position = source.outer.map(|outer| {
+            let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
+            pos2(physical.x / ppp, physical.y / ppp)
+        });
+        let mut window = WindowState::new(Layout::default(), size, source.always_on_top);
+        window.initial_position = position;
+        window.pixels_per_point = ppp;
+        let new_id = WindowId(Self::allocate(&mut self.next_window_id)?);
+        self.windows.insert(new_id, window);
+        self.retarget_settings(new_id);
+        Ok(ActionOutcome::WindowCreated(new_id))
     }
 
     pub(super) fn set_always_on_top(

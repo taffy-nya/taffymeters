@@ -162,6 +162,11 @@ pub(crate) enum WorkspaceAction {
         instance_id: ModuleInstanceId,
         target: MoveTarget,
     },
+    /// Open an empty window the size of `window_id`, offset like a detached one,
+    /// and point the open settings window at it.
+    NewWindow {
+        window_id: WindowId,
+    },
     CloseWindow {
         window_id: WindowId,
     },
@@ -791,6 +796,7 @@ impl Workspace {
                 instance_id,
                 target,
             } => self.move_module(instance_id, target),
+            WorkspaceAction::NewWindow { window_id } => self.new_window(window_id),
             WorkspaceAction::CloseWindow { window_id } => self.close_window_action(window_id),
             WorkspaceAction::SetAlwaysOnTop { window_id, enabled } => {
                 self.set_always_on_top(window_id, enabled)

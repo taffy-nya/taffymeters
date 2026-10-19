@@ -107,6 +107,7 @@ pub(crate) enum SettingsItem {
     Maximize,
     Group,
     LeaveGroup,
+    NewWindow,
     CloseWindow,
     AddModule(&'static str),
     /// Name for a new preset.
@@ -312,6 +313,16 @@ impl Workspace {
         settings.confirm_delete = None;
         settings.commands.push(ViewportCommand::Focus);
         Ok(())
+    }
+
+    /// Point an open settings window at `window_id`'s Window tab (it keeps focus).
+    pub(super) fn retarget_settings(&mut self, window_id: WindowId) {
+        if let Some(settings) = &mut self.settings {
+            settings.instance = None;
+            settings.window = Some(window_id);
+            settings.tab = Tab::Window;
+            settings.confirm_delete = None;
+        }
     }
 
     /// Instance and window the tabs edit, when they still exist.

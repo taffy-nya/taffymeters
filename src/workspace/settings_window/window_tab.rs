@@ -1,11 +1,11 @@
-//! The Window tab: adding to an empty window, always-on-top, lock, maximize,
-//! grouping and closing the targeted window.
+//! The Window tab: new and close, adding to an empty window, always-on-top, lock,
+//! maximize and grouping of the targeted window.
 
 use eframe::egui::{self, RichText};
 
 use super::{
     SettingsItem,
-    widgets::{button, card, danger_button, header, record, trailing},
+    widgets::{button, card, danger_button, header, record},
 };
 use crate::workspace::{WindowId, Workspace, WorkspaceAction, window::Controls};
 
@@ -27,6 +27,16 @@ impl Workspace {
             count => format!("{count} modules"),
         };
         ui.horizontal_wrapped(|ui| header(ui, &format!("Window #{}", window_id.0), &detail));
+        // First on the page, like the Module tab's layout actions.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if button(ui, true, "New", SettingsItem::NewWindow, controls) {
+                actions.push(WorkspaceAction::NewWindow { window_id });
+            }
+            if danger_button(ui, "Close", SettingsItem::CloseWindow, controls) {
+                actions.push(WorkspaceAction::CloseWindow { window_id });
+            }
+        });
         if window.layout.is_empty() && window.pending_detach.is_none() {
             card(ui, "Add module", |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -103,12 +113,6 @@ impl Workspace {
                     actions.push(WorkspaceAction::LeaveGroup { window_id });
                 }
             });
-        });
-        ui.add_space(4.0);
-        trailing(ui, |ui| {
-            if danger_button(ui, "Close window", SettingsItem::CloseWindow, controls) {
-                actions.push(WorkspaceAction::CloseWindow { window_id });
-            }
         });
         group_hovered
     }
