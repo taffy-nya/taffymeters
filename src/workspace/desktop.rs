@@ -303,6 +303,78 @@ pub(crate) fn snap_group(
     vec2(best_x.unwrap_or(0.0), best_y.unwrap_or(0.0))
 }
 
+/// The sides of a frame a resize moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ResizeSides {
+    pub(crate) left: bool,
+    pub(crate) top: bool,
+    pub(crate) right: bool,
+    pub(crate) bottom: bool,
+}
+
+/// `frame` as a resize of its `sides` leaves it, each moving edge put on the
+/// nearest edge (within `threshold`) of another window or of the work area nearest
+/// the frame's center: adjacent or aligned, as when moving. Other windows only
+/// count within `threshold` of the frame on both axes. Snaps that would make the
+/// frame smaller than `min` are left out; the other edges stay.
+pub(crate) fn snap_resize(
+    frame: Rect,
+    sides: ResizeSides,
+    others: &[Rect],
+    work_areas: &[Rect],
+    threshold: f32,
+    min: Vec2,
+) -> Rect {
+    let near = |other: &&Rect| {
+        frame.min.x <= other.max.x + threshold
+            && other.min.x <= frame.max.x + threshold
+            && frame.min.y <= other.max.y + threshold
+            && other.min.y <= frame.max.y + threshold
+    };
+    let area = nearest_area(work_areas, frame.center());
+    let nearest =
+        |edge: f32, targets: &mut dyn Iterator<Item = f32>, fits: &dyn Fn(f32) -> bool| {
+            targets
+                .filter(|target| (target - edge).abs() <= threshold && fits(*target))
+                .min_by(|a, b| (a - edge).abs().total_cmp(&(b - edge).abs()))
+                .unwrap_or(edge)
+        };
+    let mut snapped = frame;
+    if sides.left {
+        let mut targets = others
+            .iter()
+            .filter(near)
+            .flat_map(|other| [other.max.x, other.min.x])
+            .chain(area.map(|area| area.min.x));
+        snapped.min.x = nearest(frame.min.x, &mut targets, &|x| frame.max.x - x >= min.x);
+    }
+    if sides.right {
+        let mut targets = others
+            .iter()
+            .filter(near)
+            .flat_map(|other| [other.min.x, other.max.x])
+            .chain(area.map(|area| area.max.x));
+        snapped.max.x = nearest(frame.max.x, &mut targets, &|x| x - frame.min.x >= min.x);
+    }
+    if sides.top {
+        let mut targets = others
+            .iter()
+            .filter(near)
+            .flat_map(|other| [other.max.y, other.min.y])
+            .chain(area.map(|area| area.min.y));
+        snapped.min.y = nearest(frame.min.y, &mut targets, &|y| frame.max.y - y >= min.y);
+    }
+    if sides.bottom {
+        let mut targets = others
+            .iter()
+            .filter(near)
+            .flat_map(|other| [other.min.y, other.max.y])
+            .chain(area.map(|area| area.max.y));
+        snapped.max.y = nearest(frame.max.y, &mut targets, &|y| y - frame.min.y >= min.y);
+    }
+    snapped
+}
+
 /// Shift (per axis, as small as possible) after which every one of `members` shows
 /// at least `min_visible` of itself (or all of a smaller window) inside the work
 /// area nearest its center. When they cannot all, earlier members win. Zero when
@@ -745,6 +817,53 @@ mod tests {
         let primary = rect(0.0, 0.0, 1920.0, 1040.0);
         let near_corner = rect(-1910.0, 935.0, 200.0, 100.0);
         assert_eq!(snap(near_corner, &[], &[primary, work]), vec2(-10.0, 5.0));
+    }
+
+    #[test]
+    fn resizing_snaps_only_the_moving_edges_and_keeps_the_minimum() {
+        let work = [rect(0.0, 0.0, 1920.0, 1040.0)];
+        // `above` ends 10 px above the frame and 10 px right of its right edge.
+        let above = rect(0.0, 100.0, 600.0, 290.0);
+        let far = rect(1500.0, 100.0, 300.0, 300.0);
+        let frame = rect(100.0, 400.0, 490.0, 200.0);
+        let resize = |sides, frame, min| snap_resize(frame, sides, &[above, far], &work, 12.0, min);
+        let top = ResizeSides {
+            top: true,
+            ..Default::default()
+        };
+        let top_right = ResizeSides {
+            top: true,
+            right: true,
+            ..Default::default()
+        };
+        let min = vec2(16.0, 16.0);
+        // Top edge to `above`'s bottom (adjacent), nothing else moves.
+        assert_eq!(
+            resize(top, frame, min),
+            Rect::from_min_max(pos2(100.0, 390.0), pos2(590.0, 600.0))
+        );
+        // A corner snaps both of its edges: the right one aligns with `above`'s.
+        assert_eq!(
+            resize(top_right, frame, min),
+            Rect::from_min_max(pos2(100.0, 390.0), pos2(600.0, 600.0))
+        );
+        // The right edge alone is not moving: unchanged.
+        assert_eq!(resize(top, frame, min).max.x, 590.0);
+        // A snap that would make the frame shorter than its minimum is left out.
+        let short = rect(100.0, 395.0, 490.0, 20.0);
+        assert_eq!(resize(top, short, vec2(16.0, 30.0)), short);
+        assert_eq!(resize(top, short, min).min.y, 390.0);
+        // Work-area edges; the far window is no target.
+        let low = rect(100.0, 800.0, 1395.0, 232.0);
+        let bottom_right = ResizeSides {
+            bottom: true,
+            right: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resize(bottom_right, low, min),
+            Rect::from_min_max(pos2(100.0, 800.0), pos2(1495.0, 1040.0))
+        );
     }
 
     #[test]

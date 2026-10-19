@@ -8,32 +8,40 @@
 //! - any other pure move of a grouped window (another program, the OS) moves the
 //!   rest of its group in the same message;
 //! - `place` moves windows for the Workspace (restore, rescue) without the group
-//!   following.
+//!   following;
+//! - an edge resize (the OS sizing loop that `BeginResize` starts) snaps the edges
+//!   it moves in `WM_SIZING`, unless Alt is held.
 //!
 //! The tracker lock is never held while windows move: moving one sends its
 //! `WM_WINDOWPOSCHANGED` (and the followers') into this procedure again.
 
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
-use eframe::egui::{Pos2, Rect, pos2};
+use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     System::Threading::GetCurrentThreadId,
     UI::{
+        HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
         Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_ESCAPE, VK_LBUTTON, VK_MENU},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
             BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, EnumThreadWindows,
-            GetCursorPos, GetWindowRect, GetWindowTextW, HWND_TOP, SC_KEYMENU, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WINDOWPOS,
-            WM_CAPTURECHANGED, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-            WM_NCDESTROY, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED,
+            GetCursorPos, GetMessagePos, GetWindowRect, GetWindowTextW, HWND_TOP, IsIconic,
+            IsZoomed, MINMAXINFO, SC_KEYMENU, SM_CXMINTRACK, SM_CYMINTRACK, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos,
+            WINDOWPOS, WM_CAPTURECHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
+            WM_SIZING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED, WMSZ_BOTTOM,
+            WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
+            WMSZ_TOPRIGHT,
         },
     },
 };
 
 use super::{
     WindowId,
+    desktop::{self, DesktopProbe, NativeDesktop, ResizeSides},
     moving::{MoveRequest, WindowTracker},
 };
 
@@ -53,9 +61,21 @@ struct Native {
     swallow_keymenu: bool,
     /// Escape canceled a move: its release belongs to that too.
     swallow_escape_up: bool,
+    /// What an edge resize in progress snaps to.
+    sizing: Option<Sizing>,
     /// Reused for every batch of moves.
     moves: Vec<(WindowId, Pos2)>,
     batch: Vec<(isize, i32, i32)>,
+}
+
+/// Snap targets of an edge resize, taken when the OS sizing loop starts.
+struct Sizing {
+    others: Vec<Rect>,
+    work_areas: Vec<Rect>,
+    /// Physical pixels at the window's scale.
+    threshold: f32,
+    /// The smallest frame the window may have (its own and the system's).
+    min: Vec2,
 }
 
 impl Native {
@@ -156,6 +176,16 @@ fn cursor() -> Pos2 {
     pos2(point.x as f32, point.y as f32)
 }
 
+/// The pointer (screen, physical) when the message being handled was sent.
+fn message_cursor() -> Pos2 {
+    // SAFETY: no preconditions.
+    let position = unsafe { GetMessagePos() };
+    pos2(
+        f32::from(position as u16 as i16),
+        f32::from((position >> 16) as u16 as i16),
+    )
+}
+
 fn alt_down() -> bool {
     // SAFETY: no preconditions.
     unsafe { GetKeyState(i32::from(VK_MENU)) < 0 }
@@ -208,7 +238,7 @@ pub(super) fn begin_move(request: &MoveRequest, work_areas: Vec<Rect>) -> bool {
         };
     }
     // The pointer moved past egui's drag threshold already: catch up.
-    drive();
+    drive(cursor());
     true
 }
 
@@ -225,9 +255,9 @@ pub(super) fn place(moves: &[(WindowId, Pos2)]) -> bool {
     true
 }
 
-/// Move the session's members to where the pointer puts them now.
-fn drive() {
-    let (cursor, free) = (cursor(), alt_down());
+/// Move the session's members to where the pointer at `cursor` puts them.
+fn drive(cursor: Pos2) {
+    let free = alt_down();
     {
         let mut native = native();
         let Native { tracker, moves, .. } = &mut *native;
@@ -275,6 +305,66 @@ fn apply() {
     native.batch = std::mem::take(&mut batch);
 }
 
+/// Snap targets for an edge resize of `window`: the other Workspace windows that
+/// are neither minimized nor maximized, the work areas, and the window's minimum.
+fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
+    let handles: Vec<isize> = native()
+        .handles
+        .iter()
+        .filter(|(id, _)| *id != window)
+        .map(|(_, handle)| *handle)
+        .collect();
+    let others = handles
+        .into_iter()
+        .map(|handle| handle as HWND)
+        // SAFETY: tracked windows of this thread; state queries only.
+        .filter(|other| unsafe { IsIconic(*other) == 0 && IsZoomed(*other) == 0 })
+        .filter_map(frame_of)
+        .collect();
+    let work_areas = NativeDesktop
+        .displays()
+        .iter()
+        .map(|display| display.work)
+        .collect();
+    // SAFETY: a window of this thread.
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let mut info = MINMAXINFO::default();
+    // SAFETY: WM_GETMINMAXINFO fills the MINMAXINFO it points to (winit sets the
+    // window's minimum there); the system adds its own for windows with a caption.
+    let min = unsafe {
+        SendMessageW(
+            hwnd,
+            WM_GETMINMAXINFO,
+            0,
+            &mut info as *mut MINMAXINFO as LPARAM,
+        );
+        vec2(
+            info.ptMinTrackSize
+                .x
+                .max(GetSystemMetricsForDpi(SM_CXMINTRACK, dpi)) as f32,
+            info.ptMinTrackSize
+                .y
+                .max(GetSystemMetricsForDpi(SM_CYMINTRACK, dpi)) as f32,
+        )
+    };
+    Sizing {
+        others,
+        work_areas,
+        threshold: desktop::SNAP_DISTANCE_POINTS * dpi as f32 / 96.0,
+        min,
+    }
+}
+
+/// The edges a `WM_SIZING` side moves.
+fn sizing_sides(side: u32) -> ResizeSides {
+    ResizeSides {
+        left: matches!(side, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT),
+        top: matches!(side, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT),
+        right: matches!(side, WMSZ_RIGHT | WMSZ_TOPRIGHT | WMSZ_BOTTOMRIGHT),
+        bottom: matches!(side, WMSZ_BOTTOM | WMSZ_BOTTOMLEFT | WMSZ_BOTTOMRIGHT),
+    }
+}
+
 unsafe extern "system" fn subclass(
     hwnd: HWND,
     message: u32,
@@ -306,10 +396,14 @@ unsafe extern "system" fn subclass(
             if wparam & MK_LBUTTON == 0 {
                 native().tracker.end();
             } else {
-                drive();
+                drive(message_cursor());
             }
         }
-        WM_LBUTTONUP if leading() => native().tracker.end(),
+        WM_LBUTTONUP if leading() => {
+            // The release may come before the move to where it happened.
+            drive(message_cursor());
+            native().tracker.end();
+        }
         WM_CAPTURECHANGED if lparam as HWND != hwnd && leading() => native().tracker.end(),
         WM_KEYDOWN if wparam == usize::from(VK_ESCAPE) && leading() => {
             {
@@ -335,7 +429,7 @@ unsafe extern "system" fn subclass(
             // SAFETY: forwarding this window's message.
             let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
             // Alt toggles snapping without the pointer moving.
-            drive();
+            drive(message_cursor());
             return result;
         }
         WM_SYSCOMMAND if (wparam as u32 & 0xFFF0) == SC_KEYMENU => {
@@ -366,6 +460,38 @@ unsafe extern "system" fn subclass(
                 }
             }
             return result;
+        }
+        WM_ENTERSIZEMOVE => {
+            let sizing = sizing_targets(hwnd, window);
+            native().sizing = Some(sizing);
+        }
+        WM_EXITSIZEMOVE => native().sizing = None,
+        WM_SIZING => {
+            // The OS proposes the frame for the pointer each time; snapping it
+            // here keeps an edge on a target until the pointer is past it.
+            let mut native = native();
+            if alt_down() {
+                native.swallow_keymenu = true;
+            } else if let Some(sizing) = &native.sizing {
+                // SAFETY: WM_SIZING carries the proposed frame, to be adjusted.
+                let rect = unsafe { &mut *(lparam as *mut RECT) };
+                let frame = Rect::from_min_max(
+                    pos2(rect.left as f32, rect.top as f32),
+                    pos2(rect.right as f32, rect.bottom as f32),
+                );
+                let snapped = desktop::snap_resize(
+                    frame,
+                    sizing_sides(wparam as u32),
+                    &sizing.others,
+                    &sizing.work_areas,
+                    sizing.threshold,
+                    sizing.min,
+                );
+                rect.left = snapped.min.x.round() as i32;
+                rect.top = snapped.min.y.round() as i32;
+                rect.right = snapped.max.x.round() as i32;
+                rect.bottom = snapped.max.y.round() as i32;
+            }
         }
         WM_NCDESTROY => {
             {
