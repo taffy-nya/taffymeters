@@ -2,6 +2,11 @@
 name = "taffymeters"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.92"
+description = "Lightweight, customizable real-time audio visualizer for Windows"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/taffy-nya/taffymeters"
+publish = false
 
 [features]
 automation = ["dep:image", "dep:sha2", "windows-sys/Win32_System_WindowsProgramming"]

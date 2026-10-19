@@ -23,7 +23,7 @@ Theme／持久化和产品外部插件加载仍属于后续阶段。
 
 ## 构建
 
-需要 Rust 1.85 或更高版本、Windows，以及可用的播放端点。
+需要 Rust 1.92 或更高版本、Windows，以及可用的播放端点。
 
 ```text
 cargo build --release
