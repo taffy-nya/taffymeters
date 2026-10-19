@@ -15,7 +15,10 @@
 //! The tracker lock is never held while windows move: moving one sends its
 //! `WM_WINDOWPOSCHANGED` (and the followers') into this procedure again.
 
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{
+    LazyLock, Mutex, MutexGuard, PoisonError,
+    atomic::{AtomicIsize, Ordering},
+};
 
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 use windows_sys::Win32::{
@@ -23,16 +26,20 @@ use windows_sys::Win32::{
     System::Threading::GetCurrentThreadId,
     UI::{
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
-        Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_ESCAPE, VK_LBUTTON, VK_MENU},
+        Input::KeyboardAndMouse::{
+            GetAsyncKeyState, GetKeyState, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
+            VK_ESCAPE, VK_LBUTTON, VK_MENU,
+        },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
             BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, EnumThreadWindows,
             GetCursorPos, GetMessagePos, GetWindowRect, GetWindowTextW, HWND_TOP, IsIconic,
             IsZoomed, MINMAXINFO, SC_KEYMENU, SM_CXMINTRACK, SM_CYMINTRACK, SWP_NOACTIVATE,
             SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos,
-            WINDOWPOS, WM_CAPTURECHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
-            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
-            WM_SIZING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED, WMSZ_BOTTOM,
+            WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+            WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_RBUTTONDOWN, WM_SIZING, WM_SYSCHAR,
+            WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED, WMSZ_BOTTOM,
             WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
             WMSZ_TOPRIGHT,
         },
@@ -47,8 +54,10 @@ use super::{
 
 /// Identifies this module's subclass on a window.
 const SUBCLASS_ID: usize = 0x7461_6666;
-/// `MK_LBUTTON` in a mouse message's `wParam`.
+/// Button flags in a mouse message's `wParam`.
 const MK_LBUTTON: WPARAM = 0x0001;
+const MK_RBUTTON: WPARAM = 0x0002;
+const MK_MBUTTON: WPARAM = 0x0010;
 
 #[derive(Default)]
 struct Native {
@@ -209,20 +218,28 @@ pub(super) fn begin_move(request: &MoveRequest, work_areas: Vec<Rect>) -> bool {
         // Released before the drag was seen: nothing left to move.
         return true;
     }
-    let raise: Vec<isize> = {
+    let (raise, leader) = {
         let mut native = native();
         if !native.tracker.begin(request, work_areas) {
             return false;
         }
+        // Alt may already be down when the drag is recognized: its release must
+        // not open the window menu either.
+        native.swallow_keymenu |= alt_down();
         // Followers first, then the dragged window: the group comes to the front.
-        request
+        let raise: Vec<isize> = request
             .members
             .iter()
-            .filter(|id| **id != request.leader)
-            .chain(std::iter::once(&request.leader))
-            .filter_map(|id| native.handle(*id))
-            .collect()
+            .map(|(id, _)| *id)
+            .filter(|id| *id != request.leader)
+            .chain(std::iter::once(request.leader))
+            .filter_map(|id| native.handle(id))
+            .collect();
+        (raise, native.handle(request.leader))
     };
+    if let Some(leader) = leader {
+        grab_alt_escape(leader);
+    }
     for handle in raise {
         // SAFETY: a tracked window of this thread; z-order only.
         unsafe {
@@ -240,6 +257,58 @@ pub(super) fn begin_move(request: &MoveRequest, work_areas: Vec<Rect>) -> bool {
     // The pointer moved past egui's drag threshold already: catch up.
     drive(cursor());
     true
+}
+
+/// Identifies the Alt+Esc hotkey registered while a body drag is in progress.
+const ALT_ESCAPE_HOTKEY: i32 = 0x7466;
+/// The window the Alt+Esc hotkey is registered for (`HWND` as an address).
+static ALT_ESCAPE_TARGET: AtomicIsize = AtomicIsize::new(0);
+
+/// With Alt held (snapping off), Escape never reaches the window: Alt+Esc is a
+/// system shortcut (send the window to the back). While a drag is in progress the
+/// dragged window registers it as its own hotkey, so Escape still cancels.
+fn grab_alt_escape(leader: isize) {
+    release_alt_escape();
+    // SAFETY: a window of this thread; WM_HOTKEY is posted to it.
+    if unsafe {
+        RegisterHotKey(
+            leader as HWND,
+            ALT_ESCAPE_HOTKEY,
+            MOD_ALT | MOD_NOREPEAT,
+            u32::from(VK_ESCAPE),
+        )
+    } != 0
+    {
+        ALT_ESCAPE_TARGET.store(leader, Ordering::Relaxed);
+    }
+}
+
+fn release_alt_escape() {
+    let target = ALT_ESCAPE_TARGET.swap(0, Ordering::Relaxed);
+    if target != 0 {
+        // SAFETY: the hotkey this module registered for that window.
+        unsafe { UnregisterHotKey(target as HWND, ALT_ESCAPE_HOTKEY) };
+    }
+}
+
+/// The button was released (or the pointer captured elsewhere): the members stay.
+fn end_move() {
+    native().tracker.end();
+    release_alt_escape();
+}
+
+/// Escape: the members go back to where the drag started.
+fn cancel_move() {
+    {
+        let mut native = native();
+        let Native { tracker, moves, .. } = &mut *native;
+        moves.clear();
+        tracker.cancel(moves);
+        native.swallow_escape_up = true;
+        native.swallow_keymenu |= alt_down();
+    }
+    release_alt_escape();
+    apply();
 }
 
 pub(super) fn place(moves: &[(WindowId, Pos2)]) -> bool {
@@ -265,6 +334,8 @@ fn drive(cursor: Pos2) {
         tracker.motion(cursor, free, moves);
     }
     apply();
+    // Every member has landed (and changed scale, if it did): re-anchor now.
+    native().tracker.settle(cursor);
 }
 
 /// Move the windows in `Native::moves` in one batch, without holding the lock.
@@ -376,16 +447,22 @@ unsafe extern "system" fn subclass(
     let window = WindowId(data as u64);
     let leading = || native().tracker.leader() == Some(window);
     match message {
-        WM_LBUTTONDOWN => {
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
             // egui ignores a press until it knows where the pointer is, which it
             // learns from winit's moves; after the pointer left the window, winit
             // reports a move again only to a position other than the last one it
             // saw there. After a body drag the window moved with the pointer, so a
-            // later press can land exactly where the last release was and be lost.
-            // Report the pointer one pixel off and then where it is.
+            // later press (a left drag or a right click for the settings) can land
+            // exactly where the last release was and be lost. Report the pointer
+            // one pixel off and then where it is.
             let x = (lparam & 0xFFFF) as u16;
             let off = (lparam & !0xFFFF) | x.wrapping_add(1) as isize;
-            let buttons = wparam & !MK_LBUTTON;
+            let pressed = match message {
+                WM_LBUTTONDOWN => MK_LBUTTON,
+                WM_RBUTTONDOWN => MK_RBUTTON,
+                _ => MK_MBUTTON,
+            };
+            let buttons = wparam & !pressed;
             // SAFETY: forwarding moves of this window's own pointer.
             unsafe {
                 DefSubclassProc(hwnd, WM_MOUSEMOVE, buttons, off);
@@ -394,7 +471,7 @@ unsafe extern "system" fn subclass(
         }
         WM_MOUSEMOVE if leading() => {
             if wparam & MK_LBUTTON == 0 {
-                native().tracker.end();
+                end_move();
             } else {
                 drive(message_cursor());
             }
@@ -402,21 +479,23 @@ unsafe extern "system" fn subclass(
         WM_LBUTTONUP if leading() => {
             // The release may come before the move to where it happened.
             drive(message_cursor());
-            native().tracker.end();
+            end_move();
         }
-        WM_CAPTURECHANGED if lparam as HWND != hwnd && leading() => native().tracker.end(),
-        WM_KEYDOWN if wparam == usize::from(VK_ESCAPE) && leading() => {
-            {
-                let mut native = native();
-                let Native { tracker, moves, .. } = &mut *native;
-                moves.clear();
-                tracker.cancel(moves);
-                native.swallow_escape_up = true;
+        WM_CAPTURECHANGED if lparam as HWND != hwnd && leading() => end_move(),
+        WM_HOTKEY if wparam == ALT_ESCAPE_HOTKEY as usize => {
+            if leading() {
+                cancel_move();
             }
-            apply();
             return 0;
         }
-        WM_KEYUP if wparam == usize::from(VK_ESCAPE) => {
+        // Escape without Alt (with Alt it is the hotkey above).
+        WM_KEYDOWN | WM_SYSKEYDOWN if wparam == usize::from(VK_ESCAPE) && leading() => {
+            cancel_move();
+            return 0;
+        }
+        // The character and the release of the Escape that canceled a move.
+        WM_CHAR | WM_SYSCHAR if wparam == 0x1B && native().swallow_escape_up => return 0,
+        WM_KEYUP | WM_SYSKEYUP if wparam == usize::from(VK_ESCAPE) => {
             let mut native = native();
             if std::mem::take(&mut native.swallow_escape_up) {
                 return 0;
@@ -498,6 +577,10 @@ unsafe extern "system" fn subclass(
                 let mut native = native();
                 native.tracker.forget(window);
                 native.handles.retain(|(id, _)| *id != window);
+            }
+            // Forgetting a member ends the move.
+            if !native().tracker.moving() {
+                release_alt_escape();
             }
             // SAFETY: removing this module's own subclass from the window.
             unsafe { RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID) };

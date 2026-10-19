@@ -297,7 +297,7 @@ impl Workspace {
         let mut others = Vec::new();
         for (id, other) in &self.windows {
             if *id == window_id || (group.is_some() && other.group == group && movable(other)) {
-                members.push(*id);
+                members.push((*id, other.pixels_per_point));
             } else if movable(other) {
                 others.push(*id);
             }
@@ -307,8 +307,8 @@ impl Workspace {
             grab: press.to_vec2() * ppp,
             members,
             others,
-            threshold: desktop::SNAP_DISTANCE_POINTS * ppp,
-            min_visible: desktop::MIN_VISIBLE_POINTS * ppp,
+            threshold: desktop::SNAP_DISTANCE_POINTS,
+            min_visible: desktop::MIN_VISIBLE_POINTS,
         };
         if !self.desktop.begin_move(request)
             && let Some(window) = self.windows.get_mut(&window_id)

@@ -18,30 +18,46 @@ pub(crate) struct MoveRequest {
     pub(crate) leader: WindowId,
     /// Where the press was, physical pixels from the leader's top-left.
     pub(crate) grab: Vec2,
-    /// Windows that move: the leader and the rest of its group.
-    pub(crate) members: Vec<WindowId>,
+    /// Windows that move (the leader and the rest of its group), each with its
+    /// physical pixels per logical point.
+    pub(crate) members: Vec<(WindowId, f32)>,
     /// Windows the members snap to.
     pub(crate) others: Vec<WindowId>,
-    /// Snap distance, physical pixels.
+    /// Snap distance, logical points of the leader.
     pub(crate) threshold: f32,
-    /// Each member keeps this much of itself on a monitor, physical pixels.
+    /// Each member keeps this much of itself on a monitor, its logical points.
     pub(crate) min_visible: f32,
+}
+
+/// A window moving with the drag.
+#[derive(Clone, Copy, Debug)]
+struct Member {
+    id: WindowId,
+    /// Frame at the anchor.
+    frame: Rect,
+    /// Top-left when the drag started: where Escape puts it back.
+    start: Pos2,
+    /// Physical pixels per logical point; follows a change of monitor scale.
+    scale: f32,
 }
 
 /// One drag: where the members go as the pointer moves.
 #[derive(Debug)]
 pub(crate) struct MoveSession {
     leader: WindowId,
-    /// Pointer position the members' start frames belong to.
+    /// Pointer position the members' anchor frames belong to.
     anchor: Pos2,
-    /// Members and their frames at the anchor.
-    members: Vec<(WindowId, Rect)>,
+    members: Vec<Member>,
     others: Vec<Rect>,
     work_areas: Vec<Rect>,
+    /// Logical points; converted with the leader's / each member's scale.
     threshold: f32,
     min_visible: f32,
-    /// Current offset of every member from its start frame.
+    /// Current offset of every member from its anchor frame.
     offset: Vec2,
+    /// A member changed size during a batch of this desktop's own moves: re-anchor
+    /// once the whole batch has landed (`settle`), not with half of it.
+    reanchor_pending: bool,
 }
 
 impl MoveSession {
@@ -51,44 +67,63 @@ impl MoveSession {
     fn motion(&mut self, cursor: Pos2, free: bool) -> Vec2 {
         let mut offset = (cursor - self.anchor).round();
         if !free {
+            let threshold = self.threshold * self.leader_scale();
             offset += desktop::snap_group(
                 self.moved(offset),
                 &self.others,
                 &self.work_areas,
-                self.threshold,
+                threshold,
             );
         }
-        offset += desktop::keep_reachable(self.moved(offset), &self.work_areas, self.min_visible);
+        let min_visible = self.min_visible;
+        offset += desktop::keep_reachable(
+            self.members
+                .iter()
+                .map(|member| (member.frame.translate(offset), min_visible * member.scale)),
+            &self.work_areas,
+        );
         self.offset = offset.round();
         self.offset
+    }
+
+    fn leader_scale(&self) -> f32 {
+        self.members
+            .iter()
+            .find(|member| member.id == self.leader)
+            .map_or(1.0, |member| member.scale)
     }
 
     fn moved(&self, offset: Vec2) -> impl Iterator<Item = Rect> + '_ {
         self.members
             .iter()
-            .map(move |(_, frame)| frame.translate(offset))
+            .map(move |member| member.frame.translate(offset))
     }
 
     fn targets(&self) -> impl Iterator<Item = (WindowId, Pos2)> + '_ {
         self.members
             .iter()
-            .map(|(id, frame)| (*id, frame.min + self.offset))
+            .map(|member| (member.id, member.frame.min + self.offset))
     }
 
     fn contains(&self, window: WindowId) -> bool {
-        self.members.iter().any(|(id, _)| *id == window)
+        self.members.iter().any(|member| member.id == window)
     }
 
     /// Continue from `cursor` with the members where they are now (a member
-    /// changed size: it moved to a monitor of another scale).
+    /// changed size: it moved to a monitor of another scale). A frameless window
+    /// keeps its logical size, so its scale changes with its width.
     fn reanchor(&mut self, cursor: Pos2, frames: &HashMap<WindowId, Rect>) {
         self.anchor = cursor;
-        for (id, frame) in &mut self.members {
-            if let Some(now) = frames.get(id) {
-                *frame = *now;
+        for member in &mut self.members {
+            if let Some(now) = frames.get(&member.id) {
+                if member.frame.width() > 0.0 && now.width() != member.frame.width() {
+                    member.scale *= now.width() / member.frame.width();
+                }
+                member.frame = *now;
             }
         }
         self.offset = Vec2::ZERO;
+        self.reanchor_pending = false;
     }
 }
 
@@ -140,18 +175,24 @@ impl WindowTracker {
         let Some(leader) = self.frame(request.leader) else {
             return false;
         };
-        let mut members: Vec<(WindowId, Rect)> = request
+        let member = |id: WindowId, frame: Rect, scale: f32| Member {
+            id,
+            frame,
+            start: frame.min,
+            scale,
+        };
+        let mut members: Vec<Member> = request
             .members
             .iter()
-            .filter_map(|id| self.frame(*id).map(|frame| (*id, frame)))
+            .filter_map(|(id, scale)| self.frame(*id).map(|frame| member(*id, frame, *scale)))
             .collect();
-        if !members.iter().any(|(id, _)| *id == request.leader) {
-            members.push((request.leader, leader));
+        if !members.iter().any(|member| member.id == request.leader) {
+            members.push(member(request.leader, leader, 1.0));
         }
         let others = request
             .others
             .iter()
-            .filter(|id| !request.members.contains(id))
+            .filter(|id| !request.members.iter().any(|(member, _)| member == *id))
             .filter_map(|id| self.frame(*id))
             .collect();
         self.session = Some(MoveSession {
@@ -163,6 +204,7 @@ impl WindowTracker {
             threshold: request.threshold,
             min_visible: request.min_visible,
             offset: Vec2::ZERO,
+            reanchor_pending: false,
         });
         true
     }
@@ -176,14 +218,27 @@ impl WindowTracker {
         }
     }
 
+    /// A batch of this desktop's moves for the pointer at `cursor` has landed:
+    /// re-anchor now if a member changed size during it.
+    pub(crate) fn settle(&mut self, cursor: Pos2) {
+        if let Some(session) = &mut self.session
+            && session.reanchor_pending
+        {
+            session.reanchor(cursor, &self.frames);
+        }
+    }
+
     /// Escape: the members go back to where the move started (into `out`) and the
     /// move ends.
     pub(crate) fn cancel(&mut self, out: &mut Vec<(WindowId, Pos2)>) {
-        if let Some(session) = &mut self.session {
-            session.offset = Vec2::ZERO;
-            out.extend(session.targets());
+        if let Some(session) = self.session.take() {
+            out.extend(
+                session
+                    .members
+                    .iter()
+                    .map(|member| (member.id, member.start)),
+            );
         }
-        self.session = None;
     }
 
     /// The button was released: the members stay where they are.
@@ -193,9 +248,12 @@ impl WindowTracker {
 
     /// A tracked window's frame is now `frame`. `ours` when this desktop moved it.
     /// A member of the move in progress that changes size (a monitor of another
-    /// scale) re-anchors the move at `cursor`; members otherwise only move with
-    /// the move. Any other pure move of a grouped window, by the user, the OS or
-    /// another program, moves the rest of its group as far (into `out`).
+    /// scale) re-anchors the move: at `cursor` at once when someone else changed
+    /// it, after the batch (`settle`) when it happened within this desktop's own
+    /// moves, since other members of the batch may not have landed yet. Members
+    /// otherwise only move with the move. Any other pure move of a grouped window,
+    /// by the user, the OS or another program, moves the rest of its group as far
+    /// (into `out`).
     pub(crate) fn observed(
         &mut self,
         window: WindowId,
@@ -209,7 +267,11 @@ impl WindowTracker {
             && session.contains(window)
         {
             if previous.is_some_and(|previous| previous.size() != frame.size()) {
-                session.reanchor(cursor, &self.frames);
+                if ours {
+                    session.reanchor_pending = true;
+                } else {
+                    session.reanchor(cursor, &self.frames);
+                }
             }
             return;
         }
@@ -272,7 +334,7 @@ mod tests {
         MoveRequest {
             leader,
             grab: vec2(100.0, 50.0),
-            members: members.to_vec(),
+            members: members.iter().map(|id| (*id, 1.0)).collect(),
             others: others.to_vec(),
             threshold: 12.0,
             min_visible: 32.0,
@@ -440,5 +502,62 @@ mod tests {
         drive(&mut tracker, pos2(510.0, 260.0), true);
         assert_eq!(tracker.frame(A).unwrap().min, pos2(410.0, 210.0));
         assert_eq!(tracker.frame(B).unwrap().min, pos2(730.0, 210.0));
+    }
+
+    #[test]
+    fn a_scale_change_within_a_batch_reanchors_after_the_whole_batch() {
+        let mut tracker = desktop();
+        assert!(tracker.begin(&request(A, &[A, B], &[C]), work()));
+        let cursor = pos2(500.0, 250.0);
+        let mut out = Vec::new();
+        tracker.motion(cursor, true, &mut out);
+        assert_eq!(out, vec![(A, pos2(400.0, 200.0)), (B, pos2(720.0, 200.0))]);
+        // Within the batch A lands first and doubles (a 2x monitor), B after it.
+        let mut echo = Vec::new();
+        tracker.observed(A, rect(400.0, 200.0, 640.0, 320.0), true, cursor, &mut echo);
+        tracker.observed(B, rect(720.0, 200.0, 320.0, 160.0), true, cursor, &mut echo);
+        tracker.settle(cursor);
+        assert!(echo.is_empty());
+        drive(&mut tracker, cursor + vec2(10.0, 10.0), true);
+        assert_eq!(tracker.frame(A).unwrap().min, pos2(410.0, 210.0));
+        assert_eq!(tracker.frame(B).unwrap().min, pos2(730.0, 210.0));
+    }
+
+    #[test]
+    fn escape_after_a_scale_change_returns_to_where_the_drag_started() {
+        let mut tracker = desktop();
+        assert!(tracker.begin(&request(A, &[A, B], &[C]), work()));
+        drive(&mut tracker, pos2(500.0, 250.0), true);
+        let mut out = Vec::new();
+        tracker.observed(
+            A,
+            rect(400.0, 200.0, 640.0, 320.0),
+            false,
+            pos2(500.0, 250.0),
+            &mut out,
+        );
+        drive(&mut tracker, pos2(700.0, 450.0), true);
+        tracker.cancel(&mut out);
+        assert_eq!(out, vec![(A, pos2(300.0, 200.0)), (B, pos2(620.0, 200.0))]);
+        assert!(!tracker.moving());
+    }
+
+    #[test]
+    fn snapping_follows_the_dragged_window_to_a_monitor_of_another_scale() {
+        let mut tracker = desktop();
+        assert!(tracker.begin(&request(C, &[C], &[A, B]), work()));
+        let grab = pos2(400.0, 650.0);
+        // C's top 20 px below A's bottom (360), 6 px right of its left edge:
+        // beyond 12 pt at 1x.
+        let near = grab + vec2(6.0, 380.0 - 600.0);
+        drive(&mut tracker, near, false);
+        assert_eq!(tracker.frame(C).unwrap().min, pos2(306.0, 380.0));
+        // Back at the start, C moves to a 2x monitor (twice the size).
+        drive(&mut tracker, grab, false);
+        let mut out = Vec::new();
+        tracker.observed(C, rect(300.0, 600.0, 640.0, 320.0), false, grab, &mut out);
+        // 12 pt are now 24 px: the same 20 px snap.
+        drive(&mut tracker, near, false);
+        assert_eq!(tracker.frame(C).unwrap().min, pos2(300.0, 360.0));
     }
 }

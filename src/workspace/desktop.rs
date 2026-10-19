@@ -375,33 +375,47 @@ pub(crate) fn snap_resize(
     snapped
 }
 
-/// Shift (per axis, as small as possible) after which every one of `members` shows
-/// at least `min_visible` of itself (or all of a smaller window) inside the work
-/// area nearest its center. When they cannot all, earlier members win. Zero when
-/// they all do already.
+/// Shift (per axis, as small as possible) after which every one of `members` (a
+/// frame and how much of it must show) shows at least that much of itself (or all
+/// of a smaller window) inside the work area nearest its center. When they cannot
+/// all, earlier members win. Zero when they all do already.
 pub(crate) fn keep_reachable(
-    members: impl Iterator<Item = Rect>,
+    members: impl Iterator<Item = (Rect, f32)>,
     work_areas: &[Rect],
-    min_visible: f32,
 ) -> Vec2 {
     let mut x = (f32::NEG_INFINITY, f32::INFINITY);
     let mut y = (f32::NEG_INFINITY, f32::INFINITY);
     // Allowed shifts of the span [min, max] so that `visible` of it lies in
     // [low, high], intersected with those of the earlier members.
-    let narrow = |range: &mut (f32, f32), min: f32, max: f32, low: f32, high: f32| {
-        let visible = min_visible.min(max - min);
-        let allowed = (low + visible - max, high - visible - min);
-        let both = (range.0.max(allowed.0), range.1.min(allowed.1));
-        if allowed.0 <= allowed.1 && both.0 <= both.1 {
-            *range = both;
-        }
-    };
-    for member in members {
+    let narrow =
+        |range: &mut (f32, f32), min_visible: f32, min: f32, max: f32, low: f32, high: f32| {
+            let visible = min_visible.min(max - min);
+            let allowed = (low + visible - max, high - visible - min);
+            let both = (range.0.max(allowed.0), range.1.min(allowed.1));
+            if allowed.0 <= allowed.1 && both.0 <= both.1 {
+                *range = both;
+            }
+        };
+    for (member, min_visible) in members {
         let Some(work) = nearest_area(work_areas, member.center()) else {
             continue;
         };
-        narrow(&mut x, member.min.x, member.max.x, work.min.x, work.max.x);
-        narrow(&mut y, member.min.y, member.max.y, work.min.y, work.max.y);
+        narrow(
+            &mut x,
+            min_visible,
+            member.min.x,
+            member.max.x,
+            work.min.x,
+            work.max.x,
+        );
+        narrow(
+            &mut y,
+            min_visible,
+            member.min.y,
+            member.max.y,
+            work.min.y,
+            work.max.y,
+        );
     }
     vec2(0.0_f32.clamp(x.0, x.1), 0.0_f32.clamp(y.0, y.1))
 }
@@ -885,19 +899,19 @@ mod tests {
     #[test]
     fn reachability_shifts_as_little_as_possible_and_earlier_members_win() {
         let work = [rect(0.0, 0.0, 1920.0, 1040.0)];
+        let reach = |members: &[Rect], min: f32| {
+            keep_reachable(members.iter().map(|member| (*member, min)), &work)
+        };
         // Inside: no shift.
-        let inside = [rect(100.0, 100.0, 400.0, 300.0)];
-        assert_eq!(keep_reachable(inside.into_iter(), &work, 32.0), Vec2::ZERO);
+        assert_eq!(reach(&[rect(100.0, 100.0, 400.0, 300.0)], 32.0), Vec2::ZERO);
         // 10 px left on the right, 5 px below the bottom: up to 32 px shown.
-        let corner = [rect(1910.0, 1035.0, 400.0, 300.0)];
-        assert_eq!(
-            keep_reachable(corner.into_iter(), &work, 32.0),
-            vec2(-22.0, -27.0)
-        );
+        let corner = rect(1910.0, 1035.0, 400.0, 300.0);
+        assert_eq!(reach(&[corner], 32.0), vec2(-22.0, -27.0));
+        // A member on a 2x monitor keeps twice as many pixels.
+        assert_eq!(reach(&[corner], 64.0), vec2(-54.0, -59.0));
         // A small window shows all of itself.
-        let small = [rect(-30.0, 100.0, 20.0, 20.0)];
         assert_eq!(
-            keep_reachable(small.into_iter(), &work, 32.0),
+            reach(&[rect(-30.0, 100.0, 20.0, 20.0)], 32.0),
             vec2(30.0, 0.0)
         );
         // Members 3000 px apart cannot both show: the first one wins.
@@ -905,10 +919,10 @@ mod tests {
             rect(-500.0, 100.0, 400.0, 300.0),
             rect(2500.0, 100.0, 400.0, 300.0),
         ];
-        assert_eq!(
-            keep_reachable(apart.into_iter(), &work, 32.0),
-            vec2(132.0, 0.0)
-        );
+        assert_eq!(reach(&apart, 32.0), vec2(132.0, 0.0));
+        // Each member's own minimum.
+        let pair = [(corner, 32.0), (rect(1500.0, 1035.0, 100.0, 300.0), 64.0)];
+        assert_eq!(keep_reachable(pair.into_iter(), &work), vec2(-22.0, -59.0));
     }
 
     #[test]

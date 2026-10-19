@@ -415,6 +415,7 @@ impl Harness {
     pub fn move_pointer(&mut self, cursor: Pos2, alt: bool) -> Result<(), String> {
         self.desktop.pointer(cursor, alt);
         self.apply_moves();
+        self.desktop.native().tracker.settle(cursor);
         self.frame_all()
     }
 
