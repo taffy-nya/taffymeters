@@ -1169,9 +1169,25 @@ impl Workspace {
             return;
         }
         let button = !locked && {
-            let button_rect = Rect::from_center_size(rect.center(), egui::vec2(140.0, 28.0));
+            // egui places the button at the top-left of the space it is given, at
+            // its own size: give it exactly that size, centered in the window.
+            let label = "Add module";
+            let text = egui::WidgetText::from(label)
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
+                .size();
+            let spacing = ui.spacing();
+            let size = egui::vec2(
+                text.x + 2.0 * spacing.button_padding.x,
+                (text.y + 2.0 * spacing.button_padding.y).max(spacing.interact_size.y),
+            );
+            let button_rect = Rect::from_center_size(rect.center(), size);
             ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
-                let response = ui.menu_button("Add module", |ui| {
+                let response = ui.menu_button(label, |ui| {
                     self.add_menu(ui, controls, actions, window_id);
                 });
                 controls.record(ControlKey::AddOpen, &response.response);

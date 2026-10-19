@@ -489,6 +489,12 @@ fn c05() -> Result<Value, String> {
         h.locate(&ControlKey::LeafBody(a)).is_err(),
         "closed leaf still has a target",
     )?;
+    let button = h.locate(&ControlKey::AddOpen)?.rect;
+    let window = h.locate(&ControlKey::EmptyBody)?.rect;
+    check(
+        (button.center() - window.center()).length() < 1.0 && button.width() < 120.0,
+        &format!("Add module button not centered at its own size: {button:?} in {window:?}"),
+    )?;
     h.dropdown(
         ControlKey::AddOpen,
         ControlKey::AddModule(SPECTRUM_MODULE_ID),
