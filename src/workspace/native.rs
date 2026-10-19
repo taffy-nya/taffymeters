@@ -25,7 +25,7 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     System::Threading::GetCurrentThreadId,
     UI::{
-        HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
+        HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, GetKeyState, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
             VK_ESCAPE, VK_LBUTTON, VK_MENU,
@@ -34,14 +34,13 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, EnumThreadWindows,
             GetCursorPos, GetMessagePos, GetWindowRect, GetWindowTextW, HWND_TOP, IsIconic,
-            IsZoomed, MINMAXINFO, SC_KEYMENU, SM_CXMINTRACK, SM_CYMINTRACK, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos,
-            WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-            WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_RBUTTONDOWN, WM_SIZING, WM_SYSCHAR,
-            WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED, WMSZ_BOTTOM,
-            WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
-            WMSZ_TOPRIGHT,
+            IsZoomed, MINMAXINFO, SC_KEYMENU, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+            SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, WINDOWPOS, WM_CAPTURECHANGED,
+            WM_CHAR, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN,
+            WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
+            WM_RBUTTONDOWN, WM_SIZING, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_WINDOWPOSCHANGED, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
+            WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
         },
     },
 };
@@ -77,13 +76,16 @@ struct Native {
     batch: Vec<(isize, i32, i32)>,
 }
 
-/// Snap targets of an edge resize, taken when the OS sizing loop starts.
+/// An edge resize in progress (the OS sizing loop), from its start.
 struct Sizing {
+    /// Frame and pointer when the loop started.
+    start: Rect,
+    cursor: Pos2,
     others: Vec<Rect>,
     work_areas: Vec<Rect>,
     /// Physical pixels at the window's scale.
     threshold: f32,
-    /// The smallest frame the window may have (its own and the system's).
+    /// The smallest frame the window may have (its layout's).
     min: Vec2,
 }
 
@@ -399,31 +401,32 @@ fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
         .collect();
     // SAFETY: a window of this thread.
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let min = min_track_size(hwnd);
+    Sizing {
+        start: frame_of(hwnd).unwrap_or(Rect::NOTHING),
+        cursor: cursor(),
+        others,
+        work_areas,
+        threshold: desktop::SNAP_DISTANCE_POINTS * dpi as f32 / 96.0,
+        min: vec2(min.0 as f32, min.1 as f32),
+    }
+}
+
+/// The window's minimum frame as winit reports it (`ptMinTrackSize`: the layout's
+/// minimum); `WM_GETMINMAXINFO` with a zeroed MINMAXINFO leaves out the system's
+/// own default.
+fn min_track_size(hwnd: HWND) -> (i32, i32) {
     let mut info = MINMAXINFO::default();
-    // SAFETY: WM_GETMINMAXINFO fills the MINMAXINFO it points to (winit sets the
-    // window's minimum there); the system adds its own for windows with a caption.
-    let min = unsafe {
+    // SAFETY: WM_GETMINMAXINFO fills the MINMAXINFO it points to.
+    unsafe {
         SendMessageW(
             hwnd,
             WM_GETMINMAXINFO,
             0,
             &mut info as *mut MINMAXINFO as LPARAM,
-        );
-        vec2(
-            info.ptMinTrackSize
-                .x
-                .max(GetSystemMetricsForDpi(SM_CXMINTRACK, dpi)) as f32,
-            info.ptMinTrackSize
-                .y
-                .max(GetSystemMetricsForDpi(SM_CYMINTRACK, dpi)) as f32,
         )
     };
-    Sizing {
-        others,
-        work_areas,
-        threshold: desktop::SNAP_DISTANCE_POINTS * dpi as f32 / 96.0,
-        min,
-    }
+    (info.ptMinTrackSize.x.max(0), info.ptMinTrackSize.y.max(0))
 }
 
 /// The edges a `WM_SIZING` side moves.
@@ -546,30 +549,43 @@ unsafe extern "system" fn subclass(
         }
         WM_EXITSIZEMOVE => native().sizing = None,
         WM_SIZING => {
-            // The OS proposes the frame for the pointer each time; snapping it
-            // here keeps an edge on a target until the pointer is past it.
+            // The OS proposes the frame for the pointer, but never smaller than its
+            // minimum for captioned windows (winit's windows have a caption style,
+            // only not drawn: 262×71 px at 200%), whatever the window's own minimum.
+            // The frame is computed from the pointer instead, kept at least the
+            // window's own minimum, and snapped unless Alt is held; an edge stays on
+            // a target until the pointer is past it.
+            let free = alt_down();
             let mut native = native();
-            if alt_down() {
+            if free {
                 native.swallow_keymenu = true;
-            } else if let Some(sizing) = &native.sizing {
-                // SAFETY: WM_SIZING carries the proposed frame, to be adjusted.
-                let rect = unsafe { &mut *(lparam as *mut RECT) };
-                let frame = Rect::from_min_max(
-                    pos2(rect.left as f32, rect.top as f32),
-                    pos2(rect.right as f32, rect.bottom as f32),
-                );
-                let snapped = desktop::snap_resize(
-                    frame,
-                    sizing_sides(wparam as u32),
-                    &sizing.others,
-                    &sizing.work_areas,
-                    sizing.threshold,
+            }
+            if let Some(sizing) = &native.sizing
+                && sizing.start != Rect::NOTHING
+            {
+                let sides = sizing_sides(wparam as u32);
+                let mut frame = desktop::resize_frame(
+                    sizing.start,
+                    sides,
+                    cursor() - sizing.cursor,
                     sizing.min,
                 );
-                rect.left = snapped.min.x.round() as i32;
-                rect.top = snapped.min.y.round() as i32;
-                rect.right = snapped.max.x.round() as i32;
-                rect.bottom = snapped.max.y.round() as i32;
+                if !free {
+                    frame = desktop::snap_resize(
+                        frame,
+                        sides,
+                        &sizing.others,
+                        &sizing.work_areas,
+                        sizing.threshold,
+                        sizing.min,
+                    );
+                }
+                // SAFETY: WM_SIZING carries the proposed frame, to be adjusted.
+                let rect = unsafe { &mut *(lparam as *mut RECT) };
+                rect.left = frame.min.x.round() as i32;
+                rect.top = frame.min.y.round() as i32;
+                rect.right = frame.max.x.round() as i32;
+                rect.bottom = frame.max.y.round() as i32;
             }
         }
         WM_NCDESTROY => {

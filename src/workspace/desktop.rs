@@ -312,6 +312,25 @@ pub(crate) struct ResizeSides {
     pub(crate) bottom: bool,
 }
 
+/// `start` with its moving `sides` moved by the pointer's `delta`, each kept far
+/// enough from the opposite edge for the frame to be at least `min`.
+pub(crate) fn resize_frame(start: Rect, sides: ResizeSides, delta: Vec2, min: Vec2) -> Rect {
+    let mut frame = start;
+    if sides.left {
+        frame.min.x = (start.min.x + delta.x).min(start.max.x - min.x);
+    }
+    if sides.right {
+        frame.max.x = (start.max.x + delta.x).max(start.min.x + min.x);
+    }
+    if sides.top {
+        frame.min.y = (start.min.y + delta.y).min(start.max.y - min.y);
+    }
+    if sides.bottom {
+        frame.max.y = (start.max.y + delta.y).max(start.min.y + min.y);
+    }
+    frame
+}
+
 /// `frame` as a resize of its `sides` leaves it, each moving edge put on the
 /// nearest edge (within `threshold`) of another window or of the work area nearest
 /// the frame's center: adjacent or aligned, as when moving. Other windows only
@@ -831,6 +850,39 @@ mod tests {
         let primary = rect(0.0, 0.0, 1920.0, 1040.0);
         let near_corner = rect(-1910.0, 935.0, 200.0, 100.0);
         assert_eq!(snap(near_corner, &[], &[primary, work]), vec2(-10.0, 5.0));
+    }
+
+    #[test]
+    fn resizing_follows_the_pointer_down_to_the_window_minimum() {
+        let start = rect(100.0, 100.0, 400.0, 300.0);
+        let min = vec2(32.0, 32.0);
+        let corner = ResizeSides {
+            right: true,
+            bottom: true,
+            ..Default::default()
+        };
+        // Smaller than the system's 262×71 floor for captioned windows.
+        assert_eq!(
+            resize_frame(start, corner, vec2(-300.0, -250.0), min),
+            rect(100.0, 100.0, 100.0, 50.0)
+        );
+        // Past the minimum: it stops there, the fixed edges stay.
+        assert_eq!(
+            resize_frame(start, corner, vec2(-600.0, -600.0), min),
+            rect(100.0, 100.0, 32.0, 32.0)
+        );
+        let left = ResizeSides {
+            left: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resize_frame(start, left, vec2(390.0, 50.0), min),
+            Rect::from_min_max(pos2(468.0, 100.0), pos2(500.0, 400.0))
+        );
+        assert_eq!(
+            resize_frame(start, left, vec2(-50.0, 0.0), min),
+            Rect::from_min_max(pos2(50.0, 100.0), pos2(500.0, 400.0))
+        );
     }
 
     #[test]
