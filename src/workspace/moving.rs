@@ -9,7 +9,10 @@ use std::collections::HashMap;
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-use super::{WindowId, desktop};
+use super::{
+    WindowId,
+    desktop::{self, Display},
+};
 
 /// What a body drag asks the desktop to move.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,7 +52,7 @@ pub(crate) struct MoveSession {
     anchor: Pos2,
     members: Vec<Member>,
     others: Vec<Rect>,
-    work_areas: Vec<Rect>,
+    displays: Vec<Display>,
     /// Logical points; converted with the leader's / each member's scale.
     threshold: f32,
     min_visible: f32,
@@ -68,19 +71,15 @@ impl MoveSession {
         let mut offset = (cursor - self.anchor).round();
         if !free {
             let threshold = self.threshold * self.leader_scale();
-            offset += desktop::snap_group(
-                self.moved(offset),
-                &self.others,
-                &self.work_areas,
-                threshold,
-            );
+            offset +=
+                desktop::snap_group(self.moved(offset), &self.others, &self.displays, threshold);
         }
         let min_visible = self.min_visible;
         offset += desktop::keep_reachable(
             self.members
                 .iter()
                 .map(|member| (member.frame.translate(offset), min_visible * member.scale)),
-            &self.work_areas,
+            &self.displays,
         );
         self.offset = offset.round();
         self.offset
@@ -171,7 +170,7 @@ impl WindowTracker {
 
     /// Start moving `request.members`; `false` when the leader is not tracked.
     /// Members and others without a known frame are left out.
-    pub(crate) fn begin(&mut self, request: &MoveRequest, work_areas: Vec<Rect>) -> bool {
+    pub(crate) fn begin(&mut self, request: &MoveRequest, displays: Vec<Display>) -> bool {
         let Some(leader) = self.frame(request.leader) else {
             return false;
         };
@@ -200,7 +199,7 @@ impl WindowTracker {
             anchor: leader.min + request.grab,
             members,
             others,
-            work_areas,
+            displays,
             threshold: request.threshold,
             min_visible: request.min_visible,
             offset: Vec2::ZERO,
@@ -326,8 +325,14 @@ mod tests {
         tracker
     }
 
-    fn work() -> Vec<Rect> {
-        vec![rect(0.0, 0.0, 1920.0, 1040.0)]
+    /// One 1920×1080 monitor with a 40 px taskbar at the bottom.
+    fn work() -> Vec<Display> {
+        vec![Display {
+            work: rect(0.0, 0.0, 1920.0, 1040.0),
+            bounds: rect(0.0, 0.0, 1920.0, 1080.0),
+            scale: 1.0,
+            primary: true,
+        }]
     }
 
     fn request(leader: WindowId, members: &[WindowId], others: &[WindowId]) -> MoveRequest {

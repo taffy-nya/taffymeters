@@ -49,6 +49,7 @@ impl FakeDesktop {
     pub fn new() -> Arc<Self> {
         Self::with_displays(vec![Display {
             work: Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0)),
+            bounds: Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0)),
             scale: 1.0,
             primary: true,
         }])
@@ -151,10 +152,10 @@ impl DesktopProbe for FakeDesktop {
     }
 
     fn begin_move(&self, request: MoveRequest) -> bool {
-        let work_areas = self.displays().iter().map(|display| display.work).collect();
+        let displays = self.displays();
         let mut native = self.native();
         native.moves_started += 1;
-        native.tracker.begin(&request, work_areas)
+        native.tracker.begin(&request, displays)
     }
 
     fn moving(&self) -> bool {

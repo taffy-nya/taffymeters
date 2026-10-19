@@ -1704,6 +1704,7 @@ fn s07() -> Result<Value, String> {
     )?;
     let desktop = FakeDesktop::with_displays(vec![Display {
         work: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(2560.0, 1400.0)),
+        bounds: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(2560.0, 1440.0)),
         scale: 1.25,
         primary: true,
     }]);
@@ -1729,11 +1730,13 @@ fn s07() -> Result<Value, String> {
     let desktop = FakeDesktop::with_displays(vec![
         Display {
             work: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1920.0, 1040.0)),
+            bounds: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1920.0, 1080.0)),
             scale: 1.0,
             primary: true,
         },
         Display {
             work: egui::Rect::from_min_size(pos2(1920.0, 0.0), vec2(2880.0, 1736.0)),
+            bounds: egui::Rect::from_min_size(pos2(1920.0, 0.0), vec2(2880.0, 1800.0)),
             scale: 2.0,
             primary: false,
         },

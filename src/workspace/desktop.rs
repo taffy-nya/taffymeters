@@ -55,11 +55,13 @@ pub(crate) trait DesktopProbe {
     }
 }
 
-/// A monitor as saved windows are placed on it.
+/// A monitor: where windows are placed and what they snap to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Display {
-    /// Work area, physical pixels.
+    /// Work area (without the taskbar and other app bars), physical pixels.
     pub(crate) work: Rect,
+    /// The whole monitor, physical pixels.
+    pub(crate) bounds: Rect,
     /// Physical pixels per logical point.
     pub(crate) scale: f32,
     pub(crate) primary: bool,
@@ -75,6 +77,7 @@ impl Display {
 /// Stands in when the desktop reports no monitor.
 pub(crate) const FALLBACK_DISPLAY: Display = Display {
     work: Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1040.0)),
+    bounds: Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1080.0)),
     scale: 1.0,
     primary: true,
 };
@@ -197,6 +200,10 @@ impl DesktopProbe for NativeDesktop {
                         pos2(work.left as f32, work.top as f32),
                         pos2(work.right as f32, work.bottom as f32),
                     ),
+                    bounds: Rect::from_min_max(
+                        pos2(bounds.left as f32, bounds.top as f32),
+                        pos2(bounds.right as f32, bounds.bottom as f32),
+                    ),
                     scale,
                     // The primary monitor holds the desktop origin.
                     primary: bounds.left == 0 && bounds.top == 0,
@@ -218,8 +225,7 @@ impl DesktopProbe for NativeDesktop {
     }
 
     fn begin_move(&self, request: MoveRequest) -> bool {
-        let work_areas = self.displays().iter().map(|display| display.work).collect();
-        super::native::begin_move(&request, work_areas)
+        super::native::begin_move(&request, self.displays())
     }
 
     fn moving(&self) -> bool {
@@ -247,13 +253,14 @@ impl DesktopProbe for NativeDesktop {
 }
 
 /// Best offset (per axis) that aligns an edge of one of `members` (windows moving
-/// together) with an edge of another window, or of the work area nearest the
-/// member's center, when within `threshold`. Other windows only count for a member
-/// within `threshold` of it on both axes.
+/// together) with an edge of another window, or with an edge of the work area or
+/// of the whole monitor (the work area's edge stops at the taskbar, the monitor's
+/// at the screen edge) nearest the member's center, when within `threshold`. Other
+/// windows only count for a member within `threshold` of it on both axes.
 pub(crate) fn snap_group(
     members: impl Iterator<Item = Rect>,
     others: &[Rect],
-    work_areas: &[Rect],
+    displays: &[Display],
     threshold: f32,
 ) -> Vec2 {
     let mut best_x: Option<f32> = None;
@@ -291,12 +298,14 @@ pub(crate) fn snap_group(
                 consider(&mut best_y, target - edge);
             }
         }
-        if let Some(area) = nearest_area(work_areas, moving.center()) {
-            for (edge, target) in [(moving.min.x, area.min.x), (moving.max.x, area.max.x)] {
-                consider(&mut best_x, target - edge);
-            }
-            for (edge, target) in [(moving.min.y, area.min.y), (moving.max.y, area.max.y)] {
-                consider(&mut best_y, target - edge);
+        if let Some(display) = nearest_display(displays, moving.center()) {
+            for area in [display.work, display.bounds] {
+                for (edge, target) in [(moving.min.x, area.min.x), (moving.max.x, area.max.x)] {
+                    consider(&mut best_x, target - edge);
+                }
+                for (edge, target) in [(moving.min.y, area.min.y), (moving.max.y, area.max.y)] {
+                    consider(&mut best_y, target - edge);
+                }
             }
         }
     }
@@ -333,14 +342,16 @@ pub(crate) fn resize_frame(start: Rect, sides: ResizeSides, delta: Vec2, min: Ve
 
 /// `frame` as a resize of its `sides` leaves it, each moving edge put on the
 /// nearest edge (within `threshold`) of another window or of the work area nearest
-/// the frame's center: adjacent or aligned, as when moving. Other windows only
+/// the frame's center: adjacent or aligned, as when moving. Not the monitor's
+/// edges: Windows keeps the pointer inside the work area while resizing, and
+/// releasing it on the work area's edge maximizes vertically. Other windows only
 /// count within `threshold` of the frame on both axes. Snaps that would make the
 /// frame smaller than `min` are left out; the other edges stay.
 pub(crate) fn snap_resize(
     frame: Rect,
     sides: ResizeSides,
     others: &[Rect],
-    work_areas: &[Rect],
+    displays: &[Display],
     threshold: f32,
     min: Vec2,
 ) -> Rect {
@@ -350,7 +361,7 @@ pub(crate) fn snap_resize(
             && frame.min.y <= other.max.y + threshold
             && other.min.y <= frame.max.y + threshold
     };
-    let area = nearest_area(work_areas, frame.center());
+    let area = nearest_display(displays, frame.center()).map(|display| display.work);
     let nearest =
         |edge: f32, targets: &mut dyn Iterator<Item = f32>, fits: &dyn Fn(f32) -> bool| {
             targets
@@ -400,7 +411,7 @@ pub(crate) fn snap_resize(
 /// all, earlier members win. Zero when they all do already.
 pub(crate) fn keep_reachable(
     members: impl Iterator<Item = (Rect, f32)>,
-    work_areas: &[Rect],
+    displays: &[Display],
 ) -> Vec2 {
     let mut x = (f32::NEG_INFINITY, f32::INFINITY);
     let mut y = (f32::NEG_INFINITY, f32::INFINITY);
@@ -416,7 +427,8 @@ pub(crate) fn keep_reachable(
             }
         };
     for (member, min_visible) in members {
-        let Some(work) = nearest_area(work_areas, member.center()) else {
+        let Some(work) = nearest_display(displays, member.center()).map(|display| display.work)
+        else {
             continue;
         };
         narrow(
@@ -439,9 +451,9 @@ pub(crate) fn keep_reachable(
     vec2(0.0_f32.clamp(x.0, x.1), 0.0_f32.clamp(y.0, y.1))
 }
 
-/// The work area containing `point`, else the nearest one.
-fn nearest_area(areas: &[Rect], point: Pos2) -> Option<Rect> {
-    nearest_index(areas.len(), |index| areas[index], point).map(|index| areas[index])
+/// The display whose work area contains `point`, else the nearest one.
+fn nearest_display(displays: &[Display], point: Pos2) -> Option<&Display> {
+    display_at(displays, point).map(|index| &displays[index])
 }
 
 /// Index of the area (of `count`) containing `point`, else of the nearest one.
@@ -824,8 +836,21 @@ mod tests {
         Rect::from_min_size(pos2(x, y), vec2(w, h))
     }
 
+    /// Displays whose monitor is just their work area.
+    fn screens(areas: &[Rect]) -> Vec<Display> {
+        areas
+            .iter()
+            .map(|area| Display {
+                work: *area,
+                bounds: *area,
+                scale: 1.0,
+                primary: area.min == Pos2::ZERO,
+            })
+            .collect()
+    }
+
     fn snap(moving: Rect, others: &[Rect], work: &[Rect]) -> Vec2 {
-        snap_group(std::iter::once(moving), others, work, 24.0)
+        snap_group(std::iter::once(moving), others, &screens(work), 24.0)
     }
 
     #[test]
@@ -892,7 +917,9 @@ mod tests {
         let above = rect(0.0, 100.0, 600.0, 290.0);
         let far = rect(1500.0, 100.0, 300.0, 300.0);
         let frame = rect(100.0, 400.0, 490.0, 200.0);
-        let resize = |sides, frame, min| snap_resize(frame, sides, &[above, far], &work, 12.0, min);
+        let resize = |sides, frame, min| {
+            snap_resize(frame, sides, &[above, far], &screens(&work), 12.0, min)
+        };
         let top = ResizeSides {
             top: true,
             ..Default::default()
@@ -933,6 +960,30 @@ mod tests {
     }
 
     #[test]
+    fn moves_snap_to_the_taskbar_and_to_the_screen_bottom_resizes_to_the_taskbar() {
+        // 1920×1080 with a 48 px taskbar at the bottom.
+        let display = [Display {
+            work: rect(0.0, 0.0, 1920.0, 1032.0),
+            bounds: rect(0.0, 0.0, 1920.0, 1080.0),
+            scale: 1.0,
+            primary: true,
+        }];
+        let snap = |moving| snap_group(std::iter::once(moving), &[], &display, 24.0);
+        // Bottom 10 px above the taskbar: onto it.
+        assert_eq!(snap(rect(500.0, 822.0, 400.0, 200.0)), vec2(0.0, 10.0));
+        // Bottom 10 px above the screen's bottom (over the taskbar): onto that.
+        assert_eq!(snap(rect(500.0, 870.0, 400.0, 200.0)), vec2(0.0, 10.0));
+        // Resizing the bottom edge: only the taskbar.
+        let bottom = ResizeSides {
+            bottom: true,
+            ..Default::default()
+        };
+        let resize = |frame| snap_resize(frame, bottom, &[], &display, 24.0, vec2(16.0, 16.0));
+        assert_eq!(resize(rect(500.0, 800.0, 400.0, 220.0)).max.y, 1032.0);
+        assert_eq!(resize(rect(500.0, 800.0, 400.0, 270.0)).max.y, 1070.0);
+    }
+
+    #[test]
     fn the_nearest_edge_of_any_member_snaps_the_whole_group() {
         let other = rect(1000.0, 0.0, 300.0, 300.0);
         // The right member is 10 px from the other window, the left one 20 px
@@ -943,7 +994,7 @@ mod tests {
         ];
         let work = [rect(0.0, 0.0, 1920.0, 1040.0)];
         assert_eq!(
-            snap_group(members.into_iter(), &[other], &work, 24.0),
+            snap_group(members.into_iter(), &[other], &screens(&work), 24.0),
             vec2(10.0, 0.0)
         );
     }
@@ -952,7 +1003,7 @@ mod tests {
     fn reachability_shifts_as_little_as_possible_and_earlier_members_win() {
         let work = [rect(0.0, 0.0, 1920.0, 1040.0)];
         let reach = |members: &[Rect], min: f32| {
-            keep_reachable(members.iter().map(|member| (*member, min)), &work)
+            keep_reachable(members.iter().map(|member| (*member, min)), &screens(&work))
         };
         // Inside: no shift.
         assert_eq!(reach(&[rect(100.0, 100.0, 400.0, 300.0)], 32.0), Vec2::ZERO);
@@ -974,7 +1025,10 @@ mod tests {
         assert_eq!(reach(&apart, 32.0), vec2(132.0, 0.0));
         // Each member's own minimum.
         let pair = [(corner, 32.0), (rect(1500.0, 1035.0, 100.0, 300.0), 64.0)];
-        assert_eq!(keep_reachable(pair.into_iter(), &work), vec2(-22.0, -59.0));
+        assert_eq!(
+            keep_reachable(pair.into_iter(), &screens(&work)),
+            vec2(-22.0, -59.0)
+        );
     }
 
     #[test]
@@ -1052,6 +1106,7 @@ mod tests {
     fn display(x: f32, y: f32, w: f32, h: f32, scale: f32) -> Display {
         Display {
             work: rect(x, y, w, h),
+            bounds: rect(x, y, w, h),
             scale,
             primary: x == 0.0 && y == 0.0,
         }

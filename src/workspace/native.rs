@@ -47,7 +47,7 @@ use windows_sys::Win32::{
 
 use super::{
     WindowId,
-    desktop::{self, DesktopProbe, NativeDesktop, ResizeSides},
+    desktop::{self, DesktopProbe, Display, NativeDesktop, ResizeSides},
     moving::{MoveRequest, WindowTracker},
 };
 
@@ -82,7 +82,7 @@ struct Sizing {
     start: Rect,
     cursor: Pos2,
     others: Vec<Rect>,
-    work_areas: Vec<Rect>,
+    displays: Vec<Display>,
     /// Physical pixels at the window's scale.
     threshold: f32,
     /// The smallest frame the window may have (its layout's).
@@ -214,7 +214,7 @@ pub(super) fn moving() -> bool {
     native().tracker.moving()
 }
 
-pub(super) fn begin_move(request: &MoveRequest, work_areas: Vec<Rect>) -> bool {
+pub(super) fn begin_move(request: &MoveRequest, displays: Vec<Display>) -> bool {
     // SAFETY: no preconditions.
     if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON)) } >= 0 {
         // Released before the drag was seen: nothing left to move.
@@ -222,7 +222,7 @@ pub(super) fn begin_move(request: &MoveRequest, work_areas: Vec<Rect>) -> bool {
     }
     let (raise, leader) = {
         let mut native = native();
-        if !native.tracker.begin(request, work_areas) {
+        if !native.tracker.begin(request, displays) {
             return false;
         }
         // Alt may already be down when the drag is recognized: its release must
@@ -394,11 +394,7 @@ fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
         .filter(|other| unsafe { IsIconic(*other) == 0 && IsZoomed(*other) == 0 })
         .filter_map(frame_of)
         .collect();
-    let work_areas = NativeDesktop
-        .displays()
-        .iter()
-        .map(|display| display.work)
-        .collect();
+    let displays = NativeDesktop.displays();
     // SAFETY: a window of this thread.
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
     let min = min_track_size(hwnd);
@@ -406,7 +402,7 @@ fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
         start: frame_of(hwnd).unwrap_or(Rect::NOTHING),
         cursor: cursor(),
         others,
-        work_areas,
+        displays,
         threshold: desktop::SNAP_DISTANCE_POINTS * dpi as f32 / 96.0,
         min: vec2(min.0 as f32, min.1 as f32),
     }
@@ -575,7 +571,7 @@ unsafe extern "system" fn subclass(
                         frame,
                         sides,
                         &sizing.others,
-                        &sizing.work_areas,
+                        &sizing.displays,
                         sizing.threshold,
                         sizing.min,
                     );
