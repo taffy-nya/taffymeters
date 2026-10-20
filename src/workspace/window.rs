@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Id, PointerButton, Rect, Response, Sense, Stroke,
-    StrokeKind, Vec2, ViewportCommand, pos2,
+    Vec2, ViewportCommand, pos2,
 };
 
 use super::{
@@ -295,6 +295,9 @@ pub(crate) struct WindowUiState {
     /// Lines the last pass drew along the frame.
     #[cfg(any(test, feature = "automation"))]
     pub(crate) edges: Vec<DrawnEdge>,
+    /// The module the last pass outlined, and the logical rect of the outline.
+    #[cfg(any(test, feature = "automation"))]
+    pub(crate) module_outline: Option<(ModuleInstanceId, Rect)>,
 }
 
 /// Responses of probe-visible controls collected during one pass.
@@ -591,6 +594,7 @@ impl Workspace {
             );
         }
         self.window_edges(window_id, ui, rect);
+        self.module_outline(window_id, ui, rect);
         if self.move_source.is_some() {
             self.move_targets(window_id, ui, rect, &mut controls, &mut actions);
         }
@@ -625,14 +629,11 @@ impl Workspace {
 
     fn handle_shortcuts(&mut self, window_id: WindowId, ui: &egui::Ui) {
         let ctx = ui.ctx();
-        let (escape, close, space, mono, one, two) = ui.input(|input| {
+        let (escape, close, space) = ui.input(|input| {
             (
                 input.key_pressed(egui::Key::Escape),
                 input.modifiers.command && input.key_pressed(egui::Key::W),
                 input.key_pressed(egui::Key::Space),
-                input.key_pressed(egui::Key::M),
-                input.key_pressed(egui::Key::Num1),
-                input.key_pressed(egui::Key::Num2),
             )
         });
         if escape && !egui::Popup::is_any_open(ctx) {
@@ -673,31 +674,6 @@ impl Workspace {
             )
         {
             let _ = self.apply_action(WorkspaceAction::TogglePause);
-        }
-        let target = self.windows[&window_id].active.filter(|id| {
-            self.modules
-                .get(id)
-                .is_some_and(|entry| entry.module.channel().is_some())
-        });
-        if let Some(instance_id) = target {
-            let layout = self.services.source.descriptor().channel_layout;
-            let channels = self.services.source.descriptor().channel_count;
-            let mut channel = None;
-            if mono {
-                channel = Some(ChannelSelection::MonoAverage);
-            }
-            if one {
-                channel = Some(channel_for_index(layout, 0));
-            }
-            if two && channels > 1 {
-                channel = Some(channel_for_index(layout, 1));
-            }
-            if let Some(channel) = channel {
-                let _ = self.apply_action(WorkspaceAction::SetChannel {
-                    instance_id,
-                    channel,
-                });
-            }
         }
     }
 
@@ -752,7 +728,8 @@ impl Workspace {
                 body_sense,
             );
             controls.record(ControlKey::LeafBody(leaf), &body);
-            if body.clicked() && !locked {
+            // With the settings window open, a left click selects the module there.
+            if body.clicked() && !locked && !picking && self.settings_open() {
                 actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
             }
             if body.drag_started_by(PointerButton::Primary)
@@ -766,7 +743,6 @@ impl Workspace {
             }
             if !picking && body.secondary_clicked() {
                 // Right click edits the module in the settings window.
-                actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
                 actions.push(WorkspaceAction::OpenSettings {
                     window_id,
                     instance_id: Some(leaf),
@@ -963,6 +939,58 @@ impl Workspace {
         #[cfg(any(test, feature = "automation"))]
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.ui.edges = drawn;
+        }
+    }
+
+    /// Outline of the selected module: the one "Move to…" moves (it stays undimmed
+    /// under the target overlay), otherwise the one the settings' Module tab edits.
+    /// An accent line inside the leaf, one logical point in whole pixels and on
+    /// pixel edges, as the window outline.
+    fn module_outline(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
+        let target = self
+            .move_source
+            .or_else(|| self.module_tab_target())
+            .filter(|id| self.window_of(*id) == Some(window_id));
+        let leaf_rect = target.and_then(|id| {
+            self.windows[&window_id]
+                .layout
+                .geometry(rect, &|leaf| self.module_min_size(leaf))
+                .leaves
+                .into_iter()
+                .find_map(|(leaf, leaf_rect)| (leaf == id).then_some(leaf_rect))
+        });
+        #[cfg(any(test, feature = "automation"))]
+        let mut drawn = None;
+        if let Some(leaf_rect) = leaf_rect {
+            let ppp = ui.ctx().pixels_per_point();
+            let snap = |value: f32| (value * ppp).round() / ppp;
+            let min = pos2(snap(leaf_rect.min.x), snap(leaf_rect.min.y));
+            let max = pos2(snap(leaf_rect.max.x), snap(leaf_rect.max.y));
+            let width = ppp.round().max(1.0) / ppp;
+            let color = EdgeLine::Outline.color(&self.chrome);
+            let painter = ui.painter();
+            for strip in [
+                Rect::from_min_max(min, pos2(max.x, min.y + width)),
+                Rect::from_min_max(pos2(min.x, max.y - width), max),
+                Rect::from_min_max(
+                    pos2(min.x, min.y + width),
+                    pos2(min.x + width, max.y - width),
+                ),
+                Rect::from_min_max(
+                    pos2(max.x - width, min.y + width),
+                    pos2(max.x, max.y - width),
+                ),
+            ] {
+                painter.rect_filled(strip, 0.0, color);
+            }
+            #[cfg(any(test, feature = "automation"))]
+            {
+                drawn = target.map(|id| (id, Rect::from_min_max(min, max)));
+            }
+        }
+        #[cfg(any(test, feature = "automation"))]
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.ui.module_outline = drawn;
         }
     }
 
@@ -1168,6 +1196,10 @@ impl Workspace {
         if picking {
             return;
         }
+        // With the settings window open, a left click selects the window there.
+        if body.clicked() && !locked && self.settings_open() {
+            actions.push(WorkspaceAction::SelectWindow { window_id });
+        }
         let button = !locked && {
             // egui places the button at the top-left of the space it is given, at
             // its own size: give it exactly that size, centered in the window.
@@ -1221,8 +1253,10 @@ impl Workspace {
         }
     }
 
-    /// Modal target overlay of "Move to…": every leaf offers four edge targets and an
-    /// empty window offers itself. Escape or a right click cancels.
+    /// Modal target overlay of "Move to…": every other leaf is dimmed and offers four
+    /// edge targets, an empty window is dimmed and offers itself; hovering an edge
+    /// shows the half of the leaf the module would take. The moved leaf stays
+    /// undimmed, outlined by `module_outline`. Escape or a right click cancels.
     fn move_targets(
         &mut self,
         window_id: WindowId,
@@ -1245,28 +1279,17 @@ impl Workspace {
             .show(&ctx, |ui| {
                 ui.set_min_size(rect.size());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 0.0, Color32::from_black_alpha(90));
+                let shade = Color32::from_black_alpha(90);
                 let mut targets: Vec<(MoveTarget, Rect)> = Vec::new();
                 if empty {
+                    painter.rect_filled(rect, 0.0, shade);
                     targets.push((MoveTarget::EmptyWindow(window_id), rect.shrink(8.0)));
                 }
                 for &(leaf, leaf_rect) in &geometry.leaves {
                     if leaf == source {
-                        painter.rect_stroke(
-                            leaf_rect.shrink(2.0),
-                            0.0,
-                            Stroke::new(2.0_f32, color32(self.chrome.color(ColorRole::Accent))),
-                            StrokeKind::Inside,
-                        );
-                        painter.text(
-                            leaf_rect.center(),
-                            Align2::CENTER_CENTER,
-                            "Moving",
-                            FontId::proportional(14.0),
-                            Color32::WHITE,
-                        );
                         continue;
                     }
+                    painter.rect_filled(leaf_rect, 0.0, shade);
                     for side in Side::ALL {
                         targets.push((
                             MoveTarget::Beside {
@@ -1277,6 +1300,8 @@ impl Workspace {
                         ));
                     }
                 }
+                let accent = color32(self.chrome.color(ColorRole::Accent));
+                let mut zones = Vec::with_capacity(targets.len());
                 for (target, zone) in targets {
                     let valid = self.move_target_valid(source, target);
                     let response = ui
@@ -1289,27 +1314,31 @@ impl Workspace {
                         })
                         .inner;
                     controls.record(ControlKey::MoveTarget(target), &response);
-                    let accent = color32(self.chrome.color(ColorRole::Accent));
-                    let fill = match (valid, response.hovered()) {
-                        (true, true) => accent.gamma_multiply(0.7),
-                        (true, false) => accent.gamma_multiply(0.25),
-                        (false, _) => Color32::from_white_alpha(8),
-                    };
-                    painter.rect_filled(zone.shrink(2.0), 0.0, fill);
+                    let hovered = valid && response.hovered();
+                    // Under the zones: where the module would land.
+                    if hovered
+                        && let MoveTarget::Beside { instance_id, side } = target
+                        && let Some(landing) =
+                            self.move_landing(source, instance_id, side, window_id, rect)
+                    {
+                        painter.rect_filled(landing, 0.0, accent.gamma_multiply(0.3));
+                    }
                     if valid && response.clicked() {
                         actions.push(WorkspaceAction::MoveModule {
                             instance_id: source,
                             target,
                         });
                     }
+                    zones.push((zone, valid, hovered));
                 }
-                painter.text(
-                    rect.center_top() + egui::vec2(0.0, 12.0),
-                    Align2::CENTER_TOP,
-                    "Click an edge to move here · Esc cancels",
-                    FontId::proportional(13.0),
-                    Color32::WHITE,
-                );
+                for (zone, valid, hovered) in zones {
+                    let fill = match (valid, hovered) {
+                        (true, true) => accent.gamma_multiply(0.7),
+                        (true, false) => accent.gamma_multiply(0.25),
+                        (false, _) => Color32::from_white_alpha(8),
+                    };
+                    painter.rect_filled(zone.shrink(2.0), 0.0, fill);
+                }
             });
         if ui.input(|input| input.pointer.secondary_clicked()) {
             actions.push(WorkspaceAction::CancelMove);

@@ -26,7 +26,7 @@ impl Workspace {
             1 => "1 module".to_owned(),
             count => format!("{count} modules"),
         };
-        ui.horizontal_wrapped(|ui| header(ui, &format!("Window #{}", window_id.0), &detail));
+        ui.horizontal_wrapped(|ui| header(ui, "Window", &detail));
         // First on the page, like the Module tab's layout actions.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;

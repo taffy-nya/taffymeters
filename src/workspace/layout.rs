@@ -98,13 +98,13 @@ impl Side {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Node {
     Leaf(ModuleInstanceId),
     Split(Box<Split>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Split {
     pub(crate) id: SplitId,
     pub(crate) axis: Axis,
@@ -223,7 +223,7 @@ pub(crate) fn fits(area: Vec2, axis: Axis, first: Vec2, second: Vec2) -> bool {
     area.x + 0.5 >= need.x && area.y + 0.5 >= need.y
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Layout {
     root: Option<Node>,
 }

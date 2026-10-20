@@ -226,8 +226,8 @@ impl Workspace {
                 Ok(()) => {}
                 Err(_) => {
                     warnings.push(format!(
-                        "{} #{}: style {style} unavailable; showing default",
-                        entry.label, id.0
+                        "{}: style {style} unavailable; showing default",
+                        entry.label
                     ));
                     entry.preserved_style = Some(style.clone());
                 }
@@ -486,9 +486,6 @@ impl Workspace {
             window.restore_target = Some(outer.min);
         }
         window.initial_maximized = file.maximized;
-        window.active = file
-            .active
-            .and_then(|index| window.layout.leaves().get(index as usize).copied());
         if let Some(number) = file.group {
             let group = match groups.get(&number) {
                 Some(group) => *group,
@@ -629,10 +626,7 @@ impl Workspace {
         let id = ModuleInstanceId(self.next_instance_id);
         self.next_instance_id = next;
         let name = self.saved_type_name(&file.type_id).to_owned();
-        self.push_notice(format!(
-            "{name} #{} not restored: {reason}; settings kept",
-            id.0
-        ));
+        self.push_notice(format!("{name} not restored: {reason}; settings kept"));
         let module = Box::new(MissingModule {
             message: format!("{name} unavailable"),
         });
@@ -699,7 +693,6 @@ impl Workspace {
                     let next = groups.len() as u32 + 1;
                     *groups.entry(group).or_insert(next)
                 });
-                let leaves = window.layout.leaves();
                 let outer = Self::outer_frame(window, &fallback);
                 let index = display_at(&displays, outer.center()).unwrap_or(0);
                 let display = on
@@ -717,10 +710,6 @@ impl Workspace {
                     locked: window.locked,
                     maximized: window.maximized,
                     group,
-                    active: window
-                        .active
-                        .and_then(|active| leaves.iter().position(|leaf| *leaf == active))
-                        .map(|index| index as u32),
                     layout: window
                         .layout
                         .root()

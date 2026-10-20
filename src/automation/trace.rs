@@ -131,7 +131,7 @@ impl Trace {
                 "leaves": w.leaves.iter().map(|id| id.0).collect::<Vec<_>>(),
                 "splits": w.splits.iter().map(|s| json!({"id": s.id.0, "axis": format!("{:?}", s.axis),
                     "ratio": (s.ratio * 10_000.0).round() / 10_000.0, "manual": s.manual})).collect::<Vec<_>>(),
-                "active": w.active.map(|id| id.0),
+                "module_outline": w.module_outline.map(|(id, _)| id.0),
                 "always_on_top": w.always_on_top,
                 "locked": w.locked,
                 "group": w.group,

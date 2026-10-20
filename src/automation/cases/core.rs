@@ -370,8 +370,6 @@ fn c04() -> Result<Value, String> {
             && ma.active_style == Some(crate::modules::DEFAULT_SPECTRUM_STYLE_ID),
         "instances not independent",
     )?;
-    action(&mut ws, WorkspaceAction::SelectModule { instance_id: a })?;
-    action(&mut ws, WorkspaceAction::SelectModule { instance_id: b })?;
     action(&mut ws, WorkspaceAction::CloseModule { instance_id: b })?;
     action(&mut ws, WorkspaceAction::CloseModule { instance_id: a })?;
     let o = ws.observation();
@@ -379,8 +377,8 @@ fn c04() -> Result<Value, String> {
         .window(FIRST_WINDOW)
         .ok_or("closing modules closed the window")?;
     check(
-        root.leaves.is_empty() && root.active.is_none() && o.modules.is_empty(),
-        "last close left selection or instances",
+        root.leaves.is_empty() && o.modules.is_empty(),
+        "last close left instances",
     )?;
     action(&mut ws, WorkspaceAction::TogglePause)?;
     check(
@@ -400,6 +398,10 @@ fn c04() -> Result<Value, String> {
     let before = ws.observation();
     let rejected = [
         WorkspaceAction::SelectModule { instance_id: b },
+        // Selecting needs the settings window open.
+        WorkspaceAction::SelectModule {
+            instance_id: new_id,
+        },
         WorkspaceAction::AddModule {
             window_id: FIRST_WINDOW,
             type_id: SPECTRUM_MODULE_ID,
@@ -567,40 +569,6 @@ fn c06() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let mut h = Harness::new(ws);
     h.frame(vec![]);
-    let a = first_leaf(&h.ws)?;
-    let channel = |h: &Harness, id| h.ws.observation().module(id).and_then(|m| m.channel);
-    h.key(egui::Key::Num2);
-    check(
-        channel(&h, a) == Some(ChannelSelection::Right),
-        "Num2 not routed",
-    )?;
-    h.key(egui::Key::Num1);
-    check(
-        channel(&h, a) == Some(ChannelSelection::Left),
-        "Num1 not routed",
-    )?;
-    h.key(egui::Key::M);
-    check(
-        channel(&h, a) == Some(ChannelSelection::MonoAverage),
-        "M not routed",
-    )?;
-    // Repeated press/release pairs: each pair applies once, setting the same value is
-    // idempotent, and no key stays held into later idle frames.
-    h.key(egui::Key::Num2);
-    h.key(egui::Key::Num2);
-    for _ in 0..3 {
-        h.frame(vec![]);
-    }
-    check(
-        channel(&h, a) == Some(ChannelSelection::Right)
-            && h.context().input(|input| input.keys_down.is_empty()),
-        "repeated Num2 left a held key or changed channel while idle",
-    )?;
-    h.key(egui::Key::M);
-    check(
-        channel(&h, a) == Some(ChannelSelection::MonoAverage),
-        "M after repeated Num2 not routed",
-    )?;
     let mut non_channel = Vec::new();
     for type_id in [
         crate::modules::STEREOMETER_MODULE_ID,
@@ -610,14 +578,11 @@ fn c06() -> Result<Value, String> {
     ] {
         let id = add_module(&mut h.ws, type_id)?;
         h.frame(vec![]);
-        h.click(ControlKey::LeafBody(id))?;
-        let observation = h.ws.observation();
         check(
-            observation.window(FIRST_WINDOW).and_then(|w| w.active) == Some(id)
-                && observation
-                    .module(id)
-                    .is_some_and(|module| module.channel.is_none()),
-            &format!("{type_id} not selected or reports a Channel capability"),
+            h.ws.observation()
+                .module(id)
+                .is_some_and(|module| module.channel.is_none()),
+            &format!("{type_id} reports a Channel capability"),
         )?;
         h.settings(ControlKey::LeafBody(id), &[])?;
         let settings = h.ws.settings_targets();
@@ -637,24 +602,22 @@ fn c06() -> Result<Value, String> {
             h.ws.has_window(FIRST_WINDOW) && !h.ws.settings_open(),
             "Escape in the settings window closed a Workspace window or left settings open",
         )?;
-        for key in [egui::Key::Num1, egui::Key::Num2] {
-            h.key(key);
-            check(
-                channel(&h, a) == Some(ChannelSelection::MonoAverage),
-                &format!("shortcut on {type_id} touched the unselected Spectrum"),
-            )?;
-        }
         non_channel.push(json!({"type":type_id,"id":id.0}));
     }
+    // Each press/release pair applies once and no key stays held into idle frames.
     h.key(egui::Key::Space);
     check(
         h.ws.observation().source_status.state == SourceState::Paused,
         "Space did not pause",
     )?;
     h.key(egui::Key::Space);
+    for _ in 0..3 {
+        h.frame(vec![]);
+    }
     check(
-        h.ws.observation().source_status.state == SourceState::Running,
-        "Space did not resume",
+        h.ws.observation().source_status.state == SourceState::Running
+            && h.context().input(|input| input.keys_down.is_empty()),
+        "Space did not resume, or left a held key",
     )?;
     let mono = SyntheticConfig {
         descriptor: crate::audio::AudioDescriptor::new(
@@ -683,19 +646,6 @@ fn c06() -> Result<Value, String> {
         ))),
         "mono descriptor exposed Right or missed its channel",
     )?;
-    mono_h.focus = SETTINGS;
-    mono_h.key(egui::Key::Escape);
-    mono_h.focus = FIRST_WINDOW;
-    mono_h.key(egui::Key::Num2);
-    check(
-        mono_h
-            .ws
-            .observation()
-            .module(mono_leaf)
-            .and_then(|m| m.channel)
-            == Some(ChannelSelection::MonoAverage),
-        "mono Num2 selected missing channel",
-    )?;
     h.key(egui::Key::Escape);
     check(
         h.ws.windows().len() == 1 && !h.ws.observation().modules.is_empty(),
@@ -706,7 +656,7 @@ fn c06() -> Result<Value, String> {
         h.ws.windows().is_empty() && h.ws.observation().modules.is_empty(),
         "Ctrl+W did not close the window and its modules",
     )?;
-    Ok(json!({"spectrum":a.0,"non_channel_modules":non_channel,
+    Ok(json!({"non_channel_modules":non_channel,
         "escape":"settings window closes itself; idle Escape leaves this Workspace window open; Ctrl+W closes it; native close is the adapter's"}))
 }
 
@@ -749,9 +699,13 @@ fn c07() -> Result<Value, String> {
     driver
         .advance_frames(1600, deadline())
         .map_err(|e| e.to_string())?;
+    // Both frames with the settings window open on it: the module outline is drawn
+    // in each, so only the trace differs.
+    h.settings(ControlKey::LeafBody(osc), &[])?;
     let with_trace = h.frame(vec![]);
     let published = handle.metrics().publications;
-    h.settings(ControlKey::LeafBody(osc), &[SettingsItem::ClearVisual])?;
+    h.in_settings(&[SettingsItem::ClearVisual])?;
+    h.focus = FIRST_WINDOW;
     let after_clear = h.frame(vec![]);
     check(
         with_trace.shapes.len() > after_clear.shapes.len()

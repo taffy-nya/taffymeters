@@ -1299,8 +1299,10 @@ fn w10() -> Result<Value, String> {
         ),
     )?;
 
-    // Every left gesture, the wheel and pinch change nothing.
+    // Every left gesture, the wheel and pinch change nothing, the selection in the
+    // open settings window included.
     let before = h.ws.observation().window(FIRST_WINDOW).cloned();
+    let target_before = h.ws.observation().settings_target;
     let view_before = view(&h, a)?;
     let moves = h.desktop.moves_started();
     raw_clicks(&mut h, entry, 1);
@@ -1312,8 +1314,10 @@ fn w10() -> Result<Value, String> {
     wheel_and_pinch(&mut h, body_a);
     let commands = h.take_commands(FIRST_WINDOW);
     let after = h.ws.observation().window(FIRST_WINDOW).cloned();
+    let target_after = h.ws.observation().settings_target;
     check(
         after == before
+            && target_after == target_before
             && view(&h, a)? == view_before
             && gestures(&commands) == 0
             && h.desktop.moves_started() == moves,
@@ -1337,11 +1341,9 @@ fn w10() -> Result<Value, String> {
             && move_target_enabled(&mut h, a, b)?,
         &format!("unlocked window: commands {commands:?}, {registered} chrome controls"),
     )?;
+    // A left click selects the module in the open settings window again.
     raw_clicks(&mut h, body_b, 1);
-    let selected =
-        h.ws.observation()
-            .window(FIRST_WINDOW)
-            .and_then(|w| w.active);
+    let selected = h.ws.observation().settings_target.and_then(|(id, _)| id);
     raw_drag(&mut h, divider, aside);
     let moved_ratio = root_split(&h.ws, 0)?.1;
     raw_drag(&mut h, corner, corner + vec2(-30.0, -30.0));

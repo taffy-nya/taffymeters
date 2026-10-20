@@ -1,7 +1,8 @@
 //! The settings window: one native, decorated window next to the Workspace windows
 //! (it does not shrink with them). Right-clicking a Module opens it on that
-//! instance. Tabs hold everything the instance, its window, the workspace and the
-//! theme offer; every change goes through `WorkspaceAction`.
+//! instance; while it is open, a left click selects another one. Tabs hold
+//! everything the instance, its window, the workspace and the theme offer; every
+//! change goes through `WorkspaceAction`.
 
 use std::time::Duration;
 
@@ -49,6 +50,19 @@ impl Tab {
             Self::Theme => "Theme",
         }
     }
+}
+
+/// What the Workspace windows mark for the open tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Highlight {
+    /// The Window tab: the window it edits, and whether its Group button is
+    /// hovered.
+    Window {
+        window: WindowId,
+        group_hovered: bool,
+    },
+    /// The Module tab: the instance it edits.
+    Module(ModuleInstanceId),
 }
 
 /// Probe-visible controls of the settings window.
@@ -175,9 +189,11 @@ pub(crate) struct SettingsWindow {
     /// last pass: Escape belongs to it. egui drops the focus on Escape before the
     /// next pass runs, so the pass that sees Escape cannot ask egui itself.
     text_focus: bool,
-    /// What the Workspace windows outline for this window (see
-    /// `window_tab_target`) as of the last pass.
-    highlight: Option<(WindowId, bool)>,
+    /// What the Workspace windows mark for this window's open tab as of the last
+    /// pass (see `window_tab_target` and `module_tab_target`).
+    highlight: Option<Highlight>,
+    /// The instance and window the pages showed in the last pass.
+    shown: (Option<ModuleInstanceId>, Option<WindowId>),
     /// Builder inputs stay fixed while the window lives.
     initial_position: Option<Pos2>,
     /// Distinguishes each opening: a reopened window is a new viewport that starts
@@ -205,6 +221,7 @@ impl SettingsWindow {
             notices_copied: false,
             text_focus: false,
             highlight: None,
+            shown: (None, None),
             initial_position,
             opening,
             placed: false,
@@ -266,7 +283,6 @@ impl Workspace {
         Some(builder)
     }
 
-    #[cfg(feature = "automation")]
     pub(crate) fn settings_open(&self) -> bool {
         self.settings.is_some()
     }
@@ -325,8 +341,31 @@ impl Workspace {
         }
     }
 
+    /// Point the open settings window at what a left click selected, without
+    /// focusing it. An instance (with its window): the Module and Window tabs
+    /// show it at once, the Workspace and Theme tabs once one of those is chosen.
+    /// An empty window (`instance` `None`): only the Window tab takes it; the
+    /// Module tab has nothing to show for it.
+    pub(super) fn select_in_settings(
+        &mut self,
+        window_id: WindowId,
+        instance: Option<ModuleInstanceId>,
+    ) -> Result<(), super::WorkspaceError> {
+        self.window(window_id)?;
+        let Some(settings) = &mut self.settings else {
+            return Err(super::WorkspaceError::Unsupported(
+                "selecting while the settings window is closed",
+            ));
+        };
+        if instance.is_some() || settings.tab == Tab::Window {
+            settings.instance = instance;
+            settings.window = Some(window_id);
+        }
+        Ok(())
+    }
+
     /// Instance and window the tabs edit, when they still exist.
-    fn settings_targets_now(&self) -> (Option<ModuleInstanceId>, Option<WindowId>) {
+    pub(super) fn settings_targets_now(&self) -> (Option<ModuleInstanceId>, Option<WindowId>) {
         let Some(settings) = &self.settings else {
             return (None, None);
         };
@@ -342,7 +381,22 @@ impl Workspace {
     /// While the Window tab is open: the window it edits, and whether its Group
     /// button is hovered. The Workspace windows outline what these affect.
     pub(super) fn window_tab_target(&self) -> Option<(WindowId, bool)> {
-        self.settings.as_ref()?.highlight
+        match self.settings.as_ref()?.highlight? {
+            Highlight::Window {
+                window,
+                group_hovered,
+            } => Some((window, group_hovered)),
+            Highlight::Module(_) => None,
+        }
+    }
+
+    /// While the Module tab is open: the instance it edits, which its window
+    /// outlines.
+    pub(super) fn module_tab_target(&self) -> Option<ModuleInstanceId> {
+        match self.settings.as_ref()?.highlight? {
+            Highlight::Module(instance) => Some(instance),
+            Highlight::Window { .. } => None,
+        }
     }
 
     /// One UI pass of the settings window inside its own viewport.
@@ -364,6 +418,16 @@ impl Workspace {
             }
             settings.pass_token += 1;
             settings.targets.clear();
+        }
+        // A value still being typed belongs to what the page showed: when another
+        // module or window is selected, the draft is dropped, not applied to the
+        // same row of the new page.
+        if settings.shown != (instance, window) {
+            settings.shown = (instance, window);
+            if let Some(id) = ctx.memory(|memory| memory.focused()) {
+                ctx.data_mut(|data| data.remove_temp::<String>(id));
+                ctx.memory_mut(|memory| memory.surrender_focus(id));
+            }
         }
         // First placement: a window opened beside a source near the screen edge
         // moves fully into that monitor's work area, title bar and close button
@@ -443,7 +507,7 @@ impl Workspace {
                             self.module_tab(ui, instance, &mut controls, &mut actions)
                         }
                         None => {
-                            ui.label(RichText::new("Right-click a module to edit it").weak());
+                            ui.label(RichText::new("Click a module to edit it").weak());
                         }
                     },
                     Tab::Window => match window {
@@ -480,11 +544,16 @@ impl Workspace {
         for command in settings.commands.drain(..) {
             ctx.send_viewport_cmd(command);
         }
-        // The Workspace windows draw the Window tab's outline from this; they ran
+        // The Workspace windows draw the open tab's outline from this; they ran
         // before this pass, so a change needs another host pass.
-        let highlight = window
-            .filter(|_| settings.tab == Tab::Window)
-            .map(|window| (window, group_hovered));
+        let highlight = match settings.tab {
+            Tab::Window => window.map(|window| Highlight::Window {
+                window,
+                group_hovered,
+            }),
+            Tab::Module => instance.map(Highlight::Module),
+            Tab::Workspace | Tab::Theme => None,
+        };
         let mut repaint = settings.highlight != highlight;
         settings.highlight = highlight;
         self.settings = Some(settings);

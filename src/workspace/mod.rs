@@ -122,8 +122,15 @@ pub(crate) enum WorkspaceAction {
     CloseModule {
         instance_id: ModuleInstanceId,
     },
+    /// Point the open settings window at the instance (a left click on it). See
+    /// `Workspace::select_in_settings`.
     SelectModule {
         instance_id: ModuleInstanceId,
+    },
+    /// Point the open settings window's Window tab at an empty window (a left
+    /// click on it).
+    SelectWindow {
+        window_id: WindowId,
     },
     SetChannel {
         instance_id: ModuleInstanceId,
@@ -367,7 +374,6 @@ struct PendingDetach {
 
 pub(crate) struct WindowState {
     layout: Layout,
-    active: Option<ModuleInstanceId>,
     always_on_top: bool,
     /// Locked ("Lock" in the settings): the window takes right clicks only, cannot
     /// be resized natively, and body drags move neither it nor its group.
@@ -406,7 +412,6 @@ impl WindowState {
     fn new(layout: Layout, size: Vec2, always_on_top: bool) -> Self {
         Self {
             layout,
-            active: None,
             always_on_top,
             locked: false,
             maximized: false,
@@ -557,9 +562,7 @@ impl Workspace {
     pub fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
         let mut workspace = Self::empty(live, Arc::new(NativeDesktop))?;
         let first = workspace.create_module(modules::SPECTRUM_MODULE_ID)?;
-        let mut window =
-            WindowState::new(Layout::with_leaf(first), INITIAL_WINDOW_SIZE, always_on_top);
-        window.active = Some(first);
+        let window = WindowState::new(Layout::with_leaf(first), INITIAL_WINDOW_SIZE, always_on_top);
         let id = WindowId(Self::allocate(&mut workspace.next_window_id)?);
         workspace.windows.insert(id, window);
         Ok(workspace)
@@ -754,7 +757,11 @@ impl Workspace {
             WorkspaceAction::CloseModule { instance_id } => self.close_module(instance_id),
             WorkspaceAction::SelectModule { instance_id } => {
                 let window_id = self.located(instance_id)?;
-                self.window_mut(window_id)?.active = Some(instance_id);
+                self.select_in_settings(window_id, Some(instance_id))?;
+                Ok(ActionOutcome::Applied)
+            }
+            WorkspaceAction::SelectWindow { window_id } => {
+                self.select_in_settings(window_id, None)?;
                 Ok(ActionOutcome::Applied)
             }
             WorkspaceAction::SetChannel {

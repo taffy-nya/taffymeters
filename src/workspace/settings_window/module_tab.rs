@@ -32,11 +32,7 @@ impl Workspace {
         actions: &mut Vec<WorkspaceAction>,
     ) {
         let entry = &self.modules[&instance_id];
-        let window = self.window_of(instance_id);
-        let detail = window.map_or_else(String::new, |window| format!("in Window #{}", window.0));
-        ui.horizontal_wrapped(|ui| {
-            header(ui, &format!("{} #{}", entry.label, instance_id.0), &detail);
-        });
+        ui.horizontal_wrapped(|ui| header(ui, entry.label, ""));
         self.layout_actions(ui, instance_id, controls, actions);
         card(ui, "Module", |ui| {
             self.type_row(ui, instance_id, controls, actions);
@@ -91,7 +87,9 @@ impl Workspace {
             }
         });
         if self.move_source == Some(instance_id) {
-            ui.label(RichText::new("Click a highlighted edge in any window").weak());
+            ui.label(
+                RichText::new("Click an edge in any window · Esc or right-click cancels").weak(),
+            );
         }
     }
 

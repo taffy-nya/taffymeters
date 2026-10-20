@@ -45,7 +45,6 @@ pub(crate) struct ObservedWindow {
     pub(crate) leaves: Vec<ModuleInstanceId>,
     pub(crate) leaf_rects: Vec<(ModuleInstanceId, Rect)>,
     pub(crate) splits: Vec<ObservedSplit>,
-    pub(crate) active: Option<ModuleInstanceId>,
     pub(crate) always_on_top: bool,
     pub(crate) locked: bool,
     pub(crate) group: Option<u64>,
@@ -57,6 +56,9 @@ pub(crate) struct ObservedWindow {
     pub(crate) outer: Option<Rect>,
     /// Lines the last pass drew along the frame.
     pub(crate) edges: Vec<super::window::DrawnEdge>,
+    /// The module the last pass outlined (settings target or the module being
+    /// moved) and the logical rect of the outline.
+    pub(crate) module_outline: Option<(ModuleInstanceId, Rect)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +66,8 @@ pub(crate) struct WorkspaceObservation {
     pub(crate) windows: Vec<ObservedWindow>,
     pub(crate) modules: Vec<ObservedModule>,
     pub(crate) move_source: Option<ModuleInstanceId>,
+    /// What the open settings window edits: the instance and the window.
+    pub(crate) settings_target: Option<(Option<ModuleInstanceId>, Option<WindowId>)>,
     pub(crate) source_status: SourceStatus,
     pub(crate) control_error: Option<String>,
     pub(crate) modules_created: u64,
@@ -138,7 +142,6 @@ impl Workspace {
                                 })
                             })
                             .collect(),
-                        active: window.active,
                         always_on_top: window.always_on_top,
                         locked: window.locked,
                         group: window.group,
@@ -148,11 +151,13 @@ impl Workspace {
                         divider_drag: window.ui.divider_drag.map(|drag| drag.split_id),
                         outer: window.outer,
                         edges: window.ui.edges.clone(),
+                        module_outline: window.ui.module_outline,
                     }
                 })
                 .collect(),
             modules,
             move_source: self.move_source,
+            settings_target: self.settings_open().then(|| self.settings_targets_now()),
             source_status: self.services.source.source_status(),
             control_error: self
                 .control_error

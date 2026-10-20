@@ -1,6 +1,6 @@
 //! BSP arrangement of instances: splitting, moving and detaching.
 
-use eframe::egui::{Vec2, pos2};
+use eframe::egui::{Rect, Vec2, pos2};
 
 use super::{
     ActionOutcome, DETACH_OFFSET_POINTS, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget,
@@ -64,10 +64,29 @@ impl Workspace {
         }
     }
 
-    pub(super) fn select_after_removal(window: &mut WindowState, removed: ModuleInstanceId) {
-        if window.active == Some(removed) || window.active.is_none() {
-            window.active = window.layout.leaves().first().copied();
+    /// Where `source` would land beside `target` in `window_id` laid out in `rect`:
+    /// the layout after the move (the source leaves this window first if it is
+    /// here; the chain re-equalizes), not just half of the target.
+    pub(crate) fn move_landing(
+        &self,
+        source: ModuleInstanceId,
+        target: ModuleInstanceId,
+        side: Side,
+        window_id: WindowId,
+        rect: Rect,
+    ) -> Option<Rect> {
+        let mut layout = self.windows.get(&window_id)?.layout.clone();
+        if layout.contains(source) {
+            layout.remove_leaf(source).ok()?;
         }
+        layout
+            .insert_beside(target, side, source, SplitId(self.next_split_id))
+            .ok()?;
+        layout
+            .geometry(rect, &|id| self.module_min_size(id))
+            .leaves
+            .into_iter()
+            .find_map(|(leaf, leaf_rect)| (leaf == source).then_some(leaf_rect))
     }
 
     /// Copy an instance next to itself: same type, `DataSpec` (with bindings),
@@ -99,15 +118,14 @@ impl Workspace {
             self.modules.remove(&new);
             return Err(WorkspaceError::CopyIncomplete(reason));
         }
-        let window = self.window_mut(window_id)?;
-        if let Err(error) = window
-            .layout
-            .insert_beside(instance_id, side, new, split_id)
+        if let Err(error) =
+            self.window_mut(window_id)?
+                .layout
+                .insert_beside(instance_id, side, new, split_id)
         {
             self.modules.remove(&new);
             return Err(error.into());
         }
-        window.active = Some(new);
         self.next_split_id = next_split;
         Ok(ActionOutcome::Created(new))
     }
@@ -219,7 +237,6 @@ impl Workspace {
             .layout
             .remove_leaf(pending.instance_id)
             .expect("instance located in source above");
-        Self::select_after_removal(source, pending.instance_id);
         let source_empty = source.layout.is_empty();
         let window = self
             .windows
@@ -229,7 +246,6 @@ impl Workspace {
             .layout
             .place_root(pending.instance_id)
             .expect("pending window starts empty");
-        window.active = Some(pending.instance_id);
         window.pending_detach = None;
         if source_empty {
             let _ = self.close_window(pending.source);
@@ -266,7 +282,6 @@ impl Workspace {
             .layout
             .remove_leaf(instance_id)
             .expect("instance located in source");
-        Self::select_after_removal(source, instance_id);
         let source_empty = source.layout.is_empty();
         let window = self
             .windows
@@ -288,7 +303,6 @@ impl Workspace {
                 .place_root(instance_id)
                 .expect("validated empty window"),
         }
-        window.active = Some(instance_id);
         if self.move_source == Some(instance_id) {
             self.move_source = None;
         }

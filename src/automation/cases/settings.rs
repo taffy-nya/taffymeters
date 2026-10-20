@@ -1,5 +1,6 @@
-//! S01–S08: settings window, copies, invisible sharing, theme, the session and
-//! presets, missing extensions, preset switching, window placement and rescue.
+//! S01–S09: settings window, copies, invisible sharing, theme, the session and
+//! presets, missing extensions, preset switching, window placement and rescue,
+//! selecting and outlining what the settings edit.
 //! They run the real Workspace, Module factories and manual source with temporary
 //! configuration directories; settings operations use real egui events.
 
@@ -24,8 +25,8 @@ use crate::{
     settings::{NodeParam, SettingValue},
     theme::{ColorRole, Preset},
     workspace::{
-        ActionOutcome, ColorScope, ControlKey, Display, FIRST_WINDOW, ModuleInstanceId, SWATCHES,
-        SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction,
+        ActionOutcome, ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId,
+        SWATCHES, SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction,
     },
 };
 
@@ -36,7 +37,7 @@ use crate::automation::{
 
 type Scenario = fn() -> Result<Value, String>;
 
-pub(super) const CASES: [(&str, Scenario); 8] = [
+pub(super) const CASES: [(&str, Scenario); 9] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -45,6 +46,7 @@ pub(super) const CASES: [(&str, Scenario); 8] = [
     ("S06", s06),
     ("S07", s07),
     ("S08", s08),
+    ("S09", s09),
 ];
 
 /// A configuration directory removed when the scenario ends.
@@ -642,17 +644,15 @@ fn s02() -> Result<Value, String> {
         (shared, forked, rejoined) == (1, 2, 1),
         &format!("FFT nodes identical → edited → identical again: {shared}, {forked}, {rejoined}"),
     )?;
-    // Shortcuts change only the selected instance as well.
-    h.focus = FIRST_WINDOW;
-    action(&mut h.ws, WorkspaceAction::SelectModule { instance_id: a })?;
-    h.key(egui::Key::Num1);
+    // The Channel row changes only its instance as well.
+    open_settings(&mut h, a, &[SettingsItem::Channel(ChannelSelection::Left)])?;
     check(
         channel_of(&spec(&h.ws, a)?) == Some(ChannelSelection::Left)
             && channel_of(&spec(&h.ws, b)?) == Some(ChannelSelection::MonoAverage),
-        "a channel shortcut reached the other instance",
+        "a channel edit reached the other instance",
     )?;
     let split = fft_nodes();
-    h.key(egui::Key::M);
+    h.in_settings(&[SettingsItem::Channel(ChannelSelection::MonoAverage)])?;
     check(
         split == 2 && fft_nodes() == 1,
         "returning to the same channel did not share the FFT again",
@@ -920,7 +920,6 @@ fn fingerprint(ws: &Workspace) -> Value {
                 .collect();
             json!({"modules":modules,
                 "splits":window.splits.iter().map(|s| json!([format!("{:?}", s.axis), s.ratio, s.manual])).collect::<Vec<_>>(),
-                "active":window.active.and_then(|a| window.leaves.iter().position(|l| *l == a)),
                 "always_on_top":window.always_on_top,"locked":window.locked})
         })
         .collect();
@@ -1933,4 +1932,257 @@ fn s08() -> Result<Value, String> {
     )?;
     h.ws.check_ownership()?;
     Ok(json!({"restored_spectrum_nodes":restored,"default_position":[position.x,position.y]}))
+}
+
+/// The module outline a window drew in its last pass, and whether its rect is
+/// that module's leaf.
+fn outlined(h: &Harness, window: WindowId) -> Option<(ModuleInstanceId, bool)> {
+    let o = h.ws.observation();
+    let w = o.window(window)?;
+    let (id, rect) = w.module_outline?;
+    let leaf = w.leaf_rects.iter().find(|(leaf, _)| *leaf == id)?.1;
+    let exact = [
+        rect.min.x - leaf.min.x,
+        rect.min.y - leaf.min.y,
+        rect.max.x - leaf.max.x,
+        rect.max.y - leaf.max.y,
+    ]
+    .iter()
+    .all(|d| d.abs() <= 0.5);
+    Some((id, exact))
+}
+
+/// Left-click `body` in `window` with raw pointer events (whatever lies on top
+/// takes them, as on the desktop), then let the settings window and `window` run
+/// (the windows draw what the settings pass decided). A leaf is clicked in its
+/// middle; an empty window a quarter in from its corner, clear of the centered
+/// Add module button.
+fn select(h: &mut Harness, window: WindowId, body: ControlKey) -> Result<(), String> {
+    h.focus = window;
+    h.frame(vec![]);
+    let rect = h.locate(&body)?.rect;
+    let pos = if body == ControlKey::EmptyBody {
+        rect.min + rect.size() * 0.25
+    } else {
+        rect.center()
+    };
+    let button = |pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.frame(vec![Event::PointerMoved(pos)]);
+    h.frame(vec![button(true)]);
+    h.frame(vec![button(false)]);
+    h.frame(vec![]);
+    if h.windows.contains_key(&SETTINGS) {
+        h.frame_window(SETTINGS, vec![])?;
+    }
+    h.frame_window(window, vec![])?;
+    Ok(())
+}
+
+/// Selecting: with the settings window open, a left click on a module points the
+/// Module and Window tabs at it (the Workspace and Theme tabs stay and show it
+/// later) without focusing the settings window; on the Window tab a click on an
+/// empty window selects it. The Module tab outlines the edited module; "Move to…"
+/// outlines the moving one wherever the settings are. Closed settings, locked
+/// windows and the move overlay take no selection, and a value typed for one
+/// module never reaches another.
+fn s09() -> Result<Value, String> {
+    let (mut ws, _driver) = workspace()?;
+    let a = first_leaf(&ws)?;
+    let b = created(action(
+        &mut ws,
+        WorkspaceAction::SplitModule {
+            instance_id: a,
+            side: Side::Right,
+        },
+    )?)?;
+    let second = new_window(action(
+        &mut ws,
+        WorkspaceAction::NewWindow {
+            window_id: FIRST_WINDOW,
+        },
+    )?)?;
+    let c = created(action(
+        &mut ws,
+        WorkspaceAction::AddModule {
+            window_id: second,
+            type_id: SPECTRUM_MODULE_ID,
+        },
+    )?)?;
+    let empty = new_window(action(
+        &mut ws,
+        WorkspaceAction::NewWindow {
+            window_id: FIRST_WINDOW,
+        },
+    )?)?;
+    let mut h = Harness::new(ws);
+    h.frame_all()?;
+    let target = |h: &Harness| h.ws.observation().settings_target;
+
+    // Closed settings: a left click selects nothing and opens nothing.
+    select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
+    check(
+        !h.ws.settings_open() && outlined(&h, FIRST_WINDOW).is_none(),
+        "a left click without the settings window selected or opened something",
+    )?;
+
+    // Module tab: the edited module is outlined, a left click moves both.
+    open_settings(&mut h, a, &[])?;
+    h.frame_window(FIRST_WINDOW, vec![])?;
+    check(
+        outlined(&h, FIRST_WINDOW) == Some((a, true)),
+        &format!("Module tab outline: {:?}", outlined(&h, FIRST_WINDOW)),
+    )?;
+    h.take_commands(SETTINGS);
+    select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
+    let focused = h.take_commands(SETTINGS).contains(&ViewportCommand::Focus);
+    check(
+        target(&h) == Some((Some(b), Some(FIRST_WINDOW)))
+            && outlined(&h, FIRST_WINDOW) == Some((b, true))
+            && !focused,
+        &format!(
+            "left click in the same window: target {:?}, outline {:?}, focused {focused}",
+            target(&h),
+            outlined(&h, FIRST_WINDOW)
+        ),
+    )?;
+    select(&mut h, second, ControlKey::LeafBody(c))?;
+    h.frame_window(FIRST_WINDOW, vec![])?;
+    check(
+        target(&h) == Some((Some(c), Some(second)))
+            && outlined(&h, second) == Some((c, true))
+            && outlined(&h, FIRST_WINDOW).is_none(),
+        &format!(
+            "left click in another window: target {:?}, outlines {:?} / {:?}",
+            target(&h),
+            outlined(&h, second),
+            outlined(&h, FIRST_WINDOW)
+        ),
+    )?;
+    // An empty window has nothing for the Module tab.
+    select(&mut h, empty, ControlKey::EmptyBody)?;
+    check(
+        target(&h) == Some((Some(c), Some(second))),
+        "an empty window replaced the Module tab's module",
+    )?;
+
+    // Window tab: the window of the clicked module, or the clicked empty window.
+    h.in_settings(&[SettingsItem::Tab(Tab::Window)])?;
+    select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(a))?;
+    let window_outline =
+        h.ws.observation()
+            .window(FIRST_WINDOW)
+            .is_some_and(|w| w.edges.iter().any(|e| e.line == EdgeLine::Outline));
+    check(
+        target(&h) == Some((Some(a), Some(FIRST_WINDOW)))
+            && window_outline
+            && outlined(&h, FIRST_WINDOW).is_none(),
+        &format!(
+            "Window tab after a left click: target {:?}, window outline {window_outline}, module outline {:?}",
+            target(&h),
+            outlined(&h, FIRST_WINDOW)
+        ),
+    )?;
+    select(&mut h, empty, ControlKey::EmptyBody)?;
+    check(
+        target(&h) == Some((None, Some(empty))),
+        &format!(
+            "Window tab after clicking the empty window: {:?}",
+            target(&h)
+        ),
+    )?;
+
+    // Workspace tab: it stays; the Module tab then shows the clicked module.
+    h.in_settings(&[SettingsItem::Tab(Tab::Workspace)])?;
+    select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
+    select(&mut h, empty, ControlKey::EmptyBody)?;
+    let stayed =
+        h.ws.settings_targets()
+            .contains_key(&ControlKey::Settings(SettingsItem::Pause));
+    h.in_settings(&[SettingsItem::Tab(Tab::Module)])?;
+    h.frame_window(FIRST_WINDOW, vec![])?;
+    check(
+        stayed && outlined(&h, FIRST_WINDOW) == Some((b, true)),
+        &format!(
+            "Workspace tab: stayed {stayed}, Module tab then outlines {:?}",
+            outlined(&h, FIRST_WINDOW)
+        ),
+    )?;
+
+    // A locked window takes no selection.
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetLocked {
+            window_id: second,
+            enabled: true,
+        },
+    )?;
+    select(&mut h, second, ControlKey::LeafBody(c))?;
+    check(
+        target(&h) == Some((Some(b), Some(FIRST_WINDOW))),
+        "a locked window took a selection",
+    )?;
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetLocked {
+            window_id: second,
+            enabled: false,
+        },
+    )?;
+
+    // A value typed for one module stays with it: selecting another drops it.
+    let max_frequency = |h: &Harness, id| {
+        h.ws.observation().module(id).and_then(|m| {
+            m.view
+                .iter()
+                .find(|(k, _)| *k == "max_frequency_hz")
+                .cloned()
+        })
+    };
+    let before = (max_frequency(&h, a), max_frequency(&h, b));
+    h.in_settings(&[])?;
+    h.click(ControlKey::SettingsValue(SettingsItem::ViewNumber(
+        "max_frequency_hz",
+    )))?;
+    h.frame(vec![Event::Text("1.5k".to_owned())]);
+    select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(a))?;
+    h.focus = SETTINGS;
+    h.key(egui::Key::Enter);
+    h.frame(vec![]);
+    let after = (max_frequency(&h, a), max_frequency(&h, b));
+    check(
+        target(&h) == Some((Some(a), Some(FIRST_WINDOW))) && after == before,
+        &format!("a typed value crossed to another module: {before:?} -> {after:?}"),
+    )?;
+
+    // "Move to…" outlines the moving module whatever the settings show, and the
+    // overlay takes no selection.
+    h.in_settings(&[SettingsItem::MoveTo, SettingsItem::Tab(Tab::Theme)])?;
+    select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
+    let picking = (outlined(&h, FIRST_WINDOW), target(&h));
+    action(&mut h.ws, WorkspaceAction::CloseSettings)?;
+    h.frame_window(FIRST_WINDOW, vec![])?;
+    let closed = outlined(&h, FIRST_WINDOW);
+    h.key(egui::Key::Escape);
+    h.frame(vec![]);
+    check(
+        picking == (Some((a, true)), Some((Some(a), Some(FIRST_WINDOW))))
+            && closed == Some((a, true))
+            && outlined(&h, FIRST_WINDOW).is_none()
+            && h.ws.observation().move_source.is_none(),
+        &format!(
+            "move outline: picking {picking:?}, settings closed {closed:?}, after Escape {:?}",
+            outlined(&h, FIRST_WINDOW)
+        ),
+    )?;
+    h.ws.check_ownership()?;
+    Ok(
+        json!({"module_tab":"follows left clicks","window_tab":"clicked window",
+        "workspace_tab":"stays","locked":"no selection","typed_value":"dropped",
+        "move":"outlines the moving module"}),
+    )
 }

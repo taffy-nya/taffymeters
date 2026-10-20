@@ -77,9 +77,7 @@ impl Workspace {
             return Err(WorkspaceError::Layout(LayoutError::NotEmpty));
         }
         let id = self.create_module(type_id)?;
-        let window = self.window_mut(window_id)?;
-        window.layout.place_root(id)?;
-        window.active = Some(id);
+        self.window_mut(window_id)?.layout.place_root(id)?;
         Ok(ActionOutcome::Created(id))
     }
 
@@ -94,9 +92,6 @@ impl Workspace {
         if let Err(error) = window.layout.replace_leaf(instance_id, new) {
             self.modules.remove(&new);
             return Err(error.into());
-        }
-        if window.active == Some(instance_id) {
-            window.active = Some(new);
         }
         if self.move_source == Some(instance_id) {
             self.move_source = None;
@@ -115,7 +110,6 @@ impl Workspace {
         let window_id = self.located(instance_id)?;
         let window = self.window_mut(window_id)?;
         window.layout.remove_leaf(instance_id)?;
-        Self::select_after_removal(window, instance_id);
         if self.move_source == Some(instance_id) {
             self.move_source = None;
         }

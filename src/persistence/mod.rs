@@ -117,9 +117,6 @@ pub(crate) struct WindowFile {
     /// Windows with the same number move together.
     #[serde(default)]
     pub(crate) group: Option<u32>,
-    /// Index of the active leaf in left-to-right / top-to-bottom order.
-    #[serde(default)]
-    pub(crate) active: Option<u32>,
     #[serde(default)]
     pub(crate) layout: Option<LayoutFile>,
 }
@@ -447,7 +444,6 @@ mod tests {
                 locked: false,
                 maximized: false,
                 group: None,
-                active: None,
                 layout: None,
             }],
         }
