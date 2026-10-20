@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -316,128 +316,6 @@ fn repeat_frame(renderer: &mut visual::OffscreenRenderer) -> Result<image::RgbaI
         .ok_or_else(|| "invalid repeat readback length".to_owned())
 }
 
-fn persistence_visual(
-    renderer: &mut visual::OffscreenRenderer,
-    output: &Path,
-    baseline: Option<&Path>,
-) -> Result<Case, String> {
-    let (mut ws, mut driver) = workspace()?;
-    let osc = replace_first(&mut ws, crate::modules::OSCILLOSCOPE_MODULE_ID)?;
-    action(
-        &mut ws,
-        WorkspaceAction::SetStyle {
-            instance_id: osc,
-            style_id: crate::modules::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
-        },
-    )?;
-    let handle = ws.dataflow_handle_for_automation();
-    let mut h = Harness::new(ws);
-    h.display_time = Duration::ZERO;
-    capture_frame(renderer, &mut h)?;
-    driver
-        .advance_frames(1600, deadline())
-        .map_err(|e| e.to_string())?;
-    h.display_time = Duration::from_millis(300);
-    let fresh = capture_frame(renderer, &mut h)?;
-    h.display_time = Duration::from_millis(1300);
-    let expired = capture_frame(renderer, &mut h)?;
-    check(
-        fresh.rgba8 != expired.rgba8,
-        "Persistence did not change when its trace expired",
-    )?;
-    check(
-        handle
-            .processed_through_frame()
-            .map_err(|e| e.to_string())?
-            == 1600,
-        "display-only frames changed audio frontier",
-    )?;
-    let approved = baseline.filter(|path| path.join("approval.json").is_file());
-    let mut case = if approved.is_some() {
-        Case::pass("V03-persistence", Value::Null)
-    } else {
-        Case::incomplete(
-            "V03-persistence",
-            Status::NeedsReview,
-            "fixed-time candidate frames require visual review",
-        )
-    };
-    for (name, rendered, time) in [("fresh", &fresh, 0.3), ("expired", &expired, 1.3)] {
-        let id = format!("V03-persistence-{name}");
-        let hash = report::digest(&rendered.rgba8);
-        if let Some(base) = approved {
-            let approval: Value = serde_json::from_slice(
-                &std::fs::read(base.join("approval.json")).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            let previous: Value = serde_json::from_slice(
-                &std::fs::read(base.join(format!("{id}.json"))).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            if approval["candidate_hashes"][&id] != previous["pixel_sha256"] {
-                return Err(format!("{id} baseline approval hash mismatch"));
-            }
-            let previous_image =
-                visual::load_png(&base.join(format!("{id}.png"))).map_err(|e| e.to_string())?;
-            if report::digest(&previous_image.rgba8) != previous["pixel_sha256"] {
-                return Err(format!("{id} baseline file hash mismatch"));
-            }
-            if previous["renderer"] != json!(rendered.renderer)
-                || previous["pixel_size"] != json!(rendered.pixel_size)
-                || previous["display_time_seconds"] != json!(time)
-            {
-                case.status = Status::NotComparable;
-                case.error = Some(format!("{id} profile differs"));
-            } else if visual::compare_rgba(
-                previous_image.as_view(),
-                visual::Rgba8View {
-                    width: rendered.pixel_size[0],
-                    height: rendered.pixel_size[1],
-                    rgba8: &rendered.rgba8,
-                },
-            )
-            .map_err(|e| e.to_string())?
-            .changed_pixels
-                != Some(0)
-            {
-                case = Case::fail(
-                    "V03-persistence",
-                    "baseline pixels",
-                    format!("{id} differs"),
-                );
-            }
-        }
-        let file = format!("V03-persistence-{name}.png");
-        if case.status != Status::Pass {
-            visual::save_png(
-                &output.join(&file),
-                rendered.pixel_size[0],
-                rendered.pixel_size[1],
-                &rendered.rgba8,
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        let manifest = format!("V03-persistence-{name}.json");
-        std::fs::write(output.join(&manifest),serde_json::to_vec_pretty(&json!({
-            "case_id":"V03-persistence","scene_version":1,"frame_token":h.frame,
-            "egui_frame_nr":rendered.egui_frame_nr,"egui_pass_nr":rendered.egui_pass_nr,
-            "gpu_submission_id":rendered.submission_id,"readback_submission_id":rendered.submission_id,
-            "source":h.ws.source_descriptor_for_automation().source_id.0,"generation":h.ws.source_descriptor_for_automation().generation.0,
-            "delivered_through_frame":1600,"processed_through_frame":1600,
-            "result_version":null,"result_marker_note":"no extra analysis probe",
-            "display_time_seconds":time,"logical_size":rendered.logical_size,"pixel_size":rendered.pixel_size,
-            "pixels_per_point":rendered.pixels_per_point,"renderer":rendered.renderer,
-            "font":"egui bundled defaults","theme":"dark","pixel_sha256":hash
-        })).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-        if case.status != Status::Pass {
-            case.artifacts.push(format!("images/{file}"));
-        }
-        case.artifacts.push(format!("images/{manifest}"));
-    }
-    case.observed = json!({"fresh_sha256":report::digest(&fresh.rgba8),"expired_sha256":report::digest(&expired.rgba8)});
-    Ok(case)
-}
-
 pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>) {
     // V05 checks that the run never modifies a supplied baseline.
     let baseline_before = baseline.map(tree_digest);
@@ -490,11 +368,6 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
             "oscilloscope-line",
             crate::modules::OSCILLOSCOPE_MODULE_ID,
             None,
-        ),
-        (
-            "oscilloscope-persistence",
-            crate::modules::OSCILLOSCOPE_MODULE_ID,
-            Some(crate::modules::PERSISTENCE_OSCILLOSCOPE_STYLE_ID),
         ),
         ("spectrogram", crate::modules::SPECTROGRAM_MODULE_ID, None),
         ("waveform", WAVEFORM_MODULE_ID, None),
@@ -621,12 +494,6 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
             Err(e) => Case::fail("V07-theme-light", "themed layout frame", e),
         },
     );
-    report
-        .cases
-        .push(match persistence_visual(&mut renderer, &images, baseline) {
-            Ok(case) => case,
-            Err(error) => Case::fail("V03-persistence", "fixed-time render", error),
-        });
     report.cases.push(
         match (repeat_frame(&mut renderer), repeat_frame(&mut renderer)) {
             (Ok(a), Ok(b)) => repeat_case(&a, &b),

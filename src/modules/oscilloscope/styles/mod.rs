@@ -1,5 +1,4 @@
 mod line;
-mod persistence;
 
 use crate::{
     extensions::{Registry, RegistryError},
@@ -8,11 +7,9 @@ use crate::{
 };
 
 pub const LINE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.line";
-pub const PERSISTENCE_OSCILLOSCOPE_STYLE_ID: &str = "taffymeters.oscilloscope.persistence";
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
-    registry.register_oscilloscope_style(line::LineOscilloscopeStyleFactory)?;
-    registry.register_oscilloscope_style(persistence::PersistenceOscilloscopeStyleFactory)
+    registry.register_oscilloscope_style(line::LineOscilloscopeStyleFactory)
 }
 
 fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<Point>) {

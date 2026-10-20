@@ -662,14 +662,7 @@ fn c06() -> Result<Value, String> {
 
 fn c07() -> Result<Value, String> {
     let (mut ws, mut driver) = workspace()?;
-    let osc = replace_first(&mut ws, crate::modules::OSCILLOSCOPE_MODULE_ID)?;
-    action(
-        &mut ws,
-        WorkspaceAction::SetStyle {
-            instance_id: osc,
-            style_id: crate::modules::PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
-        },
-    )?;
+    replace_first(&mut ws, crate::modules::OSCILLOSCOPE_MODULE_ID)?;
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
     h.display_time = Duration::from_secs(1);
@@ -685,8 +678,8 @@ fn c07() -> Result<Value, String> {
     h.display_time = Duration::from_millis(2300);
     let late = h.frame(vec![]);
     check(
-        early.shapes.len() > late.shapes.len(),
-        "Persistence did not expire trace at display time 1.3s later",
+        early.shapes.len() == late.shapes.len(),
+        "Oscilloscope Line changed with display time alone",
     )?;
     check(
         handle
@@ -714,7 +707,7 @@ fn c07() -> Result<Value, String> {
         "Waveform restored after hiding differs from one drawn throughout",
     )?;
     Ok(
-        json!({"audio_frontier":frontier,"persistence_shapes":[early.shapes.len(),late.shapes.len()],
+        json!({"audio_frontier":frontier,"oscilloscope_shapes":[early.shapes.len(),late.shapes.len()],
         "hidden_history_pcm_frames":hidden.pcm_frames,
         "waveform_rects":{"before_audio":hidden.before_audio.len(),"restored":hidden.restored.len(),
             "matches_always_visible":true}}),

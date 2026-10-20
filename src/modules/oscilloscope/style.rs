@@ -28,8 +28,6 @@ pub trait OscilloscopeStyle: Send {
     ) -> ModuleResponse;
     /// Theme roles the style draws with.
     fn color_roles(&self) -> &'static [ColorRole];
-    /// Drop accumulated traces, e.g. those of a channel that is no longer shown.
-    fn clear(&mut self) {}
 }
 
 pub trait OscilloscopeStyleFactory: Send + Sync {

@@ -30,7 +30,6 @@ pub(crate) const BLOCK_FRAMES: usize = 1_600;
 
 pub(crate) struct RecordedPolyline {
     pub points: Vec<Point>,
-    pub stroke: Stroke,
 }
 
 pub(crate) struct RecordedText {
@@ -76,10 +75,9 @@ impl RecordingTarget {
 }
 
 impl RenderTarget for RecordingTarget {
-    fn polyline(&mut self, _clip: Rect, points: &[Point], stroke: Stroke) {
+    fn polyline(&mut self, _clip: Rect, points: &[Point], _stroke: Stroke) {
         self.polylines.push(RecordedPolyline {
             points: points.to_vec(),
-            stroke,
         });
     }
 

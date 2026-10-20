@@ -2,7 +2,7 @@ pub mod style;
 mod styles;
 
 use self::style::{OscilloscopeStyle, OscilloscopeStyleContext};
-pub use self::styles::{LINE_OSCILLOSCOPE_STYLE_ID, PERSISTENCE_OSCILLOSCOPE_STYLE_ID};
+pub use self::styles::LINE_OSCILLOSCOPE_STYLE_ID;
 
 use crate::{
     audio::SourceReader,
@@ -25,16 +25,10 @@ use crate::modules::pcm_view::{
 
 pub const OSCILLOSCOPE_MODULE_ID: &str = "taffymeters.oscilloscope";
 
-const OSCILLOSCOPE_STYLES: &[StyleOption] = &[
-    StyleOption {
-        id: LINE_OSCILLOSCOPE_STYLE_ID,
-        label: "Line",
-    },
-    StyleOption {
-        id: PERSISTENCE_OSCILLOSCOPE_STYLE_ID,
-        label: "Persistence",
-    },
-];
+const OSCILLOSCOPE_STYLES: &[StyleOption] = &[StyleOption {
+    id: LINE_OSCILLOSCOPE_STYLE_ID,
+    label: "Line",
+}];
 
 /// The center line; the trace is the style's.
 const OWN_COLOR_ROLES: &[ColorRole] = &[ColorRole::Guide];
@@ -107,11 +101,7 @@ impl Module for OscilloscopeModule {
 
     fn set_channel(&mut self, channel: ChannelSelection) -> Result<(), ModuleError> {
         channel.resolve(self.source.descriptor())?;
-        if self.channel == channel {
-            return Ok(());
-        }
         self.channel = channel;
-        self.style.clear();
         Ok(())
     }
 
@@ -219,20 +209,13 @@ mod tests {
         BLOCK_FRAMES, PcmFixture, RecordingTarget, TEST_RECT, draw, repeat_frame,
     };
 
-    fn persistence_scope(fixture: &PcmFixture) -> Box<dyn Module> {
+    fn scope(fixture: &PcmFixture) -> Box<dyn Module> {
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
-        let mut module = OscilloscopeFactory
+        OscilloscopeFactory
             .create(&fixture.services, &registry, None)
-            .unwrap();
-        module
-            .set_style(PERSISTENCE_OSCILLOSCOPE_STYLE_ID, &registry)
-            .unwrap();
-        module
+            .unwrap()
     }
-
-    /// One persistence trace (the center line is hidden by default).
-    const ONE_TRACE: usize = 1;
 
     /// Height of `level` in the test frames, whose full-scale reference draws 1.0
     /// at `REFERENCE_HEIGHT` of the half height.
@@ -240,95 +223,51 @@ mod tests {
         TEST_RECT.center().y - level * crate::module::REFERENCE_HEIGHT * TEST_RECT.height() * 0.5
     }
 
-    #[test]
-    fn reselecting_oscilloscope_channel_keeps_persistence_traces() {
-        let mut fixture = PcmFixture::new(2);
-        let mut module = persistence_scope(&fixture);
-        fixture.feed(&repeat_frame(&[0.2, -0.1], BLOCK_FRAMES));
-
-        let mut target = RecordingTarget::default();
-        draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
-
-        module.set_channel(ChannelSelection::MonoAverage).unwrap();
-        target.clear();
-        draw(module.as_mut(), &mut target, Duration::from_millis(50));
-        assert_eq!(
-            target.non_empty_polylines(),
-            ONE_TRACE,
-            "reselecting cleared a live trace"
-        );
-    }
-
-    #[test]
-    fn switching_to_a_different_channel_clears_persistence_traces() {
-        let mut fixture = PcmFixture::new(2);
-        let mut module = persistence_scope(&fixture);
-        fixture.feed(&repeat_frame(&[0.2, -0.1], BLOCK_FRAMES));
-
-        let mut target = RecordingTarget::default();
-        draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
-
-        module.set_channel(ChannelSelection::Left).unwrap();
-        assert_eq!(module.channel(), Some(ChannelSelection::Left));
-        target.clear();
-        draw(module.as_mut(), &mut target, Duration::from_millis(50));
-        // The old channel's trace (mono mix 0.05) must be gone. Whether the same
-        // result is re-traced from the new channel is not specified; if it is, it
-        // must follow Left.
-        let mono_y = level_y(0.05);
-        let left_y = level_y(0.2);
-        for trace in &target.polylines {
-            assert!(
-                trace
-                    .points
-                    .iter()
-                    .all(|point| (point.y - left_y).abs() < 0.001),
-                "a trace of the previous channel survived the switch"
-            );
-            assert!(
-                trace
-                    .points
-                    .iter()
-                    .all(|point| (point.y - mono_y).abs() > 0.001)
-            );
-        }
-
-        // The next result is traced from the newly selected channel.
-        fixture.feed(&repeat_frame(&[0.2, -0.1], BLOCK_FRAMES));
-        target.clear();
-        draw(module.as_mut(), &mut target, Duration::from_millis(100));
-        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
+    /// The single trace drawn sits at `level` (the center line is hidden by default).
+    fn assert_trace_at(target: &RecordingTarget, level: f32) {
+        assert_eq!(target.non_empty_polylines(), 1);
+        let expected_y = level_y(level);
         let trace = target.polylines.last().unwrap();
-        // Left is 0.2 (mono mix would be 0.05).
-        let expected_y = level_y(0.2);
         assert!(
             trace
                 .points
                 .iter()
                 .all(|point| (point.y - expected_y).abs() < 0.001),
-            "trace did not follow the Left channel"
+            "trace is not at level {level}"
         );
     }
 
     #[test]
-    fn rejected_channel_change_keeps_channel_and_persistence_traces() {
+    fn switching_channel_traces_the_new_channel() {
         let mut fixture = PcmFixture::new(2);
-        let mut module = persistence_scope(&fixture);
+        let mut module = scope(&fixture);
         fixture.feed(&repeat_frame(&[0.2, -0.1], BLOCK_FRAMES));
 
         let mut target = RecordingTarget::default();
         draw(module.as_mut(), &mut target, Duration::ZERO);
-        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
+        // Mono mix of 0.2 and -0.1.
+        assert_trace_at(&target, 0.05);
+
+        module.set_channel(ChannelSelection::Left).unwrap();
+        assert_eq!(module.channel(), Some(ChannelSelection::Left));
+        target.clear();
+        draw(module.as_mut(), &mut target, Duration::from_millis(50));
+        assert_trace_at(&target, 0.2);
+    }
+
+    #[test]
+    fn rejected_channel_change_keeps_the_channel() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = scope(&fixture);
+        fixture.feed(&repeat_frame(&[0.2, -0.1], BLOCK_FRAMES));
 
         assert!(matches!(
             module.set_channel(ChannelSelection::Discrete(2)),
             Err(ModuleError::InvalidChannel(_))
         ));
         assert_eq!(module.channel(), Some(ChannelSelection::MonoAverage));
-        target.clear();
-        draw(module.as_mut(), &mut target, Duration::from_millis(50));
-        assert_eq!(target.non_empty_polylines(), ONE_TRACE);
+        let mut target = RecordingTarget::default();
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        assert_trace_at(&target, 0.05);
     }
 }
