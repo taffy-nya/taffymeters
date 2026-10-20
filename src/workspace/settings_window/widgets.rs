@@ -4,7 +4,7 @@
 
 use eframe::egui::{self, Align, Layout, RichText, Stroke, vec2};
 
-use super::{SWATCHES, SettingsItem};
+use super::{SettingsItem, swatches};
 use crate::{
     dataflow::ChannelSelection,
     render::Color,
@@ -417,7 +417,7 @@ pub(super) fn color_row(
         ui.spacing_mut().item_spacing.x = 2.0;
         let ring = ui.visuals().widgets.noninteractive.fg_stroke.color;
         let edge = ui.visuals().widgets.noninteractive.bg_stroke;
-        for (index, swatch) in SWATCHES.iter().enumerate() {
+        for (index, swatch) in swatches(ui.visuals().dark_mode).iter().enumerate() {
             let active = overridden && *swatch == current;
             // Painted at a fixed size: the selection ring is drawn inside, so it
             // never moves its neighbors.

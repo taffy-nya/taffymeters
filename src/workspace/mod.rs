@@ -49,7 +49,7 @@ pub(crate) use layout::{Side, SplitId};
 pub(crate) use moving::{MoveRequest, WindowTracker};
 use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
-pub(crate) use settings_window::{SWATCHES, SettingsItem, Tab};
+pub(crate) use settings_window::{SettingsItem, Tab, swatches};
 use window::WindowUiState;
 #[cfg(feature = "automation")]
 pub(crate) use window::{ControlKey, ControlTarget, EdgeLine, ResizeEdge};

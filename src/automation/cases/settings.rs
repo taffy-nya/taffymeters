@@ -26,7 +26,7 @@ use crate::{
     theme::{ColorRole, Preset},
     workspace::{
         ActionOutcome, ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId,
-        SWATCHES, SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction,
+        SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction, swatches,
     },
 };
 
@@ -723,7 +723,7 @@ fn s03() -> Result<Value, String> {
         h.ws.observation().module(b).map(|m| m.type_id) == Some(SPECTRUM_MODULE_ID),
         "the type picker replaced the wrong instance",
     )?;
-    let swatch = SWATCHES[3];
+    let swatch = swatches(true)[3];
     // A swatch sets the instance's own color directly.
     open_settings(
         &mut h,
@@ -786,7 +786,7 @@ fn s03() -> Result<Value, String> {
             index: 6,
         },
     ])?;
-    let type_color = SWATCHES[6];
+    let type_color = swatches(false)[6];
     check(
         palette(&h, a)?.color(ColorRole::Secondary) == type_color
             && palette(&h, b)?.color(ColorRole::Secondary) == type_color
@@ -824,7 +824,7 @@ fn s03() -> Result<Value, String> {
         role: ColorRole::Primary,
         index: 4,
     }])?;
-    let global = SWATCHES[4];
+    let global = swatches(false)[4];
     check(
         palette(&h, a)?.color(ColorRole::Primary) == global
             && palette(&h, waveform)?.color(ColorRole::Primary) == global

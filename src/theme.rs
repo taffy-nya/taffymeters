@@ -192,20 +192,21 @@ impl Preset {
                 ],
                 true,
             ),
+            // Catppuccin Latte, the light counterpart of the Dark mapping.
             Self::Light => (
                 [
-                    Color::rgb(244, 246, 248),
-                    Color::rgba(214, 220, 226, 230),
-                    Color::rgb(190, 198, 206),
-                    Color::rgb(30, 110, 200),
-                    Color::rgb(25, 30, 36),
-                    Color::rgb(95, 105, 115),
-                    Color::rgba(90, 105, 120, 110),
-                    Color::rgb(0, 140, 120),
-                    Color::rgba(210, 120, 0, 200),
-                    Color::rgb(40, 120, 210),
-                    Color::rgb(130, 60, 200),
-                    Color::rgb(220, 40, 90),
+                    Color::rgb(0xef, 0xf1, 0xf5),       // base
+                    Color::rgb(0xdc, 0xe0, 0xe8),       // crust
+                    Color::rgb(0xbc, 0xc0, 0xcc),       // surface1
+                    Color::rgb(0x1e, 0x66, 0xf5),       // blue
+                    Color::rgb(0x4c, 0x4f, 0x69),       // text
+                    Color::rgb(0x6c, 0x6f, 0x85),       // subtext0
+                    Color::rgba(0x7c, 0x7f, 0x93, 140), // overlay2
+                    Color::rgb(0x17, 0x92, 0x99),       // teal
+                    Color::rgba(0xdf, 0x8e, 0x1d, 200), // yellow
+                    Color::rgb(0x20, 0x9f, 0xb5),       // sapphire
+                    Color::rgb(0x88, 0x39, 0xef),       // mauve
+                    Color::rgb(0xd2, 0x0f, 0x39),       // red
                 ],
                 false,
             ),

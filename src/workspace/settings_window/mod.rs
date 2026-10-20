@@ -147,8 +147,17 @@ pub(crate) enum SettingsItem {
     TypeStyle(&'static str),
 }
 
-/// Quick colors offered next to the full picker: Catppuccin Mocha accents.
-pub(crate) const SWATCHES: [Color; 8] = [
+/// Quick colors offered next to the full picker: Catppuccin accents of the
+/// chrome's tone (Mocha on dark, Latte on light), in the same order.
+pub(crate) fn swatches(dark: bool) -> &'static [Color; 8] {
+    if dark {
+        &MOCHA_SWATCHES
+    } else {
+        &LATTE_SWATCHES
+    }
+}
+
+const MOCHA_SWATCHES: [Color; 8] = [
     Color::rgb(0x94, 0xe2, 0xd5), // teal
     Color::rgb(0x74, 0xc7, 0xec), // sapphire
     Color::rgb(0xcb, 0xa6, 0xf7), // mauve
@@ -157,6 +166,17 @@ pub(crate) const SWATCHES: [Color; 8] = [
     Color::rgb(0xf9, 0xe2, 0xaf), // yellow
     Color::rgb(0xa6, 0xe3, 0xa1), // green
     Color::rgb(0xcd, 0xd6, 0xf4), // text
+];
+
+const LATTE_SWATCHES: [Color; 8] = [
+    Color::rgb(0x17, 0x92, 0x99), // teal
+    Color::rgb(0x20, 0x9f, 0xb5), // sapphire
+    Color::rgb(0x88, 0x39, 0xef), // mauve
+    Color::rgb(0xd2, 0x0f, 0x39), // red
+    Color::rgb(0xfe, 0x64, 0x0b), // peach
+    Color::rgb(0xdf, 0x8e, 0x1d), // yellow
+    Color::rgb(0x40, 0xa0, 0x2b), // green
+    Color::rgb(0x4c, 0x4f, 0x69), // text
 ];
 
 pub(crate) struct SettingsWindow {

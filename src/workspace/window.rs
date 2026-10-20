@@ -39,6 +39,10 @@ const MOCHA_CRUST: Color32 = Color32::from_rgb(0x09, 0x09, 0x0d);
 const MOCHA_RED: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
 const MOCHA_YELLOW: Color32 = Color32::from_rgb(0xf9, 0xe2, 0xaf);
 const MOCHA_PEACH: Color32 = Color32::from_rgb(0xfa, 0xb3, 0x87);
+/// Catppuccin Latte counterparts for the Light preset. Warnings use peach: Latte
+/// yellow is too faint as text on the light surfaces.
+const LATTE_RED: Color32 = Color32::from_rgb(0xd2, 0x0f, 0x39);
+const LATTE_PEACH: Color32 = Color32::from_rgb(0xfe, 0x64, 0x0b);
 
 /// egui color of a theme color.
 pub(crate) fn color32(color: crate::render::Color) -> Color32 {
@@ -127,6 +131,9 @@ fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
     if palette.dark {
         visuals.error_fg_color = MOCHA_RED;
         visuals.warn_fg_color = MOCHA_YELLOW;
+    } else {
+        visuals.error_fg_color = LATTE_RED;
+        visuals.warn_fg_color = LATTE_PEACH;
     }
     visuals.selection.stroke = line(1.0, on_accent);
     visuals.hyperlink_color = accent;
