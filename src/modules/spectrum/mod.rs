@@ -10,7 +10,7 @@ use crate::{
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         StyleOption, WHEEL_ZOOM_PER_POINT, flag_setting, number_setting, overlay_setting,
-        spec_from_saved,
+        spec_from_saved, styled_color_roles,
     },
     plotting::{SpectrumCoordinates, spectrum_dbfs_at},
     render::{Point, Rect, TextStyle},
@@ -83,7 +83,10 @@ fn spectrum_data() -> SpectrumData {
     }
 }
 
-const COLOR_ROLES: &[ColorRole] = &[
+/// The cursor readout; the curve, bars or cells are the style's.
+const OWN_COLOR_ROLES: &[ColorRole] = &[ColorRole::Text];
+/// Every role a Spectrum can draw with across its styles.
+const TYPE_COLOR_ROLES: &[ColorRole] = &[
     ColorRole::Primary,
     ColorRole::Secondary,
     ColorRole::Low,
@@ -120,6 +123,7 @@ impl SpectrumModuleFactory {
             .dataflow
             .subscribe(spec)
             .map_err(ModuleError::from)?;
+        let style = registry.create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)?;
         Ok(SpectrumModule {
             source: services.source.clone(),
             controller: subscription.controller(),
@@ -129,7 +133,8 @@ impl SpectrumModuleFactory {
             main: data.main,
             peak: data.peak,
             snapshot: Snapshot::default(),
-            style: registry.create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)?,
+            color_roles: styled_color_roles(style.color_roles(), OWN_COLOR_ROLES),
+            style,
             style_id: DEFAULT_SPECTRUM_STYLE_ID,
             view: SpectrumCoordinates {
                 min_frequency_hz: 20.0,
@@ -165,6 +170,10 @@ impl ModuleFactory for SpectrumModuleFactory {
     fn default_data(&self) -> Option<DataSpec> {
         Some(spectrum_data().spec)
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        TYPE_COLOR_ROLES
+    }
 }
 
 struct SpectrumModule {
@@ -178,6 +187,8 @@ struct SpectrumModule {
     snapshot: Snapshot,
     style: Box<dyn SpectrumStyle>,
     style_id: &'static str,
+    /// The style's roles and the readout's.
+    color_roles: Vec<ColorRole>,
     /// Shown frequencies, and levels relative to the workspace reference level.
     view: SpectrumCoordinates,
     show_peak: bool,
@@ -281,8 +292,8 @@ impl Module for SpectrumModule {
         }
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
-        COLOR_ROLES
+    fn color_roles(&self) -> &[ColorRole] {
+        &self.color_roles
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
@@ -414,6 +425,7 @@ impl Module for SpectrumModule {
             .ok_or_else(|| RegistryError::UnknownStyle(style_id.to_owned()))?;
         self.style = registry.create_spectrum_style(option.id)?;
         self.style_id = option.id;
+        self.color_roles = styled_color_roles(self.style.color_roles(), OWN_COLOR_ROLES);
         Ok(())
     }
 }
@@ -619,6 +631,91 @@ mod tests {
                 (highest - level_y).abs() <= cell_height,
                 "column at x {x} reaches y {highest}, level is {level_y}"
             );
+        }
+    }
+
+    /// Rectangles `style` draws for `plot` in an 800 × 400 plot spanning −100…0 dBFS.
+    fn style_rects(style: &mut dyn SpectrumStyle, plot: &SpectrumPlot<'_>) -> Vec<ColoredRect> {
+        let mut target = RecordingTarget::default();
+        style.draw(
+            SpectrumStyleContext {
+                snapshot: plot,
+                coordinates: &PEAK_TEST_COORDINATES,
+                rect: PEAK_TEST_RECT,
+                monotonic_time: Duration::ZERO,
+                palette: &crate::theme::Palette::default(),
+            },
+            &mut target,
+        );
+        target.rects
+    }
+
+    const PEAK_TEST_COORDINATES: SpectrumCoordinates = SpectrumCoordinates {
+        min_frequency_hz: 20.0,
+        max_frequency_hz: 20_000.0,
+        min_dbfs: -100.0,
+        max_dbfs: 0.0,
+    };
+    const PEAK_TEST_RECT: Rect = Rect {
+        min: Point { x: 0.0, y: 0.0 },
+        max: Point { x: 800.0, y: 400.0 },
+    };
+
+    #[test]
+    fn bars_and_pixel_mark_the_peak_of_each_band_above_its_level() {
+        let level = vec![-50.0_f32; 1025];
+        let held = vec![-20.0_f32; 1025];
+        let fft = FftMetadata {
+            window: WindowFunction::PeriodicHann,
+            window_size: 2048,
+            hop_size: 512,
+            bin_hz: 48_000.0 / 2048.0,
+            floor_dbfs: -160.0,
+        };
+        let plot = |peak_dbfs| SpectrumPlot {
+            fft,
+            spectrum_dbfs: &level,
+            peak_dbfs,
+        };
+        let secondary = crate::theme::Palette::default().color(ColorRole::Secondary);
+        let level_y = PEAK_TEST_COORDINATES.y_for_dbfs(-50.0, PEAK_TEST_RECT);
+        let peak_y = PEAK_TEST_COORDINATES.y_for_dbfs(-20.0, PEAK_TEST_RECT);
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        for style_id in [BAR_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID] {
+            let mut style = registry.create_spectrum_style(style_id).unwrap();
+            let without = style_rects(style.as_mut(), &plot(None));
+            assert!(
+                without.iter().all(|rect| rect.color != secondary),
+                "{style_id}: a mark without a peak"
+            );
+            let bands: std::collections::BTreeSet<u32> = without
+                .iter()
+                .map(|rect| rect.rect.min.x.to_bits())
+                .collect();
+
+            let with = style_rects(style.as_mut(), &plot(Some(&held)));
+            let marks: Vec<&ColoredRect> =
+                with.iter().filter(|rect| rect.color == secondary).collect();
+            assert_eq!(marks.len(), bands.len(), "{style_id}: one mark per band");
+            assert_eq!(
+                with.len() - marks.len(),
+                without.len(),
+                "{style_id}: the level is drawn as without a peak"
+            );
+            for mark in marks {
+                assert!(bands.contains(&mark.rect.min.x.to_bits()), "{style_id}");
+                // Bars put the mark's top on the peak; Pixel lights the cell holding it.
+                assert!(
+                    mark.rect.min.y <= peak_y && peak_y - mark.rect.min.y < 7.0,
+                    "{style_id}: mark at y {} for a peak at {peak_y}",
+                    mark.rect.min.y
+                );
+                assert!(
+                    mark.rect.max.y < level_y,
+                    "{style_id}: mark above the level"
+                );
+            }
         }
     }
 

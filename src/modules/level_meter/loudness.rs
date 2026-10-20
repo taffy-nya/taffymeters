@@ -22,6 +22,13 @@ const LOUDNESS_ZONES: Zones = Zones {
     mid_from: -15.9,
     high_above: -6.45,
 };
+/// The trough and the zone colors.
+const COLOR_ROLES: &[ColorRole] = &[
+    ColorRole::Surface,
+    ColorRole::Low,
+    ColorRole::Mid,
+    ColorRole::High,
+];
 
 fn loudness_data() -> (DataSpec, OutputId) {
     let mut spec = DataSpec::new();
@@ -61,6 +68,10 @@ impl ModuleFactory for LoudnessMeterFactory {
             rects: Vec::with_capacity(2),
         }))
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
+    }
 }
 
 struct LoudnessMeterModule {
@@ -80,13 +91,8 @@ impl Module for LoudnessMeterModule {
         (output == self.output).then_some("Loudness")
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
-        &[
-            ColorRole::Surface,
-            ColorRole::Low,
-            ColorRole::Mid,
-            ColorRole::High,
-        ]
+    fn color_roles(&self) -> &[ColorRole] {
+        COLOR_ROLES
     }
 
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {

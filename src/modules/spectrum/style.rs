@@ -2,7 +2,7 @@ use crate::{
     dataflow::FftMetadata,
     plotting::SpectrumCoordinates,
     render::{Rect, RenderTarget},
-    theme::Palette,
+    theme::{ColorRole, Palette},
 };
 
 /// One Spectrum result: the main curve and, when available, the peak curve of the
@@ -24,6 +24,8 @@ pub struct SpectrumStyleContext<'a> {
 
 pub trait SpectrumStyle: Send {
     fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget);
+    /// Theme roles the style draws with.
+    fn color_roles(&self) -> &'static [ColorRole];
 }
 
 pub trait SpectrumStyleFactory: Send + Sync {

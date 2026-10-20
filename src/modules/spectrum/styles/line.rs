@@ -67,6 +67,10 @@ impl SpectrumStyle for LineSpectrumStyle {
             );
         }
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[ColorRole::Primary, ColorRole::Secondary]
+    }
 }
 
 fn spectrum_points(

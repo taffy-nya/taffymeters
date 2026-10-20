@@ -794,6 +794,31 @@ fn s03() -> Result<Value, String> {
                 == light.color(ColorRole::Secondary),
         "type style did not apply to exactly the Spectrum instances",
     )?;
+    // A type style offers only the colors that type draws with; Empty, drawing
+    // with none, is not listed.
+    let swatch_of = |scope, role| {
+        ControlKey::Settings(SettingsItem::Swatch {
+            scope,
+            role,
+            index: 0,
+        })
+    };
+    let spectrum_offers_primary =
+        h.ws.settings_targets()
+            .contains_key(&swatch_of(type_scope, ColorRole::Primary));
+    h.in_settings(&[SettingsItem::TypeStyle(WAVEFORM_MODULE_ID)])?;
+    let targets = h.ws.settings_targets();
+    let waveform_scope = ColorScope::Type(WAVEFORM_MODULE_ID);
+    check(
+        spectrum_offers_primary
+            && targets.contains_key(&swatch_of(waveform_scope, ColorRole::Low))
+            && !targets.contains_key(&swatch_of(waveform_scope, ColorRole::Primary))
+            && !targets.contains_key(&ControlKey::Settings(SettingsItem::TypeStyle(
+                EMPTY_MODULE_ID,
+            ))),
+        "type style colors do not follow what the type draws with",
+    )?;
+    h.in_settings(&[SettingsItem::TypeStyle(SPECTRUM_MODULE_ID)])?;
     h.in_settings(&[SettingsItem::Swatch {
         scope: ColorScope::Global,
         role: ColorRole::Primary,

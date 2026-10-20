@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::{
-    SettingsItem, TYPE_ROLES,
+    SettingsItem,
     widgets::{Number, card, card_with_reset, choice, color_row, differs, number_row, row},
 };
 use crate::{
@@ -86,8 +86,12 @@ impl Workspace {
             style.is_some_and(|style| !style.is_empty()),
             controls,
             |ui, controls| {
+                // Types that draw with no theme color (Empty) have nothing to style.
                 row(ui, "Type", |ui| {
                     for (type_id, label) in self.registry.module_types() {
+                        if self.registry.color_roles(type_id).is_empty() {
+                            continue;
+                        }
                         let selected = *selected_type == Some(type_id);
                         if choice(
                             ui,
@@ -102,7 +106,7 @@ impl Workspace {
                 });
                 if let (Some(type_id), Some(scope)) = (*selected_type, type_scope) {
                     let resolved = self.theme.resolve(type_id, &RoleOverrides::new());
-                    for role in TYPE_ROLES {
+                    for &role in self.registry.color_roles(type_id) {
                         color_row(
                             ui,
                             scope,

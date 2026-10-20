@@ -22,13 +22,15 @@ pub enum ColorRole {
     Accent,
     /// Readouts.
     Text,
-    /// Secondary text.
+    /// Secondary text, including a Module's notice that it cannot show its
+    /// content; no Module type declares it, so it is set globally only.
     Muted,
     /// Reference lines (zero line, axes).
     Guide,
     /// Main data trace.
     Primary,
-    /// Secondary trace (peak curve).
+    /// Secondary trace: the peak (Spectrum's peak curve or marks, Level Meter's
+    /// peak hold).
     Secondary,
     /// Intensity ramp: low, middle and high levels (bars, heat map, meters).
     Low,

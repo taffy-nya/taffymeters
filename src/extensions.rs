@@ -7,6 +7,7 @@ use crate::{
         oscilloscope::style::{OscilloscopeStyle, OscilloscopeStyleFactory},
         spectrum::style::{SpectrumStyle, SpectrumStyleFactory},
     },
+    theme::ColorRole,
 };
 
 #[derive(Default)]
@@ -83,6 +84,13 @@ impl Registry {
     /// The analysis a new instance of `id` starts with, if it has one to reset to.
     pub fn default_data(&self, id: &str) -> Option<&DataSpec> {
         self.module_defaults.get(id)
+    }
+
+    /// Theme roles instances of type `id` can draw with: what its type style offers.
+    pub fn color_roles(&self, id: &str) -> &'static [ColorRole] {
+        self.modules
+            .get(id)
+            .map_or(&[], |factory| factory.color_roles())
     }
 
     pub fn module_types(&self) -> Vec<(&'static str, &'static str)> {
@@ -219,6 +227,10 @@ mod tests {
 
     impl SpectrumStyle for TaggedStyle {
         fn draw(&mut self, _context: SpectrumStyleContext<'_>, _renderer: &mut dyn RenderTarget) {}
+
+        fn color_roles(&self) -> &'static [ColorRole] {
+            &[]
+        }
     }
 
     impl OscilloscopeStyle for TaggedStyle {
@@ -228,6 +240,10 @@ mod tests {
             _renderer: &mut dyn RenderTarget,
         ) -> ModuleResponse {
             ModuleResponse::default()
+        }
+
+        fn color_roles(&self) -> &'static [ColorRole] {
+            &[]
         }
     }
 

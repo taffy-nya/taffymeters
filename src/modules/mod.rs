@@ -37,3 +37,33 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     level_meter::register(registry)?;
     empty::register(registry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{modules::test_support::PcmFixture, theme::ColorRole};
+
+    /// A type style offers exactly the roles some instance of the type, in one of
+    /// its styles, lets the user override: none it never draws with, none missing.
+    #[test]
+    fn type_color_roles_are_those_of_its_instances_across_styles() {
+        let fixture = PcmFixture::new(2);
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        for (type_id, _) in registry.module_types() {
+            let mut module = registry
+                .create_module(type_id, &fixture.services, None)
+                .unwrap();
+            let mut offered: Vec<ColorRole> = module.color_roles().to_vec();
+            for option in module.style_options() {
+                module.set_style(option.id, &registry).unwrap();
+                offered.extend_from_slice(module.color_roles());
+            }
+            offered.sort_unstable();
+            offered.dedup();
+            let mut declared = registry.color_roles(type_id).to_vec();
+            declared.sort_unstable();
+            assert_eq!(offered, declared, "{type_id}");
+        }
+    }
+}

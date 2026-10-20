@@ -11,6 +11,7 @@ use crate::{
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
         StyleOption, flag_setting, number_setting, overlay_setting, reference_gain,
+        styled_color_roles,
     },
     render::{Point, Stroke},
     settings::{SettingValue, ViewSetting},
@@ -35,6 +36,11 @@ const OSCILLOSCOPE_STYLES: &[StyleOption] = &[
     },
 ];
 
+/// The center line; the trace is the style's.
+const OWN_COLOR_ROLES: &[ColorRole] = &[ColorRole::Guide];
+/// Every role an Oscilloscope can draw with across its styles.
+const TYPE_COLOR_ROLES: &[ColorRole] = &[ColorRole::Primary, ColorRole::Guide];
+
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     styles::register(registry)?;
     registry.register_module(OscilloscopeFactory)
@@ -58,6 +64,7 @@ impl ModuleFactory for OscilloscopeFactory {
         data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError> {
         let (subscription, output) = subscribe_pcm(services, Keep::Latest, data)?;
+        let style = registry.create_oscilloscope_style(LINE_OSCILLOSCOPE_STYLE_ID)?;
         Ok(Box::new(OscilloscopeModule {
             source: services.source.clone(),
             controller: subscription.controller(),
@@ -67,9 +74,14 @@ impl ModuleFactory for OscilloscopeFactory {
             channel: ChannelSelection::MonoAverage,
             y_scale: 1.0,
             show_guide: false,
-            style: registry.create_oscilloscope_style(LINE_OSCILLOSCOPE_STYLE_ID)?,
+            color_roles: styled_color_roles(style.color_roles(), OWN_COLOR_ROLES),
+            style,
             style_id: LINE_OSCILLOSCOPE_STYLE_ID,
         }))
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        TYPE_COLOR_ROLES
     }
 }
 
@@ -84,6 +96,8 @@ struct OscilloscopeModule {
     show_guide: bool,
     style: Box<dyn OscilloscopeStyle>,
     style_id: &'static str,
+    /// The style's roles and the center line's.
+    color_roles: Vec<ColorRole>,
 }
 
 impl Module for OscilloscopeModule {
@@ -109,8 +123,8 @@ impl Module for OscilloscopeModule {
         Some(&self.controller)
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
-        &[ColorRole::Primary, ColorRole::Guide]
+    fn color_roles(&self) -> &[ColorRole] {
+        &self.color_roles
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
@@ -191,6 +205,7 @@ impl Module for OscilloscopeModule {
             .ok_or_else(|| RegistryError::UnknownStyle(style_id.to_owned()))?;
         self.style = registry.create_oscilloscope_style(option.id)?;
         self.style_id = option.id;
+        self.color_roles = styled_color_roles(self.style.color_roles(), OWN_COLOR_ROLES);
         Ok(())
     }
 }

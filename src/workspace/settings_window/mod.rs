@@ -159,19 +159,6 @@ pub(crate) const SWATCHES: [Color; 8] = [
     Color::rgb(0xcd, 0xd6, 0xf4), // text
 ];
 
-/// Roles a Module type style can set.
-const TYPE_ROLES: [ColorRole; 9] = [
-    ColorRole::Surface,
-    ColorRole::Text,
-    ColorRole::Muted,
-    ColorRole::Guide,
-    ColorRole::Primary,
-    ColorRole::Secondary,
-    ColorRole::Low,
-    ColorRole::Mid,
-    ColorRole::High,
-];
-
 pub(crate) struct SettingsWindow {
     tab: Tab,
     /// The instance the Module tab edits.

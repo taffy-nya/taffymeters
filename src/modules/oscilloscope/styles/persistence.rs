@@ -92,6 +92,10 @@ impl OscilloscopeStyle for PersistenceOscilloscopeStyle {
         }
     }
 
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[ColorRole::Primary]
+    }
+
     fn clear(&mut self) {
         self.traces.clear();
         self.scratch.clear();

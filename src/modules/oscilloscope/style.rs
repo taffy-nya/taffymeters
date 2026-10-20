@@ -6,7 +6,7 @@ use crate::{
     module::ModuleResponse,
     render::{Rect, RenderTarget},
     snapshot::Frame,
-    theme::Palette,
+    theme::{ColorRole, Palette},
 };
 
 pub struct OscilloscopeStyleContext<'a> {
@@ -26,6 +26,8 @@ pub trait OscilloscopeStyle: Send {
         context: OscilloscopeStyleContext<'_>,
         renderer: &mut dyn RenderTarget,
     ) -> ModuleResponse;
+    /// Theme roles the style draws with.
+    fn color_roles(&self) -> &'static [ColorRole];
     /// Drop accumulated traces, e.g. those of a channel that is no longer shown.
     fn clear(&mut self) {}
 }

@@ -88,6 +88,10 @@ impl ModuleFactory for SpectrogramFactory {
     fn default_data(&self) -> Option<DataSpec> {
         Some(spectrogram_spec().0)
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
+    }
 }
 
 /// The default analysis: Channel(Mono) → FFT → Tilt (as the Spectrum's), the
@@ -190,7 +194,7 @@ impl Module for SpectrogramModule {
         (output == self.history_output).then_some("History")
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
+    fn color_roles(&self) -> &[ColorRole] {
         COLOR_ROLES
     }
 

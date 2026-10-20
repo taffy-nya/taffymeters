@@ -3,6 +3,7 @@ use crate::{
     modules::spectrum::style::{SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory},
     plotting::spectrum_dbfs_between,
     render::{ColoredRect, Point, Rect, RenderTarget},
+    theme::ColorRole,
 };
 
 pub(super) struct PixelSpectrumStyleFactory;
@@ -31,37 +32,64 @@ impl SpectrumStyle for PixelSpectrumStyle {
     fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget) {
         self.pixels.clear();
         let cell = 7.0;
-        let columns = (context.rect.width() / cell).floor().max(1.0) as usize;
+        let rect = context.rect;
+        let bin_hz = context.snapshot.fft.bin_hz;
+        let columns = (rect.width() / cell).floor().max(1.0) as usize;
         for column in 0..columns {
-            let x = context.rect.min.x + column as f32 * cell;
-            let Some(dbfs) = spectrum_dbfs_between(
-                context.snapshot.spectrum_dbfs,
-                context.snapshot.fft.bin_hz,
-                context.coordinates.frequency_at_x(x, context.rect),
-                context.coordinates.frequency_at_x(x + cell, context.rect),
-            ) else {
-                continue;
-            };
-            let top = context.coordinates.y_for_dbfs(dbfs, context.rect);
-            let mut y = context.rect.max.y - cell;
-            while y + cell > top {
-                let strength = ((context.rect.max.y - y) / context.rect.height()).clamp(0.0, 1.0);
-                self.pixels.push(ColoredRect {
-                    rect: Rect {
-                        min: Point { x, y },
-                        max: Point {
-                            x: (x + cell - 1.0).min(context.rect.max.x),
-                            y: (y + cell - 1.0).min(context.rect.max.y),
+            let x = rect.min.x + column as f32 * cell;
+            let low_hz = context.coordinates.frequency_at_x(x, rect);
+            let high_hz = context.coordinates.frequency_at_x(x + cell, rect);
+            let top_of = |dbfs| context.coordinates.y_for_dbfs(dbfs, rect);
+            let top =
+                spectrum_dbfs_between(context.snapshot.spectrum_dbfs, bin_hz, low_hz, high_hz)
+                    .map(top_of);
+            let peak_top = context
+                .snapshot
+                .peak_dbfs
+                .and_then(|peak| spectrum_dbfs_between(peak, bin_hz, low_hz, high_hz))
+                .map(top_of);
+            // A cell is lit by a level whose top lies above the cell's bottom edge.
+            let lit = |top: Option<f32>, y: f32| top.is_some_and(|top| y + cell > top);
+            let mut y = rect.max.y - cell;
+            while lit(top, y) || lit(peak_top, y) {
+                let last = y < rect.min.y + cell;
+                // The highest cell the peak lights shows the peak instead of the level;
+                // cells between the level and that peak stay dark.
+                let color = if lit(peak_top, y) && (last || !lit(peak_top, y - cell)) {
+                    Some(context.palette.color(ColorRole::Secondary))
+                } else if lit(top, y) {
+                    let strength = ((rect.max.y - y) / rect.height()).clamp(0.0, 1.0);
+                    Some(context.palette.level(strength))
+                } else {
+                    None
+                };
+                if let Some(color) = color {
+                    self.pixels.push(ColoredRect {
+                        rect: Rect {
+                            min: Point { x, y },
+                            max: Point {
+                                x: (x + cell - 1.0).min(rect.max.x),
+                                y: (y + cell - 1.0).min(rect.max.y),
+                            },
                         },
-                    },
-                    color: context.palette.level(strength),
-                });
-                if y < context.rect.min.y + cell {
+                        color,
+                    });
+                }
+                if last {
                     break;
                 }
                 y -= cell;
             }
         }
-        renderer.fill_rects(context.rect, &self.pixels);
+        renderer.fill_rects(rect, &self.pixels);
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[
+            ColorRole::Low,
+            ColorRole::Mid,
+            ColorRole::High,
+            ColorRole::Secondary,
+        ]
     }
 }

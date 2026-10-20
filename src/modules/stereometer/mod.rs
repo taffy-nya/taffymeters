@@ -3,9 +3,10 @@ use crate::{
     extensions::{Registry, RegistryError},
     module::{
         Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        REFERENCE_HEIGHT, flag_setting, number_setting, overlay_setting, reference_gain,
+        REFERENCE_HEIGHT, draw_notice, flag_setting, number_setting, overlay_setting,
+        reference_gain,
     },
-    render::{Circle, Point, Stroke, TextStyle},
+    render::{Circle, Point, Stroke},
     settings::{SettingValue, ViewSetting},
     snapshot::DataReader,
     theme::ColorRole,
@@ -14,6 +15,9 @@ use crate::{
 use crate::modules::pcm_view::{SCALE_RANGE, scale_setting, subscribe_pcm, wheel_scale};
 
 pub const STEREOMETER_MODULE_ID: &str = "taffymeters.stereometer";
+
+/// The points and the axes.
+const COLOR_ROLES: &[ColorRole] = &[ColorRole::Primary, ColorRole::Guide];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(StereometerFactory)
@@ -47,6 +51,10 @@ impl ModuleFactory for StereometerFactory {
             circles: Vec::with_capacity(512),
         }))
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
+    }
 }
 
 struct StereometerModule {
@@ -68,8 +76,8 @@ impl Module for StereometerModule {
         Some(&self.controller)
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
-        &[ColorRole::Primary, ColorRole::Guide, ColorRole::Muted]
+    fn color_roles(&self) -> &[ColorRole] {
+        COLOR_ROLES
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
@@ -88,22 +96,14 @@ impl Module for StereometerModule {
         Ok(())
     }
 
-    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
+    fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
         self.scale = wheel_scale(self.scale, &frame);
         let Some(snapshot) = self.reader.latest(self.output) else {
             return ModuleResponse::default();
         };
         let channels = self.reader.descriptor().channel_count as usize;
         if channels < 2 {
-            frame.renderer.text(
-                frame.rect,
-                frame.rect.center(),
-                "Stereo input required",
-                TextStyle {
-                    size: frame.palette.text_size + 2.0,
-                    color: frame.palette.color(ColorRole::Muted),
-                },
-            );
+            draw_notice(&mut frame, "Stereo input required");
             return ModuleResponse::default();
         }
         let center = frame.rect.center();

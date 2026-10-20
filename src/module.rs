@@ -7,7 +7,7 @@ use crate::{
         OutputId,
     },
     extensions::{Registry, RegistryError},
-    render::{Flow, Point, Rect, RenderTarget, Size},
+    render::{Flow, Point, Rect, RenderTarget, Size, TextStyle},
     settings::{Choice, SettingKind, SettingValue, ViewSetting},
     theme::{ColorRole, Palette},
 };
@@ -121,8 +121,10 @@ pub trait Module: Send {
         None
     }
 
-    /// Theme roles the instance draws with; its color overrides offer these.
-    fn color_roles(&self) -> &'static [ColorRole] {
+    /// Theme roles the instance draws with now (its own parts and its active
+    /// style's); its color overrides offer these. A subset of its type's
+    /// `ModuleFactory::color_roles`.
+    fn color_roles(&self) -> &[ColorRole] {
         &[]
     }
 
@@ -156,6 +158,42 @@ pub trait ModuleFactory: Send + Sync {
     fn default_data(&self) -> Option<DataSpec> {
         None
     }
+
+    /// Theme roles any instance of the type can draw with, whatever its style: the
+    /// colors a Module type style offers.
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[]
+    }
+}
+
+/// What a styled instance lists for its color overrides: its style's roles, then
+/// its own not already listed.
+pub fn styled_color_roles(style: &[ColorRole], own: &[ColorRole]) -> Vec<ColorRole> {
+    let mut roles = style.to_vec();
+    for role in own {
+        if !roles.contains(role) {
+            roles.push(*role);
+        }
+    }
+    roles
+}
+
+/// A Module that cannot show its content (an instance this build cannot restore,
+/// an input it cannot display) says why in the leaf's top-left corner, in the
+/// theme's Muted color.
+pub fn draw_notice(frame: &mut ModuleFrame<'_>, message: &str) {
+    frame.renderer.text(
+        frame.rect,
+        Point {
+            x: frame.rect.min.x + 8.0,
+            y: frame.rect.min.y + 8.0,
+        },
+        message,
+        TextStyle {
+            size: frame.palette.text_size,
+            color: frame.palette.color(ColorRole::Muted),
+        },
+    );
 }
 
 /// The spec an instance subscribes with: `saved` when it has the default's shape.

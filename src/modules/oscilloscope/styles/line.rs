@@ -48,4 +48,8 @@ impl OscilloscopeStyle for LineOscilloscopeStyle {
         // Redrawn when new PCM is published; nothing changes with display time.
         ModuleResponse::default()
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        &[ColorRole::Primary]
+    }
 }

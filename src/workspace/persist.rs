@@ -23,15 +23,14 @@ use super::{
 use crate::{
     LiveAudio,
     dataflow::{DataSpec, SharedAnalysisId},
-    module::{Module, ModuleFrame, ModuleResponse},
+    module::{Module, ModuleFrame, ModuleResponse, draw_notice},
     persistence::{
         DEFAULT_PRESET, DisplayFile, DisplayHint, FORMAT_VERSION, LayoutFile, ModuleFile,
         PersistError, PresetRef, SYSTEM_INPUT, SplitAxis, WindowFile, WorkspaceFile,
         WorkspaceStore, builtin_preset, builtin_presets, same_name, valid_name,
     },
-    render::{Point, TextStyle},
     settings::SettingValue,
-    theme::{ColorRole, RoleOverrides},
+    theme::RoleOverrides,
 };
 
 /// Type of the stand-in for an instance this build cannot restore.
@@ -74,19 +73,8 @@ struct MissingModule {
 }
 
 impl Module for MissingModule {
-    fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse {
-        frame.renderer.text(
-            frame.rect,
-            Point {
-                x: frame.rect.min.x + 8.0,
-                y: frame.rect.min.y + 8.0,
-            },
-            &self.message,
-            TextStyle {
-                size: frame.palette.text_size,
-                color: frame.palette.color(ColorRole::Muted),
-            },
-        );
+    fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
+        draw_notice(&mut frame, &self.message);
         ModuleResponse::default()
     }
 }

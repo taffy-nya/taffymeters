@@ -28,6 +28,8 @@ const WAVEFORM_MIN_SECONDS: f32 = 0.25;
 
 pub const WAVEFORM_MODULE_ID: &str = "taffymeters.waveform";
 
+const COLOR_ROLES: &[ColorRole] = &[ColorRole::Low, ColorRole::Mid, ColorRole::High];
+
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(WaveformFactory)
 }
@@ -72,6 +74,10 @@ impl ModuleFactory for WaveformFactory {
 
     fn default_data(&self) -> Option<DataSpec> {
         Some(pcm_spec(Keep::Seconds(WAVEFORM_HISTORY_SECONDS)).0)
+    }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
     }
 }
 
@@ -161,8 +167,8 @@ impl Module for WaveformModule {
         (output == self.output).then_some("History")
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
-        &[ColorRole::Low, ColorRole::Mid, ColorRole::High]
+    fn color_roles(&self) -> &[ColorRole] {
+        COLOR_ROLES
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {

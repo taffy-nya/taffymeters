@@ -31,6 +31,15 @@ const METER_TOP: f32 = 3.0;
 const BAR_GAP: f32 = 5.0;
 const BAR_INSET: f32 = 8.0;
 const MAX_BARS: usize = 8;
+/// The trough and the zone colors; the peak hold mark is Secondary, like
+/// Spectrum's peak curve.
+const COLOR_ROLES: &[ColorRole] = &[
+    ColorRole::Surface,
+    ColorRole::Low,
+    ColorRole::Mid,
+    ColorRole::High,
+    ColorRole::Secondary,
+];
 const PEAK_MARKER_HEIGHT: f32 = 2.0;
 
 /// Level Meter colors: Low below −6 dBFS, Mid from −6 to 0 dBFS, High above full
@@ -172,6 +181,10 @@ impl ModuleFactory for LevelMeterFactory {
     fn default_data(&self) -> Option<DataSpec> {
         Some(level_meter_data().spec)
     }
+
+    fn color_roles(&self) -> &'static [ColorRole] {
+        COLOR_ROLES
+    }
 }
 
 struct LevelMeterModule {
@@ -200,14 +213,8 @@ impl Module for LevelMeterModule {
         }
     }
 
-    fn color_roles(&self) -> &'static [ColorRole] {
-        &[
-            ColorRole::Surface,
-            ColorRole::Low,
-            ColorRole::Mid,
-            ColorRole::High,
-            ColorRole::Text,
-        ]
+    fn color_roles(&self) -> &[ColorRole] {
+        COLOR_ROLES
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
@@ -255,7 +262,7 @@ impl Module for LevelMeterModule {
                         y: y + PEAK_MARKER_HEIGHT,
                     },
                 },
-                color: frame.palette.color(ColorRole::Text),
+                color: frame.palette.color(ColorRole::Secondary),
             });
         }
         frame.renderer.fill_rects(frame.rect, &self.rects);
