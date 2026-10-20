@@ -140,9 +140,6 @@ pub(crate) enum WorkspaceAction {
         instance_id: ModuleInstanceId,
         style_id: &'static str,
     },
-    ClearVisualState {
-        instance_id: ModuleInstanceId,
-    },
     TogglePause,
     SetSplitRatio {
         window_id: WindowId,
@@ -772,9 +769,6 @@ impl Workspace {
                 instance_id,
                 style_id,
             } => self.set_style(instance_id, style_id),
-            WorkspaceAction::ClearVisualState { instance_id } => {
-                self.clear_visual_state(instance_id)
-            }
             WorkspaceAction::TogglePause => self.toggle_pause(),
             WorkspaceAction::SetSplitRatio {
                 window_id,

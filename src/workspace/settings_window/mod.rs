@@ -73,7 +73,6 @@ pub(crate) enum SettingsItem {
     TypePicker,
     ModuleType(&'static str),
     Style(&'static str),
-    ClearVisual,
     /// The instance's channel (analysis Channel node or display channel).
     Channel(ChannelSelection),
     FftWindow {

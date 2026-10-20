@@ -24,7 +24,6 @@ pub struct SpectrumStyleContext<'a> {
 
 pub trait SpectrumStyle: Send {
     fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget);
-    fn clear(&mut self) {}
 }
 
 pub trait SpectrumStyleFactory: Send + Sync {

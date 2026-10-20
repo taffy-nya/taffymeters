@@ -159,22 +159,6 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    pub(super) fn clear_visual_state(
-        &mut self,
-        instance_id: ModuleInstanceId,
-    ) -> Result<ActionOutcome, WorkspaceError> {
-        self.located(instance_id)?;
-        let entry = self
-            .modules
-            .get_mut(&instance_id)
-            .ok_or(WorkspaceError::StaleInstance(instance_id))?;
-        if entry.module.style_options().is_empty() {
-            return Err(WorkspaceError::Unsupported("visual state clearing"));
-        }
-        entry.module.clear_visual_state();
-        Ok(ActionOutcome::Applied)
-    }
-
     pub(super) fn edit_node(
         &mut self,
         instance_id: ModuleInstanceId,

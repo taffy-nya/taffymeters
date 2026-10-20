@@ -261,11 +261,6 @@ impl Module for LevelMeterModule {
         frame.renderer.fill_rects(frame.rect, &self.rects);
         ModuleResponse::default()
     }
-
-    fn clear_visual_state(&mut self) {
-        self.snapshot = Snapshot::default();
-        self.rects.clear();
-    }
 }
 
 #[cfg(test)]

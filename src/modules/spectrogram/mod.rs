@@ -182,10 +182,6 @@ impl Module for SpectrogramModule {
         let _ = self.controller.set_visible(visible);
     }
 
-    fn clear_visual_state(&mut self) {
-        self.picture_key = None;
-    }
-
     fn data(&self) -> Option<&DataController> {
         Some(&self.controller)
     }

@@ -696,22 +696,6 @@ fn c07() -> Result<Value, String> {
             && handle.metrics().publications == metrics.publications,
         "UI-only frame advanced audio",
     )?;
-    driver
-        .advance_frames(1600, deadline())
-        .map_err(|e| e.to_string())?;
-    // Both frames with the settings window open on it: the module outline is drawn
-    // in each, so only the trace differs.
-    h.settings(ControlKey::LeafBody(osc), &[])?;
-    let with_trace = h.frame(vec![]);
-    let published = handle.metrics().publications;
-    h.in_settings(&[SettingsItem::ClearVisual])?;
-    h.focus = FIRST_WINDOW;
-    let after_clear = h.frame(vec![]);
-    check(
-        with_trace.shapes.len() > after_clear.shapes.len()
-            && handle.metrics().publications == published,
-        "Clear did not remove trace without resetting audio",
-    )?;
     let hidden = waveform_visibility_run(true)?;
     let visible = waveform_visibility_run(false)?;
     check(
@@ -924,12 +908,10 @@ fn c09() -> Result<Value, String> {
     h.settings(ControlKey::LeafBody(empty), &[])?;
     let settings = h.ws.settings_targets();
     check(
-        !settings.keys().any(|key| {
-            matches!(
-                key,
-                ControlKey::Settings(SettingsItem::Style(_) | SettingsItem::ClearVisual)
-            )
-        }) && settings.contains_key(&ControlKey::Settings(SettingsItem::TypePicker)),
+        !settings
+            .keys()
+            .any(|key| matches!(key, ControlKey::Settings(SettingsItem::Style(_))))
+            && settings.contains_key(&ControlKey::Settings(SettingsItem::TypePicker)),
         "Empty settings show style controls or miss the module type",
     )?;
     h.focus = SETTINGS;

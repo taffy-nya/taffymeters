@@ -167,9 +167,6 @@ impl Module for StereometerModule {
         frame.renderer.circles(frame.rect, &self.circles);
         ModuleResponse::default()
     }
-    fn clear_visual_state(&mut self) {
-        self.circles.clear();
-    }
 }
 
 #[cfg(test)]

@@ -215,19 +215,10 @@ mod tests {
         TaggedModuleFactory { id, name, tag }
     }
 
-    /// Styles built by a `TaggedStyleFactory` append their tag to the shared log when
-    /// cleared, which shows which factory produced them.
-    struct TaggedStyle {
-        tag: &'static str,
-        log: Arc<Mutex<Vec<&'static str>>>,
-    }
+    struct TaggedStyle;
 
     impl SpectrumStyle for TaggedStyle {
         fn draw(&mut self, _context: SpectrumStyleContext<'_>, _renderer: &mut dyn RenderTarget) {}
-
-        fn clear(&mut self) {
-            self.log.lock().unwrap().push(self.tag);
-        }
     }
 
     impl OscilloscopeStyle for TaggedStyle {
@@ -238,12 +229,10 @@ mod tests {
         ) -> ModuleResponse {
             ModuleResponse::default()
         }
-
-        fn clear(&mut self) {
-            self.log.lock().unwrap().push(self.tag);
-        }
     }
 
+    /// Appends its tag to the shared log for every style it creates, which shows
+    /// which factory produced a style.
     struct TaggedStyleFactory {
         id: &'static str,
         tag: &'static str,
@@ -260,10 +249,8 @@ mod tests {
         }
 
         fn style(&self) -> TaggedStyle {
-            TaggedStyle {
-                tag: self.tag,
-                log: Arc::clone(&self.log),
-            }
+            self.log.lock().unwrap().push(self.tag);
+            TaggedStyle
         }
     }
 
@@ -382,10 +369,9 @@ mod tests {
             result,
             Err(RegistryError::DuplicateStyle("test.style".to_owned()))
         );
-        let mut style = registry
+        registry
             .create_spectrum_style("test.style")
             .unwrap_or_else(|error| panic!("the first factory still creates the style: {error}"));
-        style.clear();
         assert_eq!(*log.lock().unwrap(), ["first"]);
     }
 
@@ -407,10 +393,9 @@ mod tests {
             result,
             Err(RegistryError::DuplicateStyle("test.style".to_owned()))
         );
-        let mut style = registry
+        registry
             .create_oscilloscope_style("test.style")
             .unwrap_or_else(|error| panic!("the first factory still creates the style: {error}"));
-        style.clear();
         assert_eq!(*log.lock().unwrap(), ["first"]);
     }
 

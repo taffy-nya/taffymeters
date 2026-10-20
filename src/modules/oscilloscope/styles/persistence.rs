@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_instances_keep_and_clear_visual_state_independently() {
+    fn persistence_instances_keep_and_clear_traces_independently() {
         let snapshot = chunk(1);
         let mut first = PersistenceOscilloscopeStyleFactory.create();
         let mut second = PersistenceOscilloscopeStyleFactory.create();

@@ -152,10 +152,6 @@ impl Module for WaveformModule {
         self.channel = channel;
         Ok(())
     }
-    fn clear_visual_state(&mut self) {
-        self.envelope = WaveformEnvelope::default();
-        self.picture_key = None;
-    }
 
     fn data(&self) -> Option<&DataController> {
         Some(&self.controller)
@@ -565,20 +561,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn clearing_visual_state_rebuilds_the_same_picture_from_history() {
-        let mut fixture = PcmFixture::new(2);
-        let mut module = waveform(&fixture, None);
-        fixture.feed(&repeat_frame(&[0.5, 0.5], 2 * BLOCK_FRAMES));
-        let before = drawn(module.as_mut(), 0);
-        assert!(!bars(&before).is_empty());
-
-        module.clear_visual_state();
-        let after = drawn(module.as_mut(), 50);
-        assert_eq!(after.columns, before.columns);
-        assert_eq!(after.first_column, before.first_column);
     }
 
     #[test]

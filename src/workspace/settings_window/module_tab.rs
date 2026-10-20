@@ -8,7 +8,7 @@ use super::{
     theme_tab::clear_colors,
     widgets::{
         Number, button, card, card_with_reset, channel_label, choice, color_row, danger_button,
-        differs, header, number_row, record, row, segment, trailing, warning,
+        differs, header, number_row, record, row, segment, warning,
     },
 };
 use crate::{
@@ -126,7 +126,7 @@ impl Workspace {
         });
     }
 
-    /// Style (with clearing the visual state) and the instance's channel.
+    /// Style and the instance's channel.
     fn style_rows(
         &self,
         ui: &mut egui::Ui,
@@ -185,19 +185,6 @@ impl Workspace {
                             channel: option,
                         });
                     }
-                }
-            });
-        }
-        if !styles.is_empty() {
-            trailing(ui, |ui| {
-                if button(
-                    ui,
-                    true,
-                    "Clear visual state",
-                    SettingsItem::ClearVisual,
-                    controls,
-                ) {
-                    actions.push(WorkspaceAction::ClearVisualState { instance_id });
                 }
             });
         }

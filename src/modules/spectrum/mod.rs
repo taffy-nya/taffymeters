@@ -416,10 +416,6 @@ impl Module for SpectrumModule {
         self.style_id = option.id;
         Ok(())
     }
-
-    fn clear_visual_state(&mut self) {
-        self.style.clear();
-    }
 }
 
 #[cfg(test)]
@@ -832,7 +828,6 @@ mod tests {
 
         let before_style_change = fixture.services.dataflow.metrics();
         second.set_style(BAR_SPECTRUM_STYLE_ID, &registry).unwrap();
-        second.clear_visual_state();
         assert_eq!(fixture.services.dataflow.metrics(), before_style_change);
 
         let samples: Vec<f32> = (0..4096).flat_map(|_| [0.05_f32, -0.05]).collect();

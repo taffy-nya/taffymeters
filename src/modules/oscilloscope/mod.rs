@@ -193,10 +193,6 @@ impl Module for OscilloscopeModule {
         self.style_id = option.id;
         Ok(())
     }
-
-    fn clear_visual_state(&mut self) {
-        self.style.clear();
-    }
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ pub trait OscilloscopeStyle: Send {
         context: OscilloscopeStyleContext<'_>,
         renderer: &mut dyn RenderTarget,
     ) -> ModuleResponse;
+    /// Drop accumulated traces, e.g. those of a channel that is no longer shown.
     fn clear(&mut self) {}
 }
 

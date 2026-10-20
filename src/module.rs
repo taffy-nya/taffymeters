@@ -105,8 +105,6 @@ pub trait Module: Send {
         Err(RegistryError::StylesUnsupported)
     }
 
-    fn clear_visual_state(&mut self) {}
-
     /// The Workspace reports whether the instance can be seen (its window is not
     /// minimized). Work that only serves what is shown may stop while hidden;
     /// continuous analysis and History must keep running.
