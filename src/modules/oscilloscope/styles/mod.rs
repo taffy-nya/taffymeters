@@ -12,6 +12,10 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_oscilloscope_style(line::LineOscilloscopeStyleFactory)
 }
 
+/// The latest PCM chunk as a trace across `rect`. While the samples fit the
+/// width every one is a point; beyond that each column keeps its minimum and
+/// maximum, in time order and at their own sample positions, so peaks narrower
+/// than a column still show. The trace spans the chunk's first to last sample.
 fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<Point>) {
     output.clear();
     let Some(chunk) = context.frame.pcm() else {
@@ -21,21 +25,67 @@ fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<P
     let Ok(channel) = context.channel.resolve(context.descriptor) else {
         return;
     };
-    let width = context.rect.width().max(1.0) as usize;
-    let step = chunk.frame_count.div_ceil(width).max(1);
-    let count = chunk.frame_count.div_ceil(step);
-    let denominator = count.saturating_sub(1).max(1) as f32;
-    for (index, frame) in chunk
+    let frames = chunk.frame_count;
+    if frames == 0 {
+        return;
+    }
+    let rect = context.rect;
+    let x_per_frame = rect.width() / frames.saturating_sub(1).max(1) as f32;
+    let center_y = rect.center().y;
+    let y_per_unit = context.y_scale * rect.height() * 0.5;
+    let point = |index: usize, sample: f32| Point {
+        x: rect.min.x + index as f32 * x_per_frame,
+        y: center_y - sample.clamp(-1.0, 1.0) * y_per_unit,
+    };
+    // The selected channel (or the mono mix) per frame, before any reduction:
+    // extremes of a mix are those of the mixed signal.
+    let mut samples = chunk
         .interleaved
         .chunks_exact(channels)
-        .step_by(step)
-        .enumerate()
-    {
-        let fraction = index as f32 / denominator;
-        let sample = channel.sample(frame).clamp(-1.0, 1.0) * context.y_scale;
-        output.push(Point {
-            x: context.rect.min.x + fraction * context.rect.width(),
-            y: context.rect.center().y - sample * context.rect.height() * 0.5,
-        });
+        .map(|frame| channel.sample(frame))
+        .enumerate();
+    let columns = (rect.width().max(1.0) as usize).max(1);
+    if frames <= columns {
+        output.extend(samples.map(|(index, sample)| point(index, sample)));
+        return;
     }
+
+    let mut last = None;
+    let mut push = |output: &mut Vec<Point>, (index, sample): (usize, f32)| {
+        if last.is_none_or(|last| index > last) {
+            output.push(point(index, sample));
+            last = Some(index);
+        }
+    };
+    let mut final_sample = (0, 0.0);
+    for column in 0..columns {
+        // Column `c` covers frames [c·frames/columns, (c+1)·frames/columns): at
+        // least one, since there are more frames than columns.
+        let end = (column + 1) * frames / columns;
+        let Some(first) = samples.next() else {
+            break;
+        };
+        if column == 0 {
+            push(output, first);
+        }
+        let (mut low, mut high) = (first, first);
+        final_sample = first;
+        for sample in samples.by_ref().take(end - first.0 - 1) {
+            if sample.1 < low.1 {
+                low = sample;
+            }
+            if sample.1 > high.1 {
+                high = sample;
+            }
+            final_sample = sample;
+        }
+        let (earlier, later) = if low.0 <= high.0 {
+            (low, high)
+        } else {
+            (high, low)
+        };
+        push(output, earlier);
+        push(output, later);
+    }
+    push(output, final_sample);
 }

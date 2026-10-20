@@ -270,4 +270,47 @@ mod tests {
         draw(module.as_mut(), &mut target, Duration::ZERO);
         assert_trace_at(&target, 0.05);
     }
+
+    /// The trace of one 1600-frame mono chunk, silent except for `spikes`;
+    /// `TEST_RECT` is 400 wide, so four frames share a column.
+    fn trace_of(spikes: &[(usize, f32)]) -> Vec<Point> {
+        let mut fixture = PcmFixture::new(1);
+        let mut module = scope(&fixture);
+        let mut pcm = vec![0.0; BLOCK_FRAMES];
+        for &(frame, level) in spikes {
+            pcm[frame] = level;
+        }
+        fixture.feed(&pcm);
+        let mut target = RecordingTarget::default();
+        draw(module.as_mut(), &mut target, Duration::ZERO);
+        assert_eq!(target.non_empty_polylines(), 1);
+        target.polylines.pop().unwrap().points
+    }
+
+    fn position_of(points: &[Point], level: f32) -> usize {
+        points
+            .iter()
+            .position(|point| (point.y - level_y(level)).abs() < 0.001)
+            .unwrap_or_else(|| panic!("no point at level {level}"))
+    }
+
+    #[test]
+    fn a_spike_narrower_than_a_column_reaches_its_height() {
+        let points = trace_of(&[(1, 0.5), (803, -0.3)]);
+        position_of(&points, 0.5);
+        position_of(&points, -0.3);
+    }
+
+    #[test]
+    fn column_extremes_keep_their_time_order_across_the_width() {
+        // A maximum before the minimum in one column, the reverse in another.
+        let points = trace_of(&[(41, 0.6), (42, -0.6), (81, -0.4), (82, 0.4)]);
+        assert!(position_of(&points, 0.6) < position_of(&points, -0.6));
+        assert!(position_of(&points, -0.4) < position_of(&points, 0.4));
+        assert!(points.windows(2).all(|pair| pair[0].x < pair[1].x));
+        assert_eq!(points.first().unwrap().x, TEST_RECT.min.x);
+        assert!((points.last().unwrap().x - TEST_RECT.max.x).abs() < 0.001);
+        // At most two points per column besides the two ends.
+        assert!(points.len() <= 2 * TEST_RECT.width() as usize + 2);
+    }
 }
