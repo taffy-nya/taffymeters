@@ -1,13 +1,17 @@
 //! Every settings change goes through `WorkspaceAction`.
 
+mod module_tab;
+mod theme_tab;
+mod widgets;
+mod window_tab;
+mod workspace_tab;
+
+#[cfg(feature = "automation")]
+use std::collections::HashMap;
 use std::time::Duration;
 
 use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 
-use self::widgets::record;
-#[cfg(feature = "automation")]
-use super::window::ControlKey;
-use super::{ColorScope, ModuleInstanceId, WindowId, Workspace, WorkspaceAction, window::Controls};
 use crate::{
     dataflow::{ChannelSelection, NodeRef, OutputId},
     render::Color,
@@ -15,11 +19,10 @@ use crate::{
     theme::{ColorRole, ThemePreset},
 };
 
-mod module_tab;
-mod theme_tab;
-mod widgets;
-mod window_tab;
-mod workspace_tab;
+use self::widgets::record;
+#[cfg(feature = "automation")]
+use super::window::{ControlKey, ControlTarget};
+use super::{ColorScope, ModuleInstanceId, WindowId, Workspace, WorkspaceAction, window::Controls};
 
 // Logical points.
 const SETTINGS_SIZE: Vec2 = vec2(420.0, 600.0);
@@ -183,7 +186,7 @@ pub(crate) struct SettingsWindow {
     placed: bool,
     commands: Vec<ViewportCommand>,
     #[cfg(feature = "automation")]
-    targets: std::collections::HashMap<ControlKey, super::window::ControlTarget>,
+    targets: HashMap<ControlKey, ControlTarget>,
     #[cfg(feature = "automation")]
     frame_token: u64,
     #[cfg(feature = "automation")]
@@ -208,7 +211,7 @@ impl SettingsWindow {
             placed: false,
             commands: Vec::new(),
             #[cfg(feature = "automation")]
-            targets: std::collections::HashMap::new(),
+            targets: HashMap::new(),
             #[cfg(feature = "automation")]
             frame_token: 0,
             #[cfg(feature = "automation")]
@@ -264,9 +267,7 @@ impl Workspace {
     }
 
     #[cfg(feature = "automation")]
-    pub(crate) fn settings_targets(
-        &self,
-    ) -> std::collections::HashMap<ControlKey, super::window::ControlTarget> {
+    pub(crate) fn settings_targets(&self) -> HashMap<ControlKey, ControlTarget> {
         self.settings
             .as_ref()
             .map(|settings| settings.targets.clone())

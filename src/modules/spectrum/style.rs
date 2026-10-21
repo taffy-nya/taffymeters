@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{
     dataflow::FftMetadata,
     plotting::SpectrumCoordinates,
@@ -16,7 +18,7 @@ pub struct SpectrumStyleContext<'a> {
     pub snapshot: &'a SpectrumPlot<'a>,
     pub coordinates: &'a SpectrumCoordinates,
     pub rect: Rect,
-    pub monotonic_time: std::time::Duration,
+    pub monotonic_time: Duration,
     pub palette: &'a Palette,
 }
 

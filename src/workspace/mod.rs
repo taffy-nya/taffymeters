@@ -20,7 +20,7 @@ use std::{
     error::Error,
     fmt,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, vec2};
@@ -451,7 +451,7 @@ pub(crate) struct Workspace {
     modules_created: u64,
     control_error: Option<(String, Duration)>,
     /// Shared repaint clock of animating windows (real time).
-    frame_clock: Option<std::time::Instant>,
+    frame_clock: Option<Instant>,
     preset: Option<PresetRef>,
     store: Option<WorkspaceStore>,
     /// The session file could not be read; saving must not replace it.

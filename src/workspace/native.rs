@@ -33,6 +33,7 @@ use windows_sys::Win32::{
         },
     },
 };
+use windows_sys::core::BOOL;
 
 use super::{
     WindowId,
@@ -115,7 +116,7 @@ fn find_window(window: WindowId) -> Option<HWND> {
         title: Vec<u16>,
         found: Option<HWND>,
     }
-    unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
+    unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> BOOL {
         // SAFETY: `data` is the `Search` below, alive for the whole enumeration.
         let search = unsafe { &mut *(data as *mut Search) };
         let mut text = [0_u16; 64];

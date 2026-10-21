@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand};
 
@@ -305,7 +305,7 @@ impl Workspace {
         maximized: bool,
         minimized: bool,
     ) -> bool {
-        let probe = std::sync::Arc::clone(&self.desktop);
+        let probe = Arc::clone(&self.desktop);
         let Some(window) = self.windows.get_mut(&window_id) else {
             return false;
         };

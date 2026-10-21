@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 /// Geometry uses logical points, with x rightward and y downward.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
@@ -492,7 +494,7 @@ const IMAGE_IDLE_PASSES: u64 = 600;
 
 #[derive(Default)]
 struct ImageCache {
-    entries: std::collections::HashMap<u64, CachedImage>,
+    entries: HashMap<u64, CachedImage>,
 }
 
 struct CachedImage {

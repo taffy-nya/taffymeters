@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
@@ -1743,7 +1744,7 @@ fn s08() -> Result<Value, String> {
     // Advance beyond the detach timeout while minimized to expose stale app-clock timing.
     h.window_mut(window)?.minimized = true;
     h.frame_window(window, vec![])?;
-    h.display_time += std::time::Duration::from_secs(10);
+    h.display_time += Duration::from_secs(10);
     h.in_settings(&[SettingsItem::Detach])?;
     h.window_mut(window)?.minimized = false;
     h.frame_all()?;

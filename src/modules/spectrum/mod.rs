@@ -1,3 +1,6 @@
+pub mod style;
+mod styles;
+
 use std::fmt::Write;
 
 use crate::{
@@ -18,9 +21,6 @@ use crate::{
     snapshot::{DataReader, Snapshot},
     theme::ColorRole,
 };
-
-pub mod style;
-mod styles;
 
 use self::style::{SpectrumPlot, SpectrumStyle, SpectrumStyleContext};
 pub use self::styles::{BARS_SPECTRUM_STYLE_ID, LINE_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID};
@@ -425,6 +425,7 @@ impl Module for SpectrumModule {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::{BTreeMap, BTreeSet},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -552,7 +553,7 @@ mod tests {
             );
         }
 
-        let mut columns: std::collections::BTreeMap<u32, Vec<ColoredRect>> = Default::default();
+        let mut columns: BTreeMap<u32, Vec<ColoredRect>> = BTreeMap::new();
         for cell in &target.rects {
             columns
                 .entry(cell.rect.min.x.to_bits())
@@ -645,7 +646,7 @@ mod tests {
                 without.iter().all(|rect| rect.color != secondary),
                 "{style_id}: a mark without a peak"
             );
-            let bands: std::collections::BTreeSet<u32> = without
+            let bands: BTreeSet<u32> = without
                 .iter()
                 .map(|rect| rect.rect.min.x.to_bits())
                 .collect();

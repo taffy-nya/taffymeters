@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use std::sync::Barrier;
+
 use arc_swap::ArcSwapOption;
 
 use crate::{
@@ -55,8 +58,8 @@ enum Command {
     ResumeBoundary(u64),
     #[cfg(test)]
     BlockWorkerForTest {
-        entered: Arc<std::sync::Barrier>,
-        release: Arc<std::sync::Barrier>,
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
     },
 }
 
@@ -505,9 +508,9 @@ impl DataflowHandle {
     }
 
     #[cfg(test)]
-    pub(crate) fn block_worker_for_test(&self) -> Arc<std::sync::Barrier> {
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
+    pub(crate) fn block_worker_for_test(&self) -> Arc<Barrier> {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
         send(
             &self.commands,
             &self.worker,

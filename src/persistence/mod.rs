@@ -1,7 +1,12 @@
 //! Sessions and presets share a format containing only logical configuration.
 //! Runtime identities and state are excluded; binding numbers are local to each file.
 
-use std::{collections::BTreeMap, error::Error, fmt, fs, io, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -338,7 +343,7 @@ impl WorkspaceStore {
     }
 }
 
-fn read(path: &std::path::Path) -> Result<Option<WorkspaceFile>, PersistError> {
+fn read(path: &Path) -> Result<Option<WorkspaceFile>, PersistError> {
     let label = path.display().to_string();
     match fs::read(path) {
         Ok(bytes) => parse(&label, &bytes).map(Some),
@@ -348,7 +353,7 @@ fn read(path: &std::path::Path) -> Result<Option<WorkspaceFile>, PersistError> {
 }
 
 // Replace by rename so an interrupted write cannot truncate the saved file.
-fn write(path: &std::path::Path, file: &WorkspaceFile) -> Result<(), PersistError> {
+fn write(path: &Path, file: &WorkspaceFile) -> Result<(), PersistError> {
     let label = path.display().to_string();
     let io = |error| PersistError::Io(label.clone(), error);
     let directory = path.parent().expect("files live in a directory");
@@ -382,7 +387,7 @@ mod tests {
             Self(path)
         }
 
-        fn path(&self) -> &std::path::Path {
+        fn path(&self) -> &Path {
             &self.0
         }
     }

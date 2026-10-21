@@ -1,6 +1,7 @@
 #![allow(clippy::missing_const_for_thread_local)] // The initializer is const; Clippy 1.98 flags the macro expansion.
 
 use std::{
+    cell::Cell,
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -173,19 +174,18 @@ impl Drop for TempDir {
 }
 
 thread_local! {
-    static SCENARIO_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    static SCENARIO_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 fn with_scenario_deadline<T>(run: impl FnOnce() -> T) -> T {
-    SCENARIO_DEADLINE
-        .with(|value| value.set(Some(std::time::Instant::now() + Duration::from_secs(30))));
+    SCENARIO_DEADLINE.with(|value| value.set(Some(Instant::now() + Duration::from_secs(30))));
     let result = run();
     SCENARIO_DEADLINE.with(|value| value.set(None));
     result
 }
 
 pub(super) fn wait_until<T>(
-    deadline: std::time::Instant,
+    deadline: Instant,
     label: &str,
     mut observe: impl FnMut() -> Option<T>,
 ) -> Result<T, String> {
@@ -193,15 +193,15 @@ pub(super) fn wait_until<T>(
         if let Some(value) = observe() {
             return Ok(value);
         }
-        if std::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return Err(format!("Timeout waiting for {label}"));
         }
         std::thread::yield_now();
     }
 }
 
-pub(super) fn deadline() -> std::time::Instant {
-    let condition = std::time::Instant::now() + Duration::from_secs(5);
+pub(super) fn deadline() -> Instant {
+    let condition = Instant::now() + Duration::from_secs(5);
     SCENARIO_DEADLINE.with(|value| {
         value
             .get()

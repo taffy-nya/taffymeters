@@ -6,14 +6,14 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
 
-use crate::workspace::{WindowId, Workspace};
+use crate::workspace::{ControlKey, ControlTarget, WindowId, Workspace};
 
-const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) struct Trace {
     out: BufWriter<File>,
@@ -167,10 +167,7 @@ impl Trace {
         &mut self,
         key: WindowId,
         label: serde_json::Value,
-        targets: std::collections::HashMap<
-            crate::workspace::ControlKey,
-            crate::workspace::ControlTarget,
-        >,
+        targets: HashMap<ControlKey, ControlTarget>,
     ) {
         let now = Instant::now();
         if self

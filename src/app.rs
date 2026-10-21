@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{self, ViewportCommand};
@@ -57,10 +57,7 @@ impl App {
         lock(&self.workspace).set_publication_waker(Some(Box::new(move || {
             if shown.load(Ordering::Relaxed) && !pending.swap(true, Ordering::AcqRel) {
                 // Non-zero on purpose: a zero-delay request makes egui run two passes.
-                ctx.request_repaint_after_for(
-                    std::time::Duration::from_millis(1),
-                    egui::ViewportId::ROOT,
-                );
+                ctx.request_repaint_after_for(Duration::from_millis(1), egui::ViewportId::ROOT);
             }
         })));
     }

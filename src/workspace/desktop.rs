@@ -97,6 +97,8 @@ impl DesktopProbe for NativeDesktop {
     }
 
     fn displays(&self) -> Vec<Display> {
+        use std::sync::Once;
+
         use windows_sys::{
             Win32::{
                 Foundation::{LPARAM, RECT},
@@ -121,7 +123,7 @@ impl DesktopProbe for NativeDesktop {
         }
         // Restoration precedes winit's event loop, so enable DPI awareness before querying
         // unscaled monitor geometry; winit will request the same context later.
-        static DPI_AWARE: std::sync::Once = std::sync::Once::new();
+        static DPI_AWARE: Once = Once::new();
         // SAFETY: takes a constant awareness context; failing leaves it unchanged.
         DPI_AWARE.call_once(|| unsafe {
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

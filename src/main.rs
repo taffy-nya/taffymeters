@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use eframe::{egui_wgpu, wgpu};
 
@@ -91,11 +91,11 @@ fn main() -> eframe::Result<()> {
     run_window(app::App::new(workspace))
 }
 
-fn parse_config_dir(args: &[String]) -> Result<Option<std::path::PathBuf>, String> {
+fn parse_config_dir(args: &[String]) -> Result<Option<PathBuf>, String> {
     match args {
         [] => Ok(None),
         [flag, dir] if flag == "--config-dir" && !dir.starts_with("--") => {
-            Ok(Some(std::path::PathBuf::from(dir)))
+            Ok(Some(PathBuf::from(dir)))
         }
         _ => Err(format!(
             "unknown arguments: {} (expected [--config-dir <dir>])",

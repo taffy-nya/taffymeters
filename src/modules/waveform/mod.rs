@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
+
 use crate::{
-    audio::{SourceReader, SourceState},
+    audio::{Generation, SourceId, SourceReader, SourceState},
     dataflow::{ChannelSelection, DataController, DataSpec, DataSubscription, Keep, OutputId},
     extensions::{Registry, RegistryError},
     module::{
@@ -121,16 +123,11 @@ impl WaveformModule {
 /// Cache absolute source-frame bins so draws only fold in newly published samples.
 #[derive(Default)]
 struct WaveformEnvelope {
-    key: Option<(
-        u64,
-        ChannelSelection,
-        crate::audio::SourceId,
-        crate::audio::Generation,
-    )>,
+    key: Option<(u64, ChannelSelection, SourceId, Generation)>,
     /// Exclusive source-frame frontier already folded in.
     through: u64,
     /// `(bin, min, max)`, bins ascending; bins without samples are absent (gaps).
-    bins: std::collections::VecDeque<(u64, f32, f32)>,
+    bins: VecDeque<(u64, f32, f32)>,
 }
 
 impl Module for WaveformModule {

@@ -1,4 +1,9 @@
-use crate::render::{Color, Flow, Image, Point, Rect, RenderTarget};
+use std::time::Duration;
+
+use crate::{
+    module::FRAME_INTERVAL,
+    render::{Color, Flow, Image, Point, Rect, RenderTarget},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectrumCoordinates {
@@ -178,15 +183,15 @@ impl ColumnRing {
 }
 
 /// Results normally arrive every 10–35 ms; allow jitter before treating the source as silent.
-pub const SILENCE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+pub const SILENCE_GRACE: Duration = Duration::from_millis(150);
 
 /// Loopback sends no samples during silence, so source frames alone cannot keep a view moving.
 /// After `SILENCE_GRACE`, insert display-clock silence; later source frames follow those gaps.
 #[derive(Default)]
 pub struct ViewClock {
     /// Source frontier and display time last seen; pauses advance the time to exclude held time.
-    newest: Option<(u64, std::time::Duration)>,
-    last_update: std::time::Duration,
+    newest: Option<(u64, Duration)>,
+    last_update: Duration,
     paused: bool,
     /// Frames of silence shown after `newest`.
     pending: u64,
@@ -196,13 +201,7 @@ pub struct ViewClock {
 
 impl ViewClock {
     /// Returns the exclusive end in source frames plus inserted silence.
-    pub fn update(
-        &mut self,
-        frontier: u64,
-        now: std::time::Duration,
-        sample_rate: f32,
-        paused: bool,
-    ) -> u64 {
+    pub fn update(&mut self, frontier: u64, now: Duration, sample_rate: f32, paused: bool) -> u64 {
         match self.newest {
             Some((seen, _)) if frontier > seen => {
                 if self.pending > 0 {
@@ -235,22 +234,17 @@ impl ViewClock {
     /// Schedule grace expiry, then repaint each frame until silence pushes data out of `span`
     /// positions (source frames plus inserted silence).
     /// A paused source holds the picture still.
-    pub fn repaint_after(
-        &self,
-        now: std::time::Duration,
-        data_end: u64,
-        span: u64,
-    ) -> Option<std::time::Duration> {
+    pub fn repaint_after(&self, now: Duration, data_end: u64, span: u64) -> Option<Duration> {
         let (frontier, at) = self.newest?;
         if self.paused {
             return None;
         }
         if self.pending == 0 {
             let wait = (at + SILENCE_GRACE).saturating_sub(now);
-            return Some(wait.max(std::time::Duration::from_millis(1)));
+            return Some(wait.max(Duration::from_millis(1)));
         }
         let end = self.frontier_position(frontier) + self.pending;
-        (end.saturating_sub(data_end) < span).then_some(crate::module::FRAME_INTERVAL)
+        (end.saturating_sub(data_end) < span).then_some(FRAME_INTERVAL)
     }
 
     pub fn position(&self, frame: u64) -> u64 {

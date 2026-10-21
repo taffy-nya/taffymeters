@@ -1,7 +1,9 @@
 //! One window's UI body. Production viewports and the automation harness both call
 //! [`Workspace::window_ui`]; every user operation goes through `apply_action`.
 
-use std::time::Duration;
+#[cfg(feature = "automation")]
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Id, PointerButton, Rect, Response, Sense, Stroke,
@@ -273,7 +275,7 @@ pub(crate) struct WindowUiState {
     resizable_sent: Option<bool>,
     lock_hint_until: Option<Duration>,
     #[cfg(feature = "automation")]
-    targets: std::collections::HashMap<ControlKey, ControlTarget>,
+    targets: HashMap<ControlKey, ControlTarget>,
     #[cfg(feature = "automation")]
     frame_token: u64,
     #[cfg(feature = "automation")]
@@ -387,7 +389,7 @@ impl Workspace {
     pub(crate) fn control_targets(
         &self,
         window_id: WindowId,
-    ) -> std::collections::HashMap<ControlKey, ControlTarget> {
+    ) -> HashMap<ControlKey, ControlTarget> {
         self.windows
             .get(&window_id)
             .map(|window| window.ui.targets.clone())
@@ -400,7 +402,7 @@ impl Workspace {
         ui: &mut egui::Ui,
         display_time: Duration,
     ) -> bool {
-        let pass_started = std::time::Instant::now();
+        let pass_started = Instant::now();
         let ctx = ui.ctx().clone();
         // Minimized windows retain continuous analysis and native commands, but skip
         // display-only work.
@@ -419,7 +421,7 @@ impl Workspace {
         self.tick(display_time);
         let repaint = self.window_pass(window_id, ui, rect, display_time);
         if let Some(delay) = repaint {
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             let wait = if delay <= FRAME_INTERVAL {
                 // Share a frame clock: immediate self-repaints can starve other windows'
                 // paint messages in the Windows queue.
@@ -464,7 +466,7 @@ impl Workspace {
         }
     }
 
-    fn next_frame(&mut self, now: std::time::Instant) -> std::time::Instant {
+    fn next_frame(&mut self, now: Instant) -> Instant {
         let next = match self.frame_clock {
             Some(tick) if tick > now => tick,
             Some(tick) if tick + FRAME_INTERVAL > now => tick + FRAME_INTERVAL,

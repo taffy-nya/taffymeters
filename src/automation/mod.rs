@@ -6,12 +6,23 @@ mod support;
 mod trace;
 mod visual;
 
-use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use crate::{LiveAudio, LiveAudioConfig, audio::synthetic::SyntheticConfig, workspace::Workspace};
-use report::new_output;
-pub(crate) use trace::Trace;
+use serde_json::json;
+
+use crate::{
+    LiveAudio, LiveAudioConfig,
+    app::App,
+    audio::synthetic::SyntheticConfig,
+    persistence::WorkspaceStore,
+    workspace::{NativeDesktop, Workspace},
+};
+
+use self::report::new_output;
+pub(crate) use self::trace::Trace;
 
 fn option_value(args: &[String], flag: &str) -> Result<Option<String>, String> {
     let positions: Vec<_> = args
@@ -89,15 +100,13 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
             }
             .map_err(|e| runtime(e.to_string()))?;
             let workspace = match value_of("--config-dir") {
-                Some(root) => Workspace::open(
-                    live,
-                    crate::persistence::WorkspaceStore::new(root),
-                    std::sync::Arc::new(crate::workspace::NativeDesktop),
-                ),
+                Some(root) => {
+                    Workspace::open(live, WorkspaceStore::new(root), Arc::new(NativeDesktop))
+                }
                 None => Workspace::new(live, false),
             }
             .map_err(|e| runtime(e.to_string()))?;
-            let mut app = crate::app::App::new(workspace);
+            let mut app = App::new(workspace);
             if let Some(trace) = trace {
                 app = app.with_trace(trace);
             }
