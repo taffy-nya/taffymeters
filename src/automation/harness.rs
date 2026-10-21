@@ -18,16 +18,12 @@ use crate::workspace::{
     MoveRequest, SettingsItem, WindowId, WindowTracker, Workspace,
 };
 
-/// The settings window in the harness's window map. It is not a Workspace window;
-/// the ID only addresses its simulated viewport.
+/// Reserved simulated viewport ID; never a Workspace window.
 pub(super) const SETTINGS: WindowId = WindowId(u64::MAX);
 /// Tall enough that every tab's controls are visible without scrolling.
 const SETTINGS_SIM_SIZE: Vec2 = vec2(460.0, 1600.0);
 
-/// Simulated desktop facts for the snapping logic and window placement. Shared
-/// with the Workspace, which owns its desktop probe. Window moves run the same
-/// [`WindowTracker`] the native layer runs; the harness applies the moves to its
-/// simulated windows after each pass, as the OS would within the call.
+/// Uses the native `WindowTracker`; the harness applies queued moves after each UI pass.
 pub(super) struct FakeDesktop {
     button_down: AtomicBool,
     displays: Mutex<Vec<Display>>,
@@ -37,15 +33,13 @@ pub(super) struct FakeDesktop {
 #[derive(Default)]
 struct FakeNative {
     tracker: WindowTracker,
-    /// Moves to apply to the simulated windows.
     pending: Vec<(WindowId, Pos2)>,
-    /// Every `place` so far.
     placed: Vec<(WindowId, Pos2)>,
     moves_started: usize,
 }
 
 impl FakeDesktop {
-    /// One 1920×1080 monitor at 100% with a 40 px taskbar at the bottom.
+    /// The work area excludes a 40 px taskbar at the bottom.
     pub(super) fn new() -> Arc<Self> {
         Self::with_displays(vec![Display {
             work: Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0)),
@@ -71,17 +65,15 @@ impl FakeDesktop {
         self.native.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Body drags that started a move so far.
     pub(super) fn moves_started(&self) -> usize {
         self.native().moves_started
     }
 
-    /// Take the positions `place` set so far.
     pub(super) fn take_placed(&self) -> Vec<(WindowId, Pos2)> {
         std::mem::take(&mut self.native().placed)
     }
 
-    /// The pointer of a move in progress is at `cursor`; `free`: Alt is held.
+    /// `free` represents Alt being held.
     fn pointer(&self, cursor: Pos2, free: bool) {
         let mut native = self.native();
         let FakeNative {
@@ -102,7 +94,7 @@ impl FakeDesktop {
         self.native().tracker.end();
     }
 
-    /// A window's frame is now `frame`; `ours` when this desktop put it there.
+    /// `ours` distinguishes placements by this desktop from external moves.
     fn observed(&self, window: WindowId, frame: Rect, ours: bool) {
         let mut native = self.native();
         let FakeNative {
@@ -176,7 +168,6 @@ impl DesktopProbe for FakeDesktop {
     }
 }
 
-/// One simulated native window.
 pub(super) struct SimWindow {
     pub context: egui::Context,
     /// Logical inner size (frameless: equals the outer size).
@@ -185,15 +176,11 @@ pub(super) struct SimWindow {
     /// Outer top-left in physical desktop pixels.
     pub position: Pos2,
     pub maximized: bool,
-    /// Reported to the window's passes as the viewport's minimized state.
     pub minimized: bool,
-    /// Last `MinInnerSize` received; the simulated OS keeps the size above it.
+    /// Minimum logical-point size enforced by the simulated OS.
     pub min_size: Vec2,
-    /// Every viewport command emitted since the last `take_commands`.
     pub commands: Vec<ViewportCommand>,
-    /// Cursor the last pass asked for.
     pub cursor: egui::CursorIcon,
-    /// Every text the passes put on the clipboard.
     pub copied: Vec<String>,
     targets: HashMap<ControlKey, ControlTarget>,
 }
@@ -228,7 +215,7 @@ pub(super) struct Harness {
     pub focus: WindowId,
     /// Windows whose native creation is simulated to fail.
     pub blocked: HashSet<WindowId>,
-    /// Scale of windows created later.
+    /// Pixels per logical point for subsequently created windows.
     pub new_window_ppp: f32,
     /// Modifier state reported in every frame's RawInput.
     pub modifiers: egui::Modifiers,
@@ -237,13 +224,10 @@ pub(super) struct Harness {
 }
 
 impl Harness {
-    /// Drive `ws` on a fresh simulated desktop (one 1920×1080 monitor).
     pub(super) fn new(ws: Workspace) -> Self {
         Self::with_desktop(ws, FakeDesktop::new())
     }
 
-    /// Drive `ws` on `desktop`, which the Workspace then uses too. Windows open at
-    /// the scale of its primary display.
     pub(super) fn with_desktop(mut ws: Workspace, desktop: Arc<FakeDesktop>) -> Self {
         ws.set_desktop(Arc::clone(&desktop) as Arc<dyn DesktopProbe + Send + Sync>);
         let new_window_ppp = desktop
@@ -263,8 +247,7 @@ impl Harness {
             modifiers: egui::Modifiers::NONE,
             grabbed: None,
         };
-        // The initial default window opens at a fixed spot; restored windows open
-        // where their builder says.
+        // Only the initial window without a saved position uses the fixed scenario origin.
         harness.sync_windows();
         if let Some(window) = harness.windows.get_mut(&FIRST_WINDOW)
             && harness
@@ -297,15 +280,12 @@ impl Harness {
         self.windows[&self.focus].context.clone()
     }
 
-    /// Size of the focused window (logical points).
     pub(super) fn set_size(&mut self, size: Vec2) {
         if let Some(window) = self.windows.get_mut(&self.focus) {
             window.size = size.max(window.min_size);
         }
     }
 
-    /// Mirror the Workspace's window set like the native adapter: open new windows
-    /// (unless blocked) and forget closed ones.
     fn sync_windows(&mut self) {
         let live: Vec<_> = self.ws.windows();
         let settings_open = self.ws.settings_open();
@@ -343,18 +323,14 @@ impl Harness {
         }
     }
 
-    /// Workspace windows only (the settings window excluded).
     pub(super) fn workspace_windows(&self) -> impl Iterator<Item = (&WindowId, &SimWindow)> {
         self.windows.iter().filter(|(id, _)| **id != SETTINGS)
     }
 
-    /// Outer frame of a simulated window, physical pixels.
     fn frame_of(window: &SimWindow) -> Rect {
         Rect::from_min_size(window.position, window.size * window.ppp)
     }
 
-    /// Tell the fake desktop where every Workspace window is (as the native layer
-    /// sees every frame change), then apply the moves it made in response.
     fn sync_desktop(&mut self) {
         for (id, window) in self.windows.iter().filter(|(id, _)| **id != SETTINGS) {
             self.desktop.observed(*id, Self::frame_of(window), true);
@@ -362,8 +338,6 @@ impl Harness {
         self.apply_moves();
     }
 
-    /// Apply the moves the fake desktop made (placements, a move in progress, a
-    /// group following), as the OS would within the call.
     fn apply_moves(&mut self) {
         loop {
             let moves = self.desktop.take_pending();
@@ -379,8 +353,7 @@ impl Harness {
         }
     }
 
-    /// Another program (or the OS) moves a window to `position`: its group
-    /// follows.
+    /// `position` is in physical desktop pixels; this is an external, not owned, move.
     pub(super) fn external_move(&mut self, id: WindowId, position: Pos2) -> Result<(), String> {
         let window = self.window_mut(id)?;
         window.position = position;
@@ -390,10 +363,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Press on a body control of the focused window and drag it past egui's
-    /// threshold: the pass that sees the drag asks the desktop to move the window
-    /// (and its group) with the pointer. Returns the pointer on the desktop
-    /// (physical) at the press; `move_pointer` continues from there.
+    /// Returns the press position in physical desktop pixels for `move_pointer`.
     pub(super) fn grab(&mut self, key: ControlKey) -> Result<Pos2, String> {
         let target = self.locate(&key)?;
         let start = self.hover(&key, target)?;
@@ -411,8 +381,7 @@ impl Harness {
         Ok(window.position + start.to_vec2() * window.ppp)
     }
 
-    /// The pointer of the move in progress is at `cursor` (desktop, physical);
-    /// `alt`: Alt is held. Every window then runs a pass.
+    /// `cursor` is in physical desktop pixels.
     pub(super) fn move_pointer(&mut self, cursor: Pos2, alt: bool) -> Result<(), String> {
         self.desktop.pointer(cursor, alt);
         self.apply_moves();
@@ -420,14 +389,12 @@ impl Harness {
         self.frame_all()
     }
 
-    /// Escape during the move: the windows go back and the move ends.
     pub(super) fn cancel_move(&mut self) -> Result<(), String> {
         self.desktop.escape();
         self.apply_moves();
         self.frame_all()
     }
 
-    /// Release the button that `grab` pressed.
     pub(super) fn release(&mut self) -> Result<(), String> {
         self.desktop.release();
         self.desktop.set_button_down(false);
@@ -441,7 +408,6 @@ impl Harness {
         self.frame_all()
     }
 
-    /// Run one UI pass of `id` with `events`.
     pub(super) fn frame_window(
         &mut self,
         id: WindowId,
@@ -521,14 +487,12 @@ impl Harness {
         Ok(output)
     }
 
-    /// One pass of the focused window. A closed focus window runs nothing; its
-    /// controls then report Missing.
+    /// A closed focus window runs no pass and exposes no controls.
     pub(super) fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
         self.frame_window(self.focus, events).unwrap_or_default()
     }
 
-    /// One pass of every open window, including windows opened during this call
-    /// (new windows show their first frame).
+    /// Includes the first pass of windows opened during this call.
     pub(super) fn frame_all(&mut self) -> Result<(), String> {
         let mut done = HashSet::new();
         loop {
@@ -569,7 +533,6 @@ impl Harness {
         Ok(*target)
     }
 
-    /// Move the pointer to a point this control actually reports as hovered.
     fn hover(&mut self, key: &ControlKey, target: ControlTarget) -> Result<Pos2, String> {
         let current = self.locate(key)?;
         if current.frame_token != target.frame_token || current.pass_token != target.pass_token {
@@ -596,7 +559,6 @@ impl Harness {
         ))
     }
 
-    /// Rest the pointer on a control (it reports hovered), without clicking.
     pub(super) fn point_at(&mut self, key: ControlKey) -> Result<Pos2, String> {
         let target = self.locate(&key)?;
         self.hover(&key, target)
@@ -678,8 +640,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Press on a control, move through `path` (one frame per point) and release at
-    /// the last point. `escape_at` injects Escape after that many moves.
+    /// `escape_at` injects Escape after that many moves, with one UI frame per path point.
     pub(super) fn drag(
         &mut self,
         key: ControlKey,
@@ -715,15 +676,12 @@ impl Harness {
             modifiers,
         )]);
         self.modifiers = previous;
-        // A body drag's move ends with the button.
         self.desktop.release();
         self.frame(vec![]);
         Ok(start)
     }
 
-    /// Right-click `body` in the focused window (opening the settings window on it),
-    /// then click `items` in the settings window in order. Focus returns to the
-    /// original window if it still exists; the settings window stays open.
+    /// Restores the original focus if it survives; leaves the settings window open.
     pub(super) fn settings(
         &mut self,
         body: ControlKey,
@@ -744,7 +702,7 @@ impl Harness {
         result
     }
 
-    /// Click `items` in the open settings window; focus stays there.
+    /// Leaves focus in the settings window.
     pub(super) fn in_settings(&mut self, items: &[SettingsItem]) -> Result<(), String> {
         self.focus = SETTINGS;
         self.frame(vec![]);
@@ -775,8 +733,7 @@ impl Harness {
         }
     }
 
-    /// Press and release `key` with `modifiers` held (also in the frames' modifier
-    /// state, which egui's shortcuts read).
+    /// egui shortcuts read RawInput's modifier state as well as key events.
     pub(super) fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
         let previous = self.modifiers;
         self.modifiers = previous | modifiers;

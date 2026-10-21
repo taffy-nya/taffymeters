@@ -30,7 +30,6 @@ pub(super) fn synthetic() -> Result<(LiveAudio, ManualInputDriver), String> {
     LiveAudio::open_manual(LiveAudioConfig::default(), SyntheticConfig::default())
         .map_err(|e| e.to_string())
 }
-/// A Workspace over the manual synthetic source: one window, one Spectrum.
 pub(super) fn workspace() -> Result<(Workspace, ManualInputDriver), String> {
     let (live, driver) = synthetic()?;
     Ok((
@@ -59,21 +58,18 @@ pub(super) fn leaves(ws: &Workspace, window: WindowId) -> Vec<ModuleInstanceId> 
         .map(|w| w.leaves.clone())
         .unwrap_or_default()
 }
-/// Wait until the dataflow has exactly `expected` subscriptions.
 pub(super) fn settle_subscriptions(ws: &Workspace, expected: u64) -> Result<(), String> {
     let handle = ws.dataflow_handle_for_automation();
     wait_until(deadline(), &format!("{expected} subscriptions"), || {
         (handle.metrics().subscriptions == expected).then_some(())
     })
 }
-/// The first leaf of the root window.
 pub(super) fn first_leaf(ws: &Workspace) -> Result<ModuleInstanceId, String> {
     ws.observation()
         .window(FIRST_WINDOW)
         .and_then(|window| window.leaves.first().copied())
         .ok_or_else(|| "root window has no module".to_owned())
 }
-/// Replace the root window's first leaf with a default instance of `type_id`.
 pub(super) fn replace_first(
     ws: &mut Workspace,
     type_id: &'static str,
@@ -87,8 +83,6 @@ pub(super) fn replace_first(
         },
     )?)
 }
-/// Split the widest root-window leaf that has room and turn the new leaf into
-/// `type_id` (the user path: split, then pick the type).
 pub(super) fn add_module(
     ws: &mut Workspace,
     type_id: &'static str,
@@ -151,7 +145,6 @@ pub(super) fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&read_bytes(path)?).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// A fresh directory, removed when the value drops.
 pub(super) struct TempDir(PathBuf);
 
 impl TempDir {

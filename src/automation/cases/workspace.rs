@@ -1,6 +1,4 @@
-//! W01–W11: Workspace / BSP / multi-window behavior through the real Workspace,
-//! Module factories, manual source and egui events. Native window management, real
-//! DPI changes and the Win32 window moves are verified separately on a desktop.
+//! Simulated desktops do not cover native window management, DPI changes or Win32 moves.
 
 use std::time::Duration;
 
@@ -131,8 +129,6 @@ fn w01() -> Result<Value, String> {
         "closing a leaf disturbed the remaining instances",
     )?;
     settle_subscriptions(&h.ws, 3)?;
-    // Shrink the window: the minimum width (three leaf minimums) is enforced and a
-    // further split is rejected without creating anything.
     h.frame(vec![]);
     let min_size =
         h.ws.observation()
@@ -171,8 +167,6 @@ fn w01() -> Result<Value, String> {
             .all(|(_, rect)| rect.width() >= MIN_EXTENT - 0.01),
         &format!("leaf below its minimum width: {rects:?}"),
     )?;
-    // A leaf at its minimum has no split entries; its body (inside the scaled resize
-    // edges) still takes a right click and opens the settings window.
     check(
         [Side::Right, Side::Below].into_iter().all(|side| {
             h.locate(&ControlKey::SplitZone {
@@ -189,8 +183,7 @@ fn w01() -> Result<Value, String> {
         "min_inner_size":[expected.x,expected.y],"remaining":[a.0,c.0,d.0]}))
 }
 
-/// Divider drag through real egui events: grid, Alt, legal clamp, Escape, double click,
-/// and no window drag while the divider owns the gesture.
+/// Divider drag snapping, clamping, cancellation, reset and exclusive gesture ownership.
 fn w02() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -230,8 +223,7 @@ fn w02() -> Result<Value, String> {
         (ratio * 900.0 - 601.0).abs() < 0.01,
         &format!("Alt drag snapped: {}", ratio * 900.0),
     )?;
-    // The far end of the legal interval (900 − 16 = 884) is off the grid (880) and
-    // still reachable: the interval's ends are snap points.
+    // The legal endpoint (900 - 16 = 884) lies beyond the last grid point (880).
     h.drag(
         divider,
         &[pos2(700.0, y), pos2(899.0, y)],
@@ -305,8 +297,7 @@ fn w02() -> Result<Value, String> {
     )
 }
 
-/// One owner per gesture: split entry drag moves the window, resize edges and
-/// corners resize, the divider wins over the overlapping split entry.
+/// Split entries, resize edges and dividers compete for exclusive gesture ownership.
 fn w03() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -385,8 +376,7 @@ fn w03() -> Result<Value, String> {
     )
 }
 
-/// Detach: the instance moves only once the new window shows its first frame;
-/// creation failure and Escape keep it in the source.
+/// Detach commits on the first destination frame; creation failure and Escape preserve the source.
 fn w04() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -443,7 +433,7 @@ fn w04() -> Result<Value, String> {
     )?;
     h.ws.check_ownership()?;
 
-    // Native creation fails: the window never shows a frame.
+    // Blocking creation prevents the destination's first frame from committing the detach.
     let c = split(&mut h.ws, a, Side::Right)?;
     let blocked = WindowId(pending.0 + 1);
     h.blocked.insert(blocked);
@@ -459,7 +449,6 @@ fn w04() -> Result<Value, String> {
         !h.ws.has_window(blocked) && leaves(&h.ws, FIRST_WINDOW) == vec![a, c],
         "failed window creation lost the instance",
     )?;
-    // Escape in the source cancels a pending detach.
     let pending_escape = new_window(action(
         &mut h.ws,
         WorkspaceAction::DetachModule { instance_id: c },
@@ -547,7 +536,6 @@ fn w05() -> Result<Value, String> {
     settle_subscriptions(&h.ws, 2)?;
     h.ws.check_ownership()?;
 
-    // Escape and right click cancel; the tree is unchanged.
     let tree = h.ws.observation().windows;
     action(&mut h.ws, WorkspaceAction::BeginMove { instance_id: b })?;
     h.frame(vec![]);
@@ -580,7 +568,6 @@ fn w05() -> Result<Value, String> {
         "right click did not cancel Move or changed the tree",
     )?;
 
-    // Too-small targets are disabled; a vanished target fails without losing the source.
     let c = split(&mut h.ws, a, Side::Right)?;
     let d = split(&mut h.ws, c, Side::Right)?;
     // Three 20-pt columns cannot take a second 16-pt column beside them.
@@ -609,7 +596,6 @@ fn w05() -> Result<Value, String> {
     )?;
     action(&mut h.ws, WorkspaceAction::CancelMove)?;
 
-    // An empty window is a target.
     let e = split(&mut h.ws, a, Side::Below)?;
     let empty = new_window(action(
         &mut h.ws,
@@ -633,8 +619,7 @@ fn w05() -> Result<Value, String> {
     )
 }
 
-/// Closing windows releases exactly their instances; the shared source and other
-/// windows continue, including after the root window closes.
+/// Closing each window releases only its instances, even when the root closes first.
 fn w06() -> Result<Value, String> {
     let (mut ws, mut driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
@@ -670,8 +655,6 @@ fn w06() -> Result<Value, String> {
         after.pcm_frames == before.pcm_frames && after.fft_evaluations > before.fft_evaluations,
         "closing a window stopped the other window or kept its demand",
     )?;
-    // The root window closes (as the adapter does on a native close request) while
-    // another window keeps the shared source busy.
     let b = split(&mut h.ws, a, Side::Right)?;
     let third = new_window(action(
         &mut h.ws,
@@ -716,10 +699,7 @@ fn w06() -> Result<Value, String> {
     )
 }
 
-/// Desktop placement in physical pixels across scales: snapping while dragged, the
-/// divider between touching windows, grouping (outlined on the Window tab) and
-/// group movement; logical hit testing and grid at 2x; scale change cancels a
-/// divider drag.
+/// Mixed-DPI snapping, grouping, physical movement and logical divider gestures.
 fn w07() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -736,8 +716,6 @@ fn w07() -> Result<Value, String> {
         leaves(&h.ws, second) == vec![b],
         "detach to a 2x window failed",
     )?;
-    // Drag the 2x window close to the root's right edge: it snaps while the button
-    // is still held, in physical pixels; Alt moves it freely.
     h.focus = second;
     let start = h.window(second)?.position;
     let grab = h.grab(ControlKey::LeafBody(b))?;
@@ -750,7 +728,6 @@ fn w07() -> Result<Value, String> {
             h.window(second)?.position
         ),
     )?;
-    // Both windows draw the divider in the passes the move ran.
     let dividers = |h: &Harness, window| edge_lines(h, window, EdgeLine::Divider);
     check(
         dividers(&h, FIRST_WINDOW) == [(Edge::Right, 100.0, 520.0)]
@@ -794,7 +771,6 @@ fn w07() -> Result<Value, String> {
         group.is_some() && o.window(FIRST_WINDOW).and_then(|w| w.group) == group,
         "touching windows were not grouped",
     )?;
-    // The Window tab outlines the group: its outer boundary, not the shared edge.
     check(
         outline(&h, FIRST_WINDOW)
             == [
@@ -821,8 +797,6 @@ fn w07() -> Result<Value, String> {
         outline(&h, FIRST_WINDOW).is_empty() && outline(&h, second).is_empty(),
         "the outline stayed after leaving the Window tab",
     )?;
-    // Locking the member keeps the whole group in place: neither body starts a
-    // move until it is unlocked.
     h.focus = second;
     h.settings(
         ControlKey::LeafBody(b),
@@ -850,7 +824,6 @@ fn w07() -> Result<Value, String> {
         ControlKey::LeafBody(b),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
     )?;
-    // Dragging the root moves the member by the same physical delta, at once.
     h.focus = FIRST_WINDOW;
     let grab = h.grab(ControlKey::LeafBody(a))?;
     h.move_pointer(grab + vec2(50.0, 30.0), false)?;
@@ -864,7 +837,6 @@ fn w07() -> Result<Value, String> {
         ),
     )?;
     h.release()?;
-    // Another program moving the root takes the member along too.
     h.external_move(FIRST_WINDOW, pos2(200.0, 160.0))?;
     h.frame_all()?;
     check(
@@ -893,7 +865,6 @@ fn w07() -> Result<Value, String> {
             && h.window(FIRST_WINDOW)?.position == pos2(300.0, 300.0),
         "ungrouped window followed",
     )?;
-    // Logical hit testing and grid on a 2x window.
     h.focus = FIRST_WINDOW;
     h.window_mut(FIRST_WINDOW)?.ppp = 2.0;
     h.frame(vec![]);
@@ -918,7 +889,6 @@ fn w07() -> Result<Value, String> {
         (ratio * width - 528.0).abs() < 0.01,
         &format!("2x grid in physical units: {}", ratio * width),
     )?;
-    // A scale change mid-drag cancels the drag and restores its start.
     let start = ratio;
     let divider = h.locate(&ControlKey::Divider(split_id))?.rect.center();
     h.frame(vec![Event::PointerMoved(divider)]);
@@ -951,8 +921,7 @@ fn w07() -> Result<Value, String> {
     )
 }
 
-/// Repeated split / detach / merge / close returns to the same windows, instances
-/// and analysis demand, without leftover gesture state.
+/// Repeated split, detach, merge and close leave ownership, demand and gesture state unchanged.
 fn w08() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
@@ -1014,9 +983,7 @@ fn w08() -> Result<Value, String> {
     Ok(json!({"rounds":10,"windows":1,"modules":1,"subscriptions":after.subscriptions}))
 }
 
-/// A minimized window stops only work that serves the display. The Spectrum has
-/// none: its Tilt feeds its Peak, so both keep running, as does the Waveform's
-/// recording; restoring brings the curve back.
+/// Tilt feeds Peak, so minimizing must preserve analysis and recording.
 fn w09() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
     let mut h = Harness::new(ws);
@@ -1031,7 +998,6 @@ fn w09() -> Result<Value, String> {
         shown.active_spectrum_nodes == 2,
         &format!("visible Spectrum runs Tilt/Peak: {shown:?}"),
     )?;
-    // The viewport reports itself minimized: the pass draws nothing.
     h.window_mut(FIRST_WINDOW)?.minimized = true;
     let minimized = h.frame(vec![]);
     check(minimized.shapes.is_empty(), "a minimized window was drawn")?;
@@ -1072,8 +1038,7 @@ fn primary(pos: Pos2, pressed: bool) -> Event {
     }
 }
 
-/// Left clicks at a fixed point. The harness's own gestures need a registered
-/// control; a locked window registers no chrome, so W10 aims at remembered points.
+/// Locked windows register no chrome, so raw gestures must use remembered coordinates.
 fn raw_clicks(h: &mut Harness, at: Pos2, count: usize) {
     h.frame(vec![Event::PointerMoved(at)]);
     for _ in 0..count {
@@ -1083,7 +1048,6 @@ fn raw_clicks(h: &mut Harness, at: Pos2, count: usize) {
     h.frame(vec![]);
 }
 
-/// Left press at `from`, move to `to` in two frames, release there.
 fn raw_drag(h: &mut Harness, from: Pos2, to: Pos2) {
     h.frame(vec![Event::PointerMoved(from)]);
     h.frame(vec![primary(from, true)]);
@@ -1093,8 +1057,7 @@ fn raw_drag(h: &mut Harness, from: Pos2, to: Pos2) {
     h.frame(vec![]);
 }
 
-/// A wheel notch and a pinch over `at`; display time advances so egui's smoothed
-/// scrolling delivers the notch.
+/// egui's smoothed wheel input needs advancing display time to deliver the notch.
 fn wheel_and_pinch(h: &mut Harness, at: Pos2) {
     h.frame(vec![Event::PointerMoved(at)]);
     h.frame(vec![
@@ -1137,7 +1100,6 @@ fn view(h: &Harness, id: ModuleInstanceId) -> Result<Vec<(&'static str, String)>
         .ok_or_else(|| format!("instance {} missing", id.0))
 }
 
-/// Whether a present control of the focused window is enabled.
 fn enabled(h: &Harness, key: &ControlKey) -> Result<bool, String> {
     match h.locate(key) {
         Ok(_) => Ok(true),
@@ -1146,7 +1108,6 @@ fn enabled(h: &Harness, key: &ControlKey) -> Result<bool, String> {
     }
 }
 
-/// Whether the settings window's Maximize button is enabled; focus stays.
 fn maximize_enabled(h: &mut Harness) -> Result<bool, String> {
     let origin = h.focus;
     h.focus = SETTINGS;
@@ -1156,7 +1117,6 @@ fn maximize_enabled(h: &mut Harness) -> Result<bool, String> {
     enabled
 }
 
-/// Whether "Move to…" offers the right edge of `beside` to `source`.
 fn move_target_enabled(
     h: &mut Harness,
     source: ModuleInstanceId,
@@ -1181,11 +1141,8 @@ fn move_target_enabled(
     enabled
 }
 
-/// Lock: a locked window takes right clicks only. Left clicks, drags and double
-/// clicks, the wheel and pinch reach nothing (no split entry, divider or resize
-/// edge, no selection, no window move, no Module input); native sizing, Maximize
-/// and move targets in it are off; locking ends a divider drag at its start.
-/// Unlocking brings all of it back.
+/// Lock preserves right clicks but blocks other gestures, native sizing and move targets.
+/// It restores an active divider drag's start; unlocking restores interaction.
 fn w10() -> Result<Value, String> {
     let (mut ws, mut driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -1215,7 +1172,6 @@ fn w10() -> Result<Value, String> {
     let body_a = h.locate(&ControlKey::LeafBody(a))?.rect.center();
     let body_b = h.locate(&ControlKey::LeafBody(b))?.rect.center();
 
-    // Locking in the middle of a divider drag ends the drag at its start.
     let aside = divider + vec2(-80.0, 0.0);
     h.frame(vec![Event::PointerMoved(divider)]);
     h.frame(vec![primary(divider, true)]);
@@ -1252,7 +1208,6 @@ fn w10() -> Result<Value, String> {
     h.frame(vec![]);
     h.take_commands(FIRST_WINDOW);
 
-    // Lock through the settings window: the right click still opens it.
     h.settings(
         ControlKey::LeafBody(a),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
@@ -1281,8 +1236,6 @@ fn w10() -> Result<Value, String> {
         ),
     )?;
 
-    // Every left gesture, the wheel and pinch change nothing, the selection in the
-    // open settings window included.
     let before = h.ws.observation().window(FIRST_WINDOW).cloned();
     let target_before = h.ws.observation().settings_target;
     let view_before = view(&h, a)?;
@@ -1309,7 +1262,6 @@ fn w10() -> Result<Value, String> {
         ),
     )?;
 
-    // Unlocking brings everything back, through the same raw gestures.
     h.settings(
         ControlKey::LeafBody(a),
         &[SettingsItem::Tab(Tab::Window), SettingsItem::Lock],
@@ -1323,7 +1275,6 @@ fn w10() -> Result<Value, String> {
             && move_target_enabled(&mut h, a, b)?,
         &format!("unlocked window: commands {commands:?}, {registered} chrome controls"),
     )?;
-    // A left click selects the module in the open settings window again.
     raw_clicks(&mut h, body_b, 1);
     let selected = h.ws.observation().settings_target.and_then(|(id, _)| id);
     raw_drag(&mut h, divider, aside);
@@ -1348,7 +1299,6 @@ fn w10() -> Result<Value, String> {
     }))
 }
 
-/// Lines a window's last pass drew along its frame, of one kind.
 fn edge_lines(h: &Harness, window: WindowId, line: EdgeLine) -> Vec<(Edge, f32, f32)> {
     h.ws.observation()
         .window(window)
@@ -1362,10 +1312,7 @@ fn edge_lines(h: &Harness, window: WindowId, line: EdgeLine) -> Vec<(Edge, f32, 
         .unwrap_or_default()
 }
 
-/// A group moves as one: the Window tab's Group button previews the windows it
-/// would add; dragged past the work area the group stops with every member still
-/// reachable; Escape puts it back; it snaps to the work area while dragged and
-/// stays put after the release; a group left off every monitor comes back as one.
+/// Group preview, reachability clamp, cancellation, snapping and rescue preserve relative positions.
 fn w11() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -1397,7 +1344,6 @@ fn w11() -> Result<Value, String> {
         ])
     };
 
-    // Hovering Group previews the window it would add; grouping keeps the outline.
     h.focus = FIRST_WINDOW;
     h.settings(ControlKey::LeafBody(a), &[SettingsItem::Tab(Tab::Window)])?;
     h.focus = SETTINGS;
@@ -1425,8 +1371,7 @@ fn w11() -> Result<Value, String> {
         "Group did not join the touching window, or its outline is missing",
     )?;
 
-    // Far past the right edge of the work area: the group stops with `right`
-    // 32 px on screen, the members exactly as far apart as before.
+    // The 1920 px work area must leave 32 px of the rightmost member reachable.
     h.focus = FIRST_WINDOW;
     let grab = h.grab(ControlKey::LeafBody(a))?;
     h.move_pointer(grab + vec2(3000.0, 0.0), false)?;
@@ -1435,7 +1380,6 @@ fn w11() -> Result<Value, String> {
         held[0] == pos2(988.0, 100.0) && held[1] == pos2(1888.0, 100.0),
         &format!("group past the edge: {held:?}"),
     )?;
-    // Escape puts the group back.
     h.cancel_move()?;
     h.release()?;
     check(
@@ -1443,8 +1387,7 @@ fn w11() -> Result<Value, String> {
         &format!("Escape did not put the group back: {:?}", positions(&h)?),
     )?;
 
-    // 10 px below the work area's top: snapped there while held, and nothing moves
-    // after the release.
+    // A 10 px gap lies within the work-area snap threshold.
     let grab = h.grab(ControlKey::LeafBody(a))?;
     h.move_pointer(grab + vec2(0.0, -90.0), false)?;
     let snapped = positions(&h)?;
@@ -1458,7 +1401,6 @@ fn w11() -> Result<Value, String> {
         &format!("snap to the work area: held {snapped:?}, settled {settled:?}"),
     )?;
 
-    // The group's monitor is gone: it comes back as one.
     h.window_mut(FIRST_WINDOW)?.position = pos2(-3000.0, 0.0);
     h.window_mut(right)?.position = pos2(-2100.0, 0.0);
     h.frame_all()?;
@@ -1474,9 +1416,7 @@ fn w11() -> Result<Value, String> {
         "rescued":[[rescued[0].x,rescued[0].y],[rescued[1].x,rescued[1].y]]}))
 }
 
-/// Window tab New: an empty window of the source's size, offset by the detach
-/// offset, on top like the source but neither locked nor grouped; the settings
-/// window moves on to it (Add module there fills it) and Close closes only it.
+/// New inherits size and topmost state, not locking or grouping; settings follow the new window.
 fn w12() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -1517,7 +1457,6 @@ fn w12() -> Result<Value, String> {
             && observed.group.is_none(),
         &format!("new window: offset {offset:?}, size {size:?}, {observed:?}"),
     )?;
-    // The settings window now edits the new window: adding fills it, not the source.
     h.in_settings(&[SettingsItem::AddModule(WAVEFORM_MODULE_ID)])?;
     let filled = leaves(&h.ws, new).len();
     let source_leaves = leaves(&h.ws, FIRST_WINDOW);

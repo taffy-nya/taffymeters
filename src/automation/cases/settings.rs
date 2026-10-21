@@ -1,9 +1,3 @@
-//! S01–S09: settings window, copies, invisible sharing, theme, the session and
-//! presets, missing extensions, preset switching, window placement and rescue,
-//! selecting and outlining what the settings edit.
-//! They run the real Workspace, Module factories and manual source with temporary
-//! configuration directories; settings operations use real egui events.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -51,7 +45,6 @@ pub(super) const CASES: [(&str, Scenario); 9] = [
     ("S09", s09),
 ];
 
-/// The scenario's directory as a configuration directory.
 impl TempDir {
     fn store(&self) -> WorkspaceStore {
         WorkspaceStore::new(self.path())
@@ -65,19 +58,17 @@ impl TempDir {
         self.path().join("session.json")
     }
 
-    /// Write `file` as the session to open next.
     fn write_session(&self, file: &Value) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(file).expect("a JSON value serializes");
         write_bytes(&self.session(), &bytes)
     }
 }
 
-/// The harness's default monitor as a saved display: recognized on restore.
+/// Matches the harness's default monitor so restoration recognizes it.
 fn primary_display() -> Value {
     json!({"work_area":[1920.0,1040.0],"hint":{"origin_px":[0.0,0.0],"scale":1.0}})
 }
 
-/// Open the session in `dir` on the harness's default desktop.
 fn reopen(dir: &TempDir) -> Result<(Workspace, ManualInputDriver), String> {
     let (live, driver) = synthetic()?;
     let ws = Workspace::open(live, dir.store(), FakeDesktop::new()).map_err(|e| e.to_string())?;
@@ -112,8 +103,7 @@ fn channel_of(spec: &DataSpec) -> Option<ChannelSelection> {
     })
 }
 
-/// Right-click `leaf` (opening the settings window on it) and click `items` there;
-/// focus stays in the settings window.
+/// Leaves focus in the settings window.
 fn open_settings(
     h: &mut Harness,
     leaf: ModuleInstanceId,
@@ -130,16 +120,9 @@ fn open_settings(
     h.in_settings(items)
 }
 
-/// Whether `instance` (in the window `h` draws) shows something, judged from the
-/// shapes drawn within its leaf.
 type Shown = fn(&egui::FullOutput, egui::Rect) -> bool;
 
-/// Feed enough audio for settled results, then drag `key`'s slider in the open
-/// settings window three 6-point steps to the right without releasing, feeding
-/// about one display frame of audio per step, and check that the parameter
-/// follows the drag and that `instance` keeps showing `what` before and at every
-/// step: a changed node fills its first window while the view keeps the previous
-/// result.
+/// Each drag step supplies less than a new FFT window, so the previous result must stay visible.
 fn drag_keeps_showing(
     h: &mut Harness,
     driver: &mut ManualInputDriver,
@@ -225,8 +208,6 @@ fn heat_map_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
     })
 }
 
-/// Click the typed value of `item` in the open settings window, type `text` and
-/// finish with `key`: Enter applies it, Escape keeps the old value.
 fn type_value(
     h: &mut Harness,
     item: SettingsItem,
@@ -300,7 +281,6 @@ fn s01() -> Result<Value, String> {
         node: tilt,
         param: NodeParam::Tilt,
     });
-    // The slider applies while it is dragged, before the button is released.
     let slider = h.locate(&key)?.rect;
     let (start, end) = (slider.center(), pos2(slider.max.x - 2.0, slider.center().y));
     let button = |pos, pressed| egui::Event::PointerButton {
@@ -322,7 +302,7 @@ fn s01() -> Result<Value, String> {
         live > 6.0,
         &format!("Tilt did not follow the slider during the drag: {live}"),
     )?;
-    // Overlays start hidden; the peak curve is shown through its toggle.
+    // Peak starts hidden, so enable it before checking continuity during analysis edits.
     h.in_settings(&[SettingsItem::ViewToggle("show_peak")])?;
     let shown_peak = h.ws.observation().module(b).and_then(|m| {
         m.view
@@ -334,9 +314,7 @@ fn s01() -> Result<Value, String> {
         shown_peak == Some(SettingValue::Bool(true)),
         &format!("the Peak curve toggle did not show the peak curve: {shown_peak:?}"),
     )?;
-    // While a slider is dragged the view keeps the previous result until the
-    // changed nodes produce: the copy's 4096-point FFT restarts at every Floor step
-    // and its Peak at every hold step, and a step brings less audio than a window.
+    // Floor restarts the copy's 4096-point FFT; hold restarts Peak.
     let peak_node = node(&spec(&h.ws, b)?, |n| matches!(n, NodeSpec::Peak(_)))?;
     for (key, what, shown) in [
         (
@@ -398,8 +376,7 @@ fn s01() -> Result<Value, String> {
                 .map(|(_, v)| v.clone())
         })
     };
-    // A range the zoom gesture reaches (down to 80 Hz) is a valid setting: copies
-    // and restores keep it.
+    // The 80 Hz range is reachable by zoom, not just by direct setting actions.
     action(
         &mut h.ws,
         WorkspaceAction::SetViewSetting {
@@ -420,7 +397,7 @@ fn s01() -> Result<Value, String> {
         copied_range == Some(SettingValue::Number(400.0)),
         &format!("a zoomed frequency range did not survive a copy: {copied_range:?}"),
     )?;
-    // A History shorter than the usual shortest span bounds the view to itself.
+    // Use a History shorter than the usual minimum view span.
     let waveform = created(action(
         &mut h.ws,
         WorkspaceAction::ReplaceModule {
@@ -447,7 +424,6 @@ fn s01() -> Result<Value, String> {
         short_view == Some(SettingValue::Number(0.1)),
         &format!("the view outgrew a short History: {short_view:?}"),
     )?;
-    // A Spectrogram keeps its earlier columns while its FFT restarts.
     let spectrogram = created(action(
         &mut h.ws,
         WorkspaceAction::ReplaceModule {
@@ -470,9 +446,6 @@ fn s01() -> Result<Value, String> {
         "the Spectrogram heat map",
         heat_map_shown,
     )?;
-    // A value can be typed, with or without its unit; text that is no number in
-    // that unit, or Escape, keeps the value, and Escape stays in the field
-    // instead of closing the window.
     let visible = SettingsItem::ViewNumber("visible_seconds");
     let seconds = |h: &Harness| view_of(h, spectrogram, "visible_seconds");
     type_value(&mut h, visible, "2 s", egui::Key::Enter)?;
@@ -489,7 +462,6 @@ fn s01() -> Result<Value, String> {
             seconds(&h)
         ),
     )?;
-    // ↺ beside a value returns it to the type's default and then goes away.
     h.in_settings(&[])?;
     h.click(ControlKey::SettingsReset(visible))?;
     let reset_gone = !h
@@ -504,8 +476,6 @@ fn s01() -> Result<Value, String> {
             !reset_gone
         ),
     )?;
-    // The Analysis card's ↺ returns every analysis parameter, History length
-    // included, to the defaults; the channel belongs to the Module card and stays.
     type_value(
         &mut h,
         SettingsItem::Keep(OutputId::from_index(0)),
@@ -527,7 +497,6 @@ fn s01() -> Result<Value, String> {
             && channel_of(&restored) == Some(ChannelSelection::Right),
         &format!("Analysis reset left {restored:?}"),
     )?;
-    // Frequencies take kilohertz; the Display card's ↺ restores the view.
     open_settings(&mut h, b, &[])?;
     let max_frequency = SettingsItem::ViewNumber("max_frequency_hz");
     type_value(&mut h, max_frequency, "1.5k", egui::Key::Enter)?;
@@ -548,9 +517,7 @@ fn s01() -> Result<Value, String> {
     )
 }
 
-/// Sharing is invisible: identical analysis is shared by the dataflow on its own,
-/// an edit only changes its instance (forking what changed), and going back to the
-/// same parameters shares again. The settings offer nothing about sharing.
+/// Equal analysis shares automatically; edits fork only their instance and reverting shares again.
 fn s02() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
@@ -594,7 +561,6 @@ fn s02() -> Result<Value, String> {
         (shared, forked, rejoined) == (1, 2, 1),
         &format!("FFT nodes identical → edited → identical again: {shared}, {forked}, {rejoined}"),
     )?;
-    // The Channel row changes only its instance as well.
     open_settings(&mut h, a, &[SettingsItem::Channel(ChannelSelection::Left)])?;
     check(
         channel_of(&spec(&h.ws, a)?) == Some(ChannelSelection::Left)
@@ -611,7 +577,6 @@ fn s02() -> Result<Value, String> {
     Ok(json!({"fft_nodes":{"shared":shared,"edited":forked,"rejoined":rejoined}}))
 }
 
-/// Stroke colors of the polylines drawn within the horizontal span of `rect`.
 fn stroke_colors(output: &egui::FullOutput, rect: egui::Rect) -> BTreeSet<[u8; 4]> {
     let span = rect.expand(1.0).x_range();
     output
@@ -656,7 +621,6 @@ fn s03() -> Result<Value, String> {
             side: Side::Below,
         },
     )?)?;
-    // The type picker replaces the instance; the settings follow its successor.
     open_settings(&mut h, waveform, &[])?;
     h.dropdown(
         ControlKey::Settings(SettingsItem::TypePicker),
@@ -674,7 +638,6 @@ fn s03() -> Result<Value, String> {
         "the type picker replaced the wrong instance",
     )?;
     let swatch = swatches(true)[3];
-    // A swatch sets the instance's own color directly.
     open_settings(
         &mut h,
         b,
@@ -697,7 +660,6 @@ fn s03() -> Result<Value, String> {
             && palette(&h, a)?.color(ColorRole::Primary) == dark.color(ColorRole::Primary),
         "instance override did not stay on the instance",
     )?;
-    // The override is what the Module actually draws with.
     driver
         .advance_frames(4_096, deadline())
         .map_err(|e| e.to_string())?;
@@ -744,8 +706,6 @@ fn s03() -> Result<Value, String> {
                 == light.color(ColorRole::Secondary),
         "type style did not apply to exactly the Spectrum instances",
     )?;
-    // A type style offers only the colors that type draws with; Empty, drawing
-    // with none, is not listed.
     let swatch_of = |scope, role| {
         ControlKey::Settings(SettingsItem::Swatch {
             scope,
@@ -781,7 +741,6 @@ fn s03() -> Result<Value, String> {
             && palette(&h, b)?.color(ColorRole::Primary) == swatch,
         "global edit must reach every instance without its own override",
     )?;
-    // Reset returns the global role to the preset; the instance keeps its own.
     h.in_settings(&[SettingsItem::ResetColor {
         scope: ColorScope::Global,
         role: ColorRole::Primary,
@@ -791,7 +750,6 @@ fn s03() -> Result<Value, String> {
             && palette(&h, b)?.color(ColorRole::Primary) == swatch,
         "Reset did not return the global color to the preset",
     )?;
-    // Typed text size; its ↺ follows the preset's size again.
     type_value(&mut h, SettingsItem::TextSize, "14", egui::Key::Enter)?;
     let typed_size = h.ws.observation().theme.text_size;
     h.click(ControlKey::SettingsReset(SettingsItem::TextSize))?;
@@ -802,7 +760,6 @@ fn s03() -> Result<Value, String> {
             h.ws.observation().theme.text_size
         ),
     )?;
-    // Typed reference level on the Workspace tab; its ↺ follows the default again.
     h.in_settings(&[SettingsItem::Tab(Tab::Workspace)])?;
     type_value(
         &mut h,
@@ -820,7 +777,6 @@ fn s03() -> Result<Value, String> {
         ),
     )?;
     h.in_settings(&[SettingsItem::Tab(Tab::Theme)])?;
-    // Card ↺: every global edit, the shown type's style, every instance override.
     h.in_settings(&[
         SettingsItem::Swatch {
             scope: ColorScope::Global,
@@ -856,7 +812,6 @@ fn s03() -> Result<Value, String> {
     )
 }
 
-/// Every object key of a JSON value, recursively.
 fn keys(value: &Value, out: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
@@ -870,7 +825,7 @@ fn keys(value: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// What a restored workspace must reproduce, without process identities.
+/// Excludes process identities so restarts can be compared.
 fn fingerprint(ws: &Workspace) -> Value {
     let o = ws.observation();
     let windows: Vec<Value> = o
@@ -884,7 +839,7 @@ fn fingerprint(ws: &Workspace) -> Value {
                 .map(|module| {
                     let data = module.data.as_ref().map(|data| {
                         let mut data = data.clone();
-                        // Bindings are compared by who shares them, not by number.
+                        // Binding numbers are not part of this restart comparison.
                         data.rebind(|_| crate::dataflow::SharedAnalysisId(0));
                         serde_json::to_value(data).unwrap_or(Value::Null)
                     });
@@ -901,9 +856,7 @@ fn fingerprint(ws: &Workspace) -> Value {
     json!({"windows":windows,"theme":o.theme})
 }
 
-/// Save as a preset through the settings window, then autosave of the session
-/// (Quit and closing the last window), restart, compare. Presets only change on
-/// request.
+/// Explicit preset saves and session autosaves survive restart without overwriting each other.
 fn s04() -> Result<Value, String> {
     let dir = TempDir::new("s04")?;
     let (ws, _driver) = workspace()?;
@@ -973,7 +926,7 @@ fn s04() -> Result<Value, String> {
             key: "channel",
             value: SettingValue::Channel(ChannelSelection::Left),
         },
-        // Shorter History than the visible span: the span follows it down.
+        // A 3 s History must shorten the requested 7.5 s visible span.
         WorkspaceAction::SetKeep {
             instance_id: waveform,
             output: OutputId::from_index(0),
@@ -1045,7 +998,6 @@ fn s04() -> Result<Value, String> {
     h.frame_window(second, vec![])?;
     h.frame_window(FIRST_WINDOW, vec![])?;
     h.focus = FIRST_WINDOW;
-    // Save as a preset through the settings window.
     h.settings(
         ControlKey::LeafBody(a),
         &[SettingsItem::Tab(Tab::Workspace)],
@@ -1064,7 +1016,6 @@ fn s04() -> Result<Value, String> {
         "a preset records a session origin",
     )?;
     h.focus = FIRST_WINDOW;
-    // A later change is kept by Quit in the session, not in the preset.
     let split =
         h.ws.observation()
             .window(FIRST_WINDOW)
@@ -1132,7 +1083,6 @@ fn s04() -> Result<Value, String> {
         "the session does not hold both windows and its preset",
     )?;
 
-    // Restart.
     let (ws, _driver) = reopen(&dir)?;
     let mut h = Harness::new(ws);
     h.frame_all()?;
@@ -1166,13 +1116,11 @@ fn s04() -> Result<Value, String> {
         positions.contains(&pos2(1200.0, 300.0)),
         &format!("detached window position not restored: {positions:?}"),
     )?;
-    // Saving the restored session writes the same file.
     h.ws.autosave();
     check(
         read_json(&dir.session())? == saved_session,
         "saving the restored session changed the file",
     )?;
-    // Save to the preset on request.
     action(&mut h.ws, WorkspaceAction::SavePreset)?;
     check(
         read_json(&dir.preset("Round trip"))?["windows"][0]["layout"]["ratio"]
@@ -1181,7 +1129,6 @@ fn s04() -> Result<Value, String> {
         "Save to did not write the preset",
     )?;
     h.ws.check_ownership()?;
-    // Closing the last window ends the session and saves first.
     let windows: Vec<WindowId> = h.ws.windows().iter().map(|w| w.id).collect();
     let (last, others) = windows.split_first().ok_or("no window")?;
     for window_id in others {
@@ -1221,8 +1168,7 @@ fn s04() -> Result<Value, String> {
     )
 }
 
-/// Missing types, unusable configuration, unknown style and input, and a session
-/// file from another build: reported, kept verbatim, never overwritten.
+/// Unsupported types, configuration, styles, inputs and future files remain preserved and reported.
 fn s05() -> Result<Value, String> {
     let dir = TempDir::new("s05")?;
     let plugin = json!({"type_id":"vendor.plugin.meter",
@@ -1290,8 +1236,6 @@ fn s05() -> Result<Value, String> {
             &format!("no notice about {expected}: {notices}"),
         )?;
     }
-    // The badge shows an operation error and counts the notices for a while,
-    // then drops them; the notices stay listed in the settings until cleared.
     let placeholder = o.modules[0].instance_id;
     let rejected = h.ws.apply_action(WorkspaceAction::SplitModule {
         instance_id: placeholder,
@@ -1345,7 +1289,6 @@ fn s05() -> Result<Value, String> {
             && saved["input"] == json!({"kind":"daw_bridge","pipe":"studio-a"}),
         "unknown style or input was not kept",
     )?;
-    // A copy carries the kept style too.
     let copy = created(action(
         &mut h.ws,
         WorkspaceAction::SplitModule {
@@ -1363,8 +1306,6 @@ fn s05() -> Result<Value, String> {
         &mut h.ws,
         WorkspaceAction::CloseModule { instance_id: copy },
     )?;
-    // Choosing the shown fallback style in the settings panel is an explicit
-    // choice and replaces the kept one.
     open_settings(
         &mut h,
         oscilloscope,
@@ -1376,8 +1317,6 @@ fn s05() -> Result<Value, String> {
             == LINE_OSCILLOSCOPE_STYLE_ID,
         "an explicit style choice did not replace the kept one",
     )?;
-    // Notices are plain text (no text cursor); Copy puts all of them on the
-    // clipboard, one per line.
     h.in_settings(&[SettingsItem::Tab(Tab::Workspace)])?;
     h.point_at(ControlKey::Settings(SettingsItem::Notice(0)))?;
     let cursor = h.window(SETTINGS)?.cursor;
@@ -1392,7 +1331,7 @@ fn s05() -> Result<Value, String> {
         copied.as_slice() == [expected.clone()],
         &format!("Copy put {copied:?} on the clipboard, not {expected:?}"),
     )?;
-    // Neither window touches the other: Group is not offered.
+    // The restored windows do not touch, leaving no eligible Group neighbor.
     h.in_settings(&[SettingsItem::Tab(Tab::Window)])?;
     let group = h.locate(&ControlKey::Settings(SettingsItem::Group));
     check(
@@ -1415,7 +1354,6 @@ fn s05() -> Result<Value, String> {
     )?;
     drop(h);
 
-    // A session file from another build is protected.
     let future = br#"{"format_version": 99, "windows": []}"#;
     write_bytes(&dir.session(), future)?;
     let (mut ws, _driver) = reopen(&dir)?;
@@ -1428,7 +1366,6 @@ fn s05() -> Result<Value, String> {
             && o.preset == Some(builtin("Default")),
         "an unreadable session did not open as the protected Default preset",
     )?;
-    // A single notice shows in full when the line fits, else as a count.
     let fits = ws.badge_text(|_| true).unwrap_or_default();
     let narrow = ws.badge_text(|_| false).unwrap_or_default();
     check(
@@ -1466,9 +1403,7 @@ fn s05() -> Result<Value, String> {
     Ok(json!({"missing":missing,"notices":o.notices.len()}))
 }
 
-/// Save as a preset through the naming panel, then repeated loading of presets:
-/// old instances and their subscriptions are released, nothing accumulates.
-/// Deleting the preset the session came from leaves nothing to save over.
+/// Preset naming, repeated loading and deletion leave no orphaned instances or subscriptions.
 fn s06() -> Result<Value, String> {
     let dir = TempDir::new("s06")?;
     let (ws, _driver) = workspace()?;
@@ -1497,7 +1432,7 @@ fn s06() -> Result<Value, String> {
         ControlKey::LeafBody(a),
         &[SettingsItem::Tab(Tab::Workspace)],
     )?;
-    // A built-in preset's name, in any letter case (Windows file names), is taken.
+    // Reserve built-in names case-insensitively, matching Windows filename comparisons.
     check(
         action(
             &mut h.ws,
@@ -1523,7 +1458,6 @@ fn s06() -> Result<Value, String> {
     for _ in taken.chars() {
         h.key(egui::Key::Backspace);
     }
-    // Typed text (a space included) is text, not the Space shortcut.
     h.frame(vec![Event::Text("A 2".to_owned())]);
     h.frame(vec![]);
     check(
@@ -1536,7 +1470,6 @@ fn s06() -> Result<Value, String> {
         dir.preset("A 2").exists() && o.preset == Some(saved("A 2")) && o.modules.len() == 3,
         &format!("Save as did not save the preset: {:?}", o.control_error),
     )?;
-    // The built-in Default from the list replaces everything.
     h.in_settings(&[SettingsItem::BuiltinPreset(0)])?;
     let o = h.ws.observation();
     check(
@@ -1577,7 +1510,6 @@ fn s06() -> Result<Value, String> {
             ));
         }
     }
-    // Loading through the settings window's list of saved presets.
     let names = h.ws.saved_presets();
     let index = names
         .iter()
@@ -1590,7 +1522,6 @@ fn s06() -> Result<Value, String> {
         "menu load failed",
     )?;
     settle_subscriptions(&h.ws, 3)?;
-    // Deleting asks first; the session keeps running without a preset to save to.
     h.in_settings(&[SettingsItem::DeletePreset(index)])?;
     check(
         dir.preset("A 2").exists(),
@@ -1617,11 +1548,7 @@ fn s06() -> Result<Value, String> {
     )
 }
 
-/// Windows land on usable displays: windows off every monitor come back while
-/// partly visible ones stay, a session from a display that is gone opens on the
-/// current one, touching windows stay touching on a display of another size and
-/// scale, and a built-in bar spans the display of the window the settings were
-/// opened from.
+/// Restore and rescue across display sizes and scales preserve visibility and touching groups.
 fn s07() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let mut h = Harness::new(ws);
@@ -1652,9 +1579,9 @@ fn s07() -> Result<Value, String> {
 
     drop(h);
 
-    // A session saved on a display that is no longer there.
     let dir = TempDir::new("s07")?;
     let spectrum = json!({"node":"leaf","module":{"type_id":SPECTRUM_MODULE_ID}});
+    // The saved monitor lies left of the current desktop and no longer exists.
     dir.write_session(&json!({"format_version":2,
         "displays":[{"work_area":[1920.0,1040.0],"hint":{"origin_px":[-1920.0,0.0],"scale":1.0}}],
         "windows":[{"display":0,"frame":[100.0,300.0,500.0,600.0],"layout":spectrum}]}))?;
@@ -1669,7 +1596,7 @@ fn s07() -> Result<Value, String> {
     )?;
     drop(restored);
 
-    // Touching windows on a larger display at 125%.
+    // Restore touching windows from a 100% display onto a larger display at 125%.
     dir.write_session(
         &json!({"format_version":2,"displays":[{"work_area":[1920.0,1040.0]}],
         "windows":[{"display":0,"frame":[100.0,100.0,500.0,400.0],"layout":spectrum},
@@ -1700,7 +1627,6 @@ fn s07() -> Result<Value, String> {
     )?;
     drop(scaled);
 
-    // The built-in bar on a second display at 200%, where the window is.
     let desktop = FakeDesktop::with_displays(vec![
         Display {
             work: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1920.0, 1040.0)),
@@ -1750,10 +1676,8 @@ fn s07() -> Result<Value, String> {
     )
 }
 
-/// A saved explicit binding (as a plugin or an older file may carry): kept on
-/// restore, but an edit through the settings still changes only its instance.
-/// Then detach from a minimized window, the built-in Default loaded from the
-/// settings, a command to a minimized window and settings for an empty window.
+/// Restored bindings share analysis, but settings edits fork only the edited instance.
+/// Minimized and empty windows remain operable.
 fn s08() -> Result<Value, String> {
     let dir = TempDir::new("s08")?;
     let spectrum = |extra: Value| {
@@ -1765,8 +1689,7 @@ fn s08() -> Result<Value, String> {
             "outputs":[{"node":2,"keep":"latest"},extra]}})
     };
     let bound = json!({"node":3,"keep":"latest","binding":9});
-    // The second window is smaller than an empty window may be, which its Module
-    // allows.
+    // The Module permits a window smaller than the empty-window minimum.
     let file = json!({"format_version":2,"theme":{"preset":"light"},"displays":[primary_display()],
         "windows":[{"display":0,"frame":[300.0,200.0,1200.0,620.0],
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
@@ -1817,8 +1740,7 @@ fn s08() -> Result<Value, String> {
         "the remaining binding did not keep its file number",
     )?;
 
-    // Detach from the settings window while the source window has been minimized
-    // for longer than the detach timeout: timed on the app clock, it still opens.
+    // Advance beyond the detach timeout while minimized to expose stale app-clock timing.
     h.window_mut(window)?.minimized = true;
     h.frame_window(window, vec![])?;
     h.display_time += std::time::Duration::from_secs(10);
@@ -1839,7 +1761,6 @@ fn s08() -> Result<Value, String> {
         ),
     )?;
 
-    // The built-in Default from the settings: one centered Oscilloscope, Dark.
     h.in_settings(&[
         SettingsItem::Tab(Tab::Workspace),
         SettingsItem::BuiltinPreset(0),
@@ -1866,8 +1787,6 @@ fn s08() -> Result<Value, String> {
         &format!("Default was not centered: {position:?}"),
     )?;
 
-    // A window minimized while the settings window edits it still receives the
-    // native command.
     let only = o.modules[0].instance_id;
     h.focus = new_window;
     h.settings(
@@ -1891,7 +1810,6 @@ fn s08() -> Result<Value, String> {
     h.window_mut(new_window)?.minimized = false;
     h.frame_window(new_window, vec![])?;
 
-    // An empty window's right click opens the Window tab, which can add a module.
     action(
         &mut h.ws,
         WorkspaceAction::CloseModule { instance_id: only },
@@ -1909,8 +1827,7 @@ fn s08() -> Result<Value, String> {
     Ok(json!({"restored_spectrum_nodes":restored,"default_position":[position.x,position.y]}))
 }
 
-/// The module outline a window drew in its last pass, and whether its rect is
-/// that module's leaf.
+/// The boolean reports whether the outline coincides with the module's leaf.
 fn outlined(h: &Harness, window: WindowId) -> Option<(ModuleInstanceId, bool)> {
     let o = h.ws.observation();
     let w = o.window(window)?;
@@ -1927,11 +1844,7 @@ fn outlined(h: &Harness, window: WindowId) -> Option<(ModuleInstanceId, bool)> {
     Some((id, exact))
 }
 
-/// Left-click `body` in `window` with raw pointer events (whatever lies on top
-/// takes them, as on the desktop), then let the settings window and `window` run
-/// (the windows draw what the settings pass decided). A leaf is clicked in its
-/// middle; an empty window a quarter in from its corner, clear of the centered
-/// Add module button.
+/// Raw input allows overlays to intercept selection; the empty-window point avoids Add module.
 fn select(h: &mut Harness, window: WindowId, body: ControlKey) -> Result<(), String> {
     h.focus = window;
     h.frame(vec![]);
@@ -1958,13 +1871,7 @@ fn select(h: &mut Harness, window: WindowId, body: ControlKey) -> Result<(), Str
     Ok(())
 }
 
-/// Selecting: with the settings window open, a left click on a module points the
-/// Module and Window tabs at it (the Workspace and Theme tabs stay and show it
-/// later) without focusing the settings window; on the Window tab a click on an
-/// empty window selects it. The Module tab outlines the edited module; "Move to…"
-/// outlines the moving one wherever the settings are. Closed settings, locked
-/// windows and the move overlay take no selection, and a value typed for one
-/// module never reaches another.
+/// Selection and outlines follow settings tabs without leaking edits across modules or overlays.
 fn s09() -> Result<Value, String> {
     let (mut ws, _driver) = workspace()?;
     let a = first_leaf(&ws)?;
@@ -1998,14 +1905,12 @@ fn s09() -> Result<Value, String> {
     h.frame_all()?;
     let target = |h: &Harness| h.ws.observation().settings_target;
 
-    // Closed settings: a left click selects nothing and opens nothing.
     select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
     check(
         !h.ws.settings_open() && outlined(&h, FIRST_WINDOW).is_none(),
         "a left click without the settings window selected or opened something",
     )?;
 
-    // Module tab: the edited module is outlined, a left click moves both.
     open_settings(&mut h, a, &[])?;
     h.frame_window(FIRST_WINDOW, vec![])?;
     check(
@@ -2038,14 +1943,12 @@ fn s09() -> Result<Value, String> {
             outlined(&h, FIRST_WINDOW)
         ),
     )?;
-    // An empty window has nothing for the Module tab.
     select(&mut h, empty, ControlKey::EmptyBody)?;
     check(
         target(&h) == Some((Some(c), Some(second))),
         "an empty window replaced the Module tab's module",
     )?;
 
-    // Window tab: the window of the clicked module, or the clicked empty window.
     h.in_settings(&[SettingsItem::Tab(Tab::Window)])?;
     select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(a))?;
     let window_outline =
@@ -2071,7 +1974,6 @@ fn s09() -> Result<Value, String> {
         ),
     )?;
 
-    // Workspace tab: it stays; the Module tab then shows the clicked module.
     h.in_settings(&[SettingsItem::Tab(Tab::Workspace)])?;
     select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
     select(&mut h, empty, ControlKey::EmptyBody)?;
@@ -2088,7 +1990,6 @@ fn s09() -> Result<Value, String> {
         ),
     )?;
 
-    // A locked window takes no selection.
     action(
         &mut h.ws,
         WorkspaceAction::SetLocked {
@@ -2109,7 +2010,6 @@ fn s09() -> Result<Value, String> {
         },
     )?;
 
-    // A value typed for one module stays with it: selecting another drops it.
     let max_frequency = |h: &Harness, id| {
         h.ws.observation().module(id).and_then(|m| {
             m.view
@@ -2134,8 +2034,6 @@ fn s09() -> Result<Value, String> {
         &format!("a typed value crossed to another module: {before:?} -> {after:?}"),
     )?;
 
-    // "Move to…" outlines the moving module whatever the settings show, and the
-    // overlay takes no selection.
     h.in_settings(&[SettingsItem::MoveTo, SettingsItem::Tab(Tab::Theme)])?;
     select(&mut h, FIRST_WINDOW, ControlKey::LeafBody(b))?;
     let picking = (outlined(&h, FIRST_WINDOW), target(&h));

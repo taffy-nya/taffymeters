@@ -136,39 +136,31 @@ impl Rgba8Image {
     }
 }
 
+/// Inclusive pixel coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct DiffBoundingBox {
-    /// Inclusive left edge in pixels.
     pub(crate) min_x: u32,
-    /// Inclusive top edge in pixels.
     pub(crate) min_y: u32,
-    /// Inclusive right edge in pixels.
     pub(crate) max_x: u32,
-    /// Inclusive bottom edge in pixels.
     pub(crate) max_y: u32,
 }
 
+/// Optional metrics are absent when dimensions differ: unlike pixel grids are not compared.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ComparisonMetrics {
     pub(crate) dimensions_match: bool,
     pub(crate) expected_size: [u32; 2],
     pub(crate) actual_size: [u32; 2],
-    /// `None` when dimensions differ, because the pixel grids are not comparable.
     pub(crate) changed_pixels: Option<u64>,
-    /// `None` when dimensions differ.
     pub(crate) total_pixels: Option<u64>,
-    /// `None` when dimensions differ.
     pub(crate) max_channel_delta: Option<u8>,
-    /// RGBA channel order; `None` when dimensions differ.
+    /// RGBA channel order.
     pub(crate) mean_absolute_error: Option<[f64; 4]>,
     pub(crate) diff_bbox: Option<DiffBoundingBox>,
 }
 
-/// An offscreen DX12 renderer with persistent egui texture state.
-///
-/// Feed every `FullOutput` from a scene's warm-up and event frames through this object in
-/// sequence. egui emits its font atlas only when it changes, so constructing a renderer only
-/// after the last context frame would omit textures created by earlier frames.
+/// Feed every warm-up and event frame in sequence: egui only emits changed textures,
+/// so rendering just the final frame would miss the earlier font atlas upload.
 pub(crate) struct OffscreenRenderer {
     _instance: wgpu::Instance,
     device: wgpu::Device,
@@ -321,7 +313,6 @@ impl OffscreenRenderer {
         })
     }
 
-    /// Render one complete egui frame and read it back as tightly packed RGBA8.
     pub(crate) fn render(
         &mut self,
         context: &egui::Context,
@@ -574,7 +565,7 @@ impl OffscreenRenderer {
     }
 }
 
-/// Decode a PNG as RGBA8 without resizing or converting through a display color space.
+/// Decode without resizing or conversion through a display color space.
 pub(crate) fn load_png(path: &Path) -> Result<Rgba8Image, VisualError> {
     let dimensions = png_reader(path)?
         .into_dimensions()
@@ -616,8 +607,6 @@ fn png_reader(path: &Path) -> Result<ImageReader<BufReader<File>>, VisualError> 
     Ok(reader)
 }
 
-/// Compare two PNG files after decoding both to RGBA8. Size changes are returned as a
-/// non-matching comparison; unreadable/corrupt PNG files are errors.
 pub(crate) fn compare_png_paths(
     expected_path: &Path,
     actual_path: &Path,
@@ -627,8 +616,6 @@ pub(crate) fn compare_png_paths(
     compare_rgba(expected.as_view(), actual.as_view())
 }
 
-/// Compare equal-sized images exactly, including alpha. Pixels with any differing channel are
-/// counted once. A dimension mismatch is reported without scaling or comparing unlike grids.
 pub(crate) fn compare_rgba(
     expected: Rgba8View<'_>,
     actual: Rgba8View<'_>,
@@ -715,7 +702,6 @@ pub(crate) fn compare_rgba(
     })
 }
 
-/// Save tightly packed RGBA8 bytes as PNG. This never rescales or changes channel order.
 pub(crate) fn save_png(
     path: &Path,
     width: u32,
@@ -738,8 +724,7 @@ pub(crate) fn save_png(
     .map_err(|error| png_error(path, error))
 }
 
-/// Save a full-size visual diff: changed pixels are red, pixels present in only one image are
-/// magenta, and unchanged pixels are black.
+/// Changed pixels are red, pixels present in only one image magenta, unchanged pixels black.
 pub(crate) fn save_diff_png(
     path: &Path,
     expected: Rgba8View<'_>,
@@ -884,6 +869,7 @@ impl Wake for ChannelWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
+        // A full channel already carries a wake; blocking could deadlock a self-waking poll.
         let _ = self.0.try_send(());
     }
 }

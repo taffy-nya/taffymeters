@@ -1,7 +1,5 @@
-//! `preview --trace <file>`: JSON lines describing Workspace ownership, analysis
-//! demand and the real control rects of each window's last UI pass. A native
-//! acceptance driver reads it to locate controls (logical points in the window's
-//! client area) and to prove instance identity; it never feeds anything back.
+//! Native acceptance drivers consume this trace without feeding it back into the app.
+//! Control rects use logical points in each window's client area.
 
 use std::{
     collections::HashMap,
@@ -22,13 +20,10 @@ pub(crate) struct Trace {
     started: Instant,
     last_state: String,
     last_targets: HashMap<WindowId, String>,
-    /// Sampling times: state and control rects are captured at most every
-    /// `SAMPLE_INTERVAL`, so tracing barely perturbs the CPU being measured.
+    /// Sampling limits tracing's effect on measured CPU cost.
     state_sampled: Option<Instant>,
-    /// Settings window state of the last recorded `state`.
     state_settings_open: Option<bool>,
     targets_sampled: HashMap<WindowId, Instant>,
-    /// UI passes per window since `rate_started`, plus analysis counters then.
     passes: HashMap<WindowId, u64>,
     rate_started: Option<(
         Instant,
@@ -62,9 +57,6 @@ impl Trace {
         let _ = self.out.flush();
     }
 
-    /// Count one UI pass of `window`; about once a second write the passes per
-    /// window, the analysis evaluations per second and the worker thread's CPU over
-    /// that interval.
     pub(crate) fn pass(&mut self, workspace: &Workspace, window: WindowId) {
         *self.passes.entry(window).or_default() += 1;
         let handle = workspace.dataflow_handle_for_automation();
@@ -109,8 +101,7 @@ impl Trace {
         self.rate_started = Some((now, metrics, worker));
     }
 
-    /// Record ownership / demand when it changed. Sampled, except that a settings
-    /// window opening or closing is always recorded: it may be the last pass.
+    /// Settings transitions bypass sampling: closing may be the last UI pass.
     pub(crate) fn state(&mut self, workspace: &Workspace) {
         let now = Instant::now();
         let settings_open = workspace.settings_open();
@@ -162,13 +153,11 @@ impl Trace {
         }
     }
 
-    /// Record the control rects of `window`'s last pass when they changed.
     pub(crate) fn targets(&mut self, workspace: &Workspace, window: WindowId) {
         let targets = workspace.control_targets(window);
         self.write_targets(window, json!(window.0), targets);
     }
 
-    /// Record the settings window's control rects (`"window": "settings"`).
     pub(crate) fn settings_targets(&mut self, workspace: &Workspace) {
         let targets = workspace.settings_targets();
         self.write_targets(WindowId(u64::MAX), json!("settings"), targets);

@@ -57,7 +57,6 @@ fn capture_frame(
         .map_err(|e| e.to_string())
 }
 
-/// Setup for an image of a single full-window Module with an optional style.
 fn single_module(
     type_id: &'static str,
     style: Option<&'static str>,
@@ -178,7 +177,6 @@ fn image_case(
     let candidate = output.join(format!("{id}.png"));
     let manifest_path = output.join(format!("{id}.json"));
     let mut case = judge_baseline(id, &manifest, &image, baseline, output);
-    // Retain the actual image whenever it is not an approved pixel match.
     if case.status != Status::Pass {
         visual::save_png(
             &candidate,
@@ -199,8 +197,7 @@ fn image_case(
     Ok((case, manifest))
 }
 
-/// Judge one rendered image against a reviewed baseline directory. A missing or
-/// unapproved baseline is never auto-accepted; integrity problems are failures.
+/// Missing or unapproved baselines require human review; integrity problems fail.
 fn judge_baseline(
     id: &str,
     manifest: &Value,
@@ -313,7 +310,6 @@ fn repeat_frame(renderer: &mut visual::OffscreenRenderer) -> Result<image::RgbaI
 }
 
 pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline: Option<&Path>) {
-    // V05 checks that the run never modifies a supplied baseline.
     let baseline_before = baseline.map(tree_digest);
     let mut renderer = match visual::OffscreenRenderer::new() {
         Ok(renderer) => renderer,
@@ -459,8 +455,6 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
             Err(e) => Case::fail("V03", "2x DPI frame", e),
         },
     );
-    // V06: a three-leaf BSP layout (Spectrum | Waveform over Level Meter) at 1x and
-    // 2x; layout, dividers and per-leaf clipping come from the production UI body.
     for (id, dpi) in [("workspace-layout", 1.0), ("workspace-layout-2x", 2.0)] {
         report.cases.push(
             match image_case(&mut renderer, id, workspace_layout, dpi, &images, baseline) {
@@ -472,8 +466,6 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
             },
         );
     }
-    // V07: the same layout under the Light preset with one instance override; the
-    // chrome, egui visuals and every Module follow the theme, the override stays.
     report.cases.push(
         match image_case(
             &mut renderer,
@@ -526,8 +518,6 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
         });
 }
 
-/// V04: two independent scene runs must match, and a one-pixel change to the
-/// comparator input must be detected and located.
 fn repeat_case(a: &image::RgbaImage, b: &image::RgbaImage) -> Case {
     let repeat = match visual::compare_rgba(rgba_view(a), rgba_view(b)) {
         Ok(metrics) if metrics.dimensions_match && metrics.changed_pixels == Some(0) => metrics,
@@ -562,7 +552,6 @@ fn repeat_case(a: &image::RgbaImage, b: &image::RgbaImage) -> Case {
     }
 }
 
-/// Relative path and SHA-256 of every file below `root`, sorted.
 fn tree_digest(root: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -582,8 +571,6 @@ fn tree_digest(root: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(files)
 }
 
-/// V05: drive `judge_baseline` through every protection path with small local
-/// baselines and require the documented status for each; none may be modified.
 fn baseline_guards(root: &Path) -> Result<Value, String> {
     const ID: &str = "V05-probe";
     let io = |e: std::io::Error| e.to_string();

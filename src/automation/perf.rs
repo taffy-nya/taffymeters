@@ -1,8 +1,5 @@
-//! `dataflow-perf`: analysis worker cost of real Module sets, without windows or
-//! audio devices. A manual sweep source feeds 480-frame blocks (a WASAPI-sized
-//! callback) through the real transport, worker and factories; the headless UI draws
-//! every 800 frames (60 fps of audio time) so readers hold and release results as in
-//! the product. Measures worker thread CPU time and heap allocations per audio second.
+//! Headless draws retain and release analysis results at 60 fps of audio time,
+//! matching reader lifetimes in the product without measuring native windows or devices.
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +22,7 @@ use super::{
     support::{add_module, replace_first},
 };
 
+// A 10 ms WASAPI-sized callback at 48 kHz.
 const BLOCK_FRAMES: usize = 480;
 const DRAW_EVERY_FRAMES: u64 = 800;
 /// Longer than the longest built-in History (Waveform, 10 s), so measurement starts
@@ -32,7 +30,6 @@ const DRAW_EVERY_FRAMES: u64 = 800;
 const WARMUP_FRAMES: u64 = 528_000;
 const MEASURED_FRAMES: u64 = 1_440_000;
 
-/// Every built-in type besides the Spectrum the workspace starts with.
 const ALL_OTHER_TYPES: [&str; 7] = [
     SPECTROGRAM_MODULE_ID,
     OSCILLOSCOPE_MODULE_ID,

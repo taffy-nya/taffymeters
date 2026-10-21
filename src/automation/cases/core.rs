@@ -40,13 +40,11 @@ pub(super) const CASES: [(&str, Scenario); 10] = [
     ("C10", c10),
 ];
 
-/// Merged source PCM kept as `keep`.
 fn pcm_spec(keep: Keep) -> (DataSpec, OutputId) {
     let mut spec = DataSpec::new();
     let output = spec.output(SOURCE, keep);
     (spec, output)
 }
-/// One channel's 2048/512 FFT, latest result only.
 fn fft_spec(channel: ChannelSelection) -> Result<(DataSpec, OutputId), String> {
     let mut spec = DataSpec::new();
     let channel = spec.add(SOURCE, NodeSpec::Channel(channel));
@@ -133,9 +131,7 @@ fn fft_run(block_frames: usize) -> Result<(f32, f32, u64), String> {
         (left_bins[128] - expected).abs() <= 0.02 && (right_bins[256] - expected).abs() <= 0.02,
         "tone calibration error",
     )?;
-    // No new audio: repeated reads spread over several 30 Hz publication periods of
-    // wall time must not advance the result version (UI-only display-time advance on a
-    // real App is covered by C07).
+    // Span several 30 Hz publication periods without supplying new audio.
     for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(40));
         check(
@@ -274,9 +270,7 @@ fn c03() -> Result<Value, String> {
     Ok(json!({"frontier":3200,"discontinuities":snapshot.discontinuity_count,"realtime":realtime}))
 }
 
-/// Bounded smoke of the wall-clock synthetic producer: frames advance with time,
-/// stop while paused, resume, and the producer is joined on drop. Wall-clock sample
-/// accuracy is not a pass threshold.
+/// Wall-clock sample accuracy is deliberately not a pass threshold.
 fn realtime_smoke() -> Result<Value, String> {
     let frontier = |handle: &crate::dataflow::DataflowHandle| {
         handle.processed_through_frame().map_err(|e| e.to_string())
@@ -293,8 +287,7 @@ fn realtime_smoke() -> Result<Value, String> {
         live.reader().source_status().state == SourceState::Paused,
         "realtime pause not observable",
     )?;
-    // Pause returns only after the producer stopped writing; wait for the worker to
-    // drain what was already queued, then confirm nothing new arrives.
+    // Pause returns after the producer stops writing; the worker may still have queued audio.
     let mut paused_at = frontier(&handle)?;
     let settle_deadline = deadline();
     loop {
@@ -521,7 +514,6 @@ fn c05() -> Result<Value, String> {
         "Resume entry failed",
     )?;
     let old = h.locate(&ControlKey::LeafBody(c))?;
-    // Shrinking the application window does not shrink the settings window.
     h.set_size(egui::vec2(120.0, 60.0));
     h.frame(vec![]);
     check(
@@ -550,7 +542,6 @@ fn c05() -> Result<Value, String> {
         h.ws.observation().source_status.state == SourceState::Running,
         "tiny-window settings Resume target missed",
     )?;
-    // Escape in the settings window closes it; its controls are gone.
     h.focus = SETTINGS;
     h.key(egui::Key::Escape);
     h.focus = FIRST_WINDOW;
@@ -593,7 +584,6 @@ fn c06() -> Result<Value, String> {
                     .any(|key| matches!(key, ControlKey::Settings(SettingsItem::Channel(_)))),
             &format!("{type_id} settings expose Channel or miss their entries"),
         )?;
-        // Escape in the settings window closes only the settings window.
         h.focus = SETTINGS;
         h.key(egui::Key::Escape);
         h.focus = FIRST_WINDOW;
@@ -604,7 +594,6 @@ fn c06() -> Result<Value, String> {
         )?;
         non_channel.push(json!({"type":type_id,"id":id.0}));
     }
-    // Each press/release pair applies once and no key stays held into idle frames.
     h.key(egui::Key::Space);
     check(
         h.ws.observation().source_status.state == SourceState::Paused,
@@ -722,8 +711,6 @@ struct WaveformRun {
     restored: Vec<(egui::Rect, egui::Color32)>,
 }
 
-/// Filled rectangles drawn this pass: individual rect shapes plus the quads of the
-/// batched fill meshes the render target emits.
 fn filled_rects(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
     let mut rects = Vec::new();
     for clipped in &output.shapes {
@@ -742,10 +729,7 @@ fn filled_rects(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
     rects
 }
 
-/// One Waveform History instance (the window's only leaf) receives `HIDDEN_FRAMES`
-/// of audio. With `hidden` its window runs no UI pass meanwhile (a minimized /
-/// invisible viewport is not drawn); otherwise it is drawn after every second of
-/// audio. Both runs then draw the window once with identical input.
+/// Skipping UI passes models an invisible viewport; both runs end with identical input.
 fn waveform_visibility_run(hidden: bool) -> Result<WaveformRun, String> {
     let (mut ws, mut driver) = workspace()?;
     let handle = ws.dataflow_handle_for_automation();
@@ -956,7 +940,7 @@ fn c10() -> Result<Value, String> {
             .dimensions_match,
         "dimension mismatch not detected",
     )?;
-    // Exercise the project comparator on real files; core has no output directory.
+    // Core scenarios have no output directory, so file comparisons need a temporary one.
     let dir = TempDir::new("c10")?;
     let good = dir.path().join("good.png");
     let bad = dir.path().join("bad.png");
