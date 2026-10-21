@@ -502,8 +502,10 @@ fn closing_consumers_keeps_shared_work_and_the_last_close_releases_everything() 
     capture.write(&mono_tone(32, 3_000.0, 0.25));
     latest_at(&second.reader(), output, 96);
     drop(second);
-    let released = settle(&dataflow, "release", |m| m.subscriptions == 0);
-    assert_eq!((released.nodes, released.rings), (0, 0));
+    // The worker publishes the subscription count before the node and ring counts.
+    let released = settle(&dataflow, "release", |m| {
+        m.subscriptions == 0 && m.nodes == 0 && m.rings == 0
+    });
     let evaluations = released.fft_evaluations;
     write_processed(&mut capture, &dataflow, 1, &mono_tone(64, 3_000.0, 0.25));
     assert_eq!(
