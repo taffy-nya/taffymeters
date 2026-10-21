@@ -6,6 +6,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use eframe::{egui_wgpu, wgpu};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+};
 
 pub mod audio;
 pub mod dataflow;
@@ -21,6 +25,7 @@ pub mod theme;
 mod app;
 #[cfg(feature = "automation")]
 mod automation;
+mod crash;
 mod icon;
 mod live;
 mod persistence;
@@ -40,7 +45,7 @@ fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
     options
 }
 
-fn main() -> eframe::Result<()> {
+fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args
         .first()
@@ -51,44 +56,50 @@ fn main() -> eframe::Result<()> {
         #[cfg(not(feature = "automation"))]
         {
             eprintln!("--automation requires a build with the automation feature");
-            std::process::exit(2);
-        }
-    }
-    let store = match parse_config_dir(&args) {
-        Ok(Some(root)) => persistence::WorkspaceStore::new(root),
-        Ok(None) => match persistence::WorkspaceStore::default_root() {
-            Ok(root) => persistence::WorkspaceStore::new(root),
-            Err(error) => {
-                eprintln!("{error}");
-                std::process::exit(1);
-            }
-        },
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    };
-    let live = match LiveAudio::open_default(LiveAudioConfig::default()) {
-        Ok(live) => live,
-        Err(error) => {
-            eprintln!("{error}");
             std::process::exit(1);
         }
+    }
+    let root = match parse_config_dir(&args) {
+        Ok(Some(root)) => root,
+        Ok(None) => persistence::WorkspaceStore::default_root()
+            .unwrap_or_else(|error| exit_with_error(&error)),
+        Err(error) => exit_with_error(&error),
     };
+    crash::install(root.clone());
+    let store = persistence::WorkspaceStore::new(root);
+    let live = LiveAudio::open_default(LiveAudioConfig::default())
+        .unwrap_or_else(|error| exit_with_error(&error.to_string()));
     let descriptor = Arc::clone(live.reader().descriptor());
     eprintln!(
         "system audio: {} Hz, {} channels, {:?}",
         descriptor.sample_rate_hz, descriptor.channel_count, descriptor.channel_layout
     );
     let desktop = Arc::new(workspace::NativeDesktop);
-    let workspace = match workspace::Workspace::open(live, store, desktop) {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            eprintln!("module initialization failed: {error}");
-            std::process::exit(1);
-        }
-    };
-    run_window(app::App::new(workspace))
+    let workspace = workspace::Workspace::open(live, store, desktop)
+        .unwrap_or_else(|error| exit_with_error(&format!("couldn't open the workspace: {error}")));
+    if let Err(error) = run_window(app::App::new(workspace)) {
+        exit_with_error(&format!("couldn't open the window: {error}"));
+    }
+}
+
+fn exit_with_error(message: &str) -> ! {
+    eprintln!("{message}");
+    #[cfg(windows)]
+    {
+        let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let text = wide(&format!("Taffymeters couldn't start.\n\n{message}"));
+        let caption = wide("Taffymeters");
+        // SAFETY: both strings are NUL-terminated and outlive the call; no owner window.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                caption.as_ptr(),
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+            )
+        };
+    }
+    std::process::exit(1);
 }
 
 fn parse_config_dir(args: &[String]) -> Result<Option<PathBuf>, String> {
@@ -117,6 +128,8 @@ fn run_window(app: app::App) -> eframe::Result<()> {
         options,
         Box::new(move |creation_context| {
             app.install_waker(&creation_context.egui_ctx);
+            #[cfg(windows)]
+            app.save_on_session_end();
             Ok(Box::new(app))
         }),
     )

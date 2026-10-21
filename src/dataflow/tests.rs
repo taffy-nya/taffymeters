@@ -53,7 +53,7 @@ fn fixture(
         Arc::clone(&telemetry),
     )
     .unwrap();
-    let (owner, handle) = Dataflow::spawn(descriptor, processing, Arc::clone(&telemetry));
+    let (owner, handle) = Dataflow::spawn(descriptor, processing, Arc::clone(&telemetry)).unwrap();
     capture.set_worker(owner.worker_thread());
     (
         capture,

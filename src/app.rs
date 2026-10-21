@@ -4,7 +4,7 @@
 
 use std::{
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError, TryLockError,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -62,6 +62,23 @@ impl App {
         })));
     }
 
+    #[cfg(windows)]
+    pub(crate) fn save_on_session_end(&self) {
+        let workspace = Arc::downgrade(&self.workspace);
+        crate::workspace::on_session_end(Box::new(move || {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            // Waiting would deadlock if a pass holds the lock; the debounced save covers it.
+            let mut workspace = match workspace.try_lock() {
+                Ok(workspace) => workspace,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            workspace.autosave();
+        }));
+    }
+
     /// eframe throttles hidden or minimized roots to 10 fps, so this off-screen host stays visible.
     pub(crate) fn host_builder() -> egui::ViewportBuilder {
         egui::ViewportBuilder::default()
@@ -108,6 +125,8 @@ impl eframe::App for App {
         workspace.tick(self.started_at.elapsed());
         if workspace.windows().is_empty() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
+        } else if let Some(delay) = workspace.autosave_when_settled() {
+            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
         }
     }
 

@@ -137,7 +137,7 @@ impl PcmFixture {
         )
         .unwrap();
         let (dataflow, handle) =
-            Dataflow::spawn(Arc::clone(&descriptor), endpoint, Arc::clone(&telemetry));
+            Dataflow::spawn(Arc::clone(&descriptor), endpoint, Arc::clone(&telemetry)).unwrap();
         capture.set_worker(dataflow.worker_thread());
         Self {
             capture,

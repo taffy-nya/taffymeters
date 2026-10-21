@@ -48,6 +48,9 @@ use layout::{Layout, LayoutError};
 pub(crate) use layout::{Side, SplitId};
 #[cfg(feature = "automation")]
 pub(crate) use moving::{MoveRequest, WindowTracker};
+#[cfg(windows)]
+pub(crate) use native::on_session_end;
+use persist::SessionAutosave;
 use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
 pub(crate) use settings_window::{SettingsItem, Tab, swatches};
@@ -456,6 +459,7 @@ pub(crate) struct Workspace {
     store: Option<WorkspaceStore>,
     /// The session file could not be read; saving must not replace it.
     protected: bool,
+    autosave: SessionAutosave,
     desktop: Arc<dyn DesktopProbe + Send + Sync>,
     published_groups: Vec<(WindowId, u64)>,
     theme: ThemeSettings,
@@ -503,6 +507,7 @@ impl Workspace {
             preset: None,
             store: None,
             protected: false,
+            autosave: SessionAutosave::default(),
             desktop,
             published_groups: Vec::new(),
             chrome: theme.global_palette(),

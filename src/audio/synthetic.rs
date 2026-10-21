@@ -1041,7 +1041,7 @@ mod tests {
         let (mut endpoint, processing) =
             create_block_transport(2, 8, 48, Arc::clone(&telemetry)).unwrap();
         let (dataflow, handle) =
-            Dataflow::spawn(Arc::clone(&descriptor), processing, Arc::clone(&telemetry));
+            Dataflow::spawn(Arc::clone(&descriptor), processing, Arc::clone(&telemetry)).unwrap();
         endpoint.set_worker(dataflow.worker_thread());
         let mut source = RealtimeSource::start(
             endpoint,
@@ -1100,7 +1100,7 @@ mod tests {
         let (mut endpoint, processing) =
             create_block_transport(2, 64, 48, Arc::clone(&telemetry)).unwrap();
         let (dataflow, handle) =
-            Dataflow::spawn(Arc::clone(&descriptor), processing, Arc::clone(&telemetry));
+            Dataflow::spawn(Arc::clone(&descriptor), processing, Arc::clone(&telemetry)).unwrap();
         endpoint.set_worker(dataflow.worker_thread());
 
         let mut source = RealtimeSource::start(

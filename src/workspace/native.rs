@@ -2,9 +2,12 @@
 //! Never hold the tracker lock while moving windows: synchronous
 //! `WM_WINDOWPOSCHANGED` messages re-enter the subclass for every moved window.
 
-use std::sync::{
-    LazyLock, Mutex, MutexGuard, PoisonError,
-    atomic::{AtomicIsize, Ordering},
+use std::{
+    cell::RefCell,
+    sync::{
+        LazyLock, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicIsize, Ordering},
+    },
 };
 
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
@@ -24,12 +27,12 @@ use windows_sys::Win32::{
             GetCursorPos, GetMessagePos, GetWindowRect, GetWindowTextW, HWND_TOP, IsIconic,
             IsZoomed, MINMAXINFO, SC_KEYMENU, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
             SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, USER_DEFAULT_SCREEN_DPI,
-            WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-            WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_RBUTTONDOWN, WM_SIZING, WM_SYSCHAR,
-            WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED, WMSZ_BOTTOM,
-            WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
-            WMSZ_TOPRIGHT,
+            WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_ENDSESSION, WM_ENTERSIZEMOVE,
+            WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+            WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_RBUTTONDOWN, WM_SIZING,
+            WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED,
+            WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
+            WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
         },
     },
 };
@@ -85,6 +88,15 @@ static NATIVE: LazyLock<Mutex<Native>> = LazyLock::new(Mutex::default);
 
 fn native() -> MutexGuard<'static, Native> {
     NATIVE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+thread_local! {
+    static SESSION_END: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// winit ignores WM_ENDSESSION, so eframe never calls `on_exit` at logoff or shutdown.
+pub(crate) fn on_session_end(hook: Box<dyn FnOnce()>) {
+    SESSION_END.set(Some(hook));
 }
 
 pub(super) fn attach(window: WindowId) -> bool {
@@ -553,6 +565,11 @@ unsafe extern "system" fn subclass(
                 rect.top = frame.min.y.round() as i32;
                 rect.right = frame.max.x.round() as i32;
                 rect.bottom = frame.max.y.round() as i32;
+            }
+        }
+        WM_ENDSESSION if wparam != 0 => {
+            if let Some(hook) = SESSION_END.take() {
+                hook();
             }
         }
         WM_NCDESTROY => {

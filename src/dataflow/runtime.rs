@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fmt,
+    fmt, io,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -286,7 +286,7 @@ impl Dataflow {
         descriptor: Arc<AudioDescriptor>,
         endpoint: ProcessingEndpoint,
         telemetry: Arc<SourceTelemetry>,
-    ) -> (Self, DataflowHandle) {
+    ) -> io::Result<(Self, DataflowHandle)> {
         Self::spawn_with(descriptor, endpoint, telemetry, false)
     }
 
@@ -296,7 +296,7 @@ impl Dataflow {
         mut endpoint: ProcessingEndpoint,
         telemetry: Arc<SourceTelemetry>,
         fill_silence: bool,
-    ) -> (Self, DataflowHandle) {
+    ) -> io::Result<(Self, DataflowHandle)> {
         let silence = fill_silence.then(|| {
             super::silence::SilenceFill::new(
                 Arc::clone(&telemetry),
@@ -346,8 +346,7 @@ impl Dataflow {
                     #[cfg(any(test, feature = "automation"))]
                     processed_frontier: worker_frontier,
                 });
-            })
-            .expect("failed to create dataflow worker");
+            })?;
         #[cfg(any(test, feature = "automation"))]
         probe.attach(&worker);
         let handle = DataflowHandle {
@@ -367,13 +366,13 @@ impl Dataflow {
             #[cfg(any(test, feature = "automation"))]
             probe,
         };
-        (
+        Ok((
             Self {
                 stop,
                 worker: Some(worker),
             },
             handle,
-        )
+        ))
     }
 
     pub(crate) fn worker_thread(&self) -> Thread {

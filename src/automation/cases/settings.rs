@@ -34,7 +34,7 @@ use crate::automation::{
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 9] = [
+pub(super) const CASES: [(&str, Scenario); 10] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -44,6 +44,7 @@ pub(super) const CASES: [(&str, Scenario); 9] = [
     ("S07", s07),
     ("S08", s08),
     ("S09", s09),
+    ("S10", s10),
 ];
 
 impl TempDir {
@@ -2058,5 +2059,76 @@ fn s09() -> Result<Value, String> {
         json!({"module_tab":"follows left clicks","window_tab":"clicked window",
         "workspace_tab":"stays","locked":"no selection","typed_value":"dropped",
         "move":"outlines the moving module"}),
+    )
+}
+
+/// The session is written once a change stops changing and never while it stays the same.
+fn s10() -> Result<Value, String> {
+    let dir = TempDir::new("s10")?;
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::new(ws.with_store(dir.store()));
+    h.frame(vec![]);
+    let a = first_leaf(&h.ws)?;
+    let pass = |h: &mut Harness, after: Duration| {
+        h.display_time += after;
+        h.ws.tick(h.display_time);
+        h.ws.autosave_when_settled()
+    };
+    let second = Duration::from_secs(1);
+    let first = pass(&mut h, Duration::ZERO);
+    let between = pass(&mut h, second / 2);
+    check(
+        first == Some(second) && between == Some(second / 2) && !dir.session().exists(),
+        &format!("first change: {first:?}, then {between:?}"),
+    )?;
+    let settled = pass(&mut h, second / 2);
+    check(
+        settled.is_none() && dir.session().exists(),
+        "an unchanged session was not written after one check interval",
+    )?;
+
+    std::fs::remove_file(dir.session()).map_err(|e| format!("{}: {e}", dir.session().display()))?;
+    let steady: Vec<_> = (0..3).map(|_| pass(&mut h, second)).collect();
+    check(
+        steady.iter().all(Option::is_none) && !dir.session().exists(),
+        &format!("a steady session was written again: {steady:?}"),
+    )?;
+
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetStyle {
+            instance_id: a,
+            style_id: BARS_SPECTRUM_STYLE_ID,
+        },
+    )?;
+    let seen = pass(&mut h, second);
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetViewSetting {
+            instance_id: a,
+            key: "max_frequency_hz",
+            value: SettingValue::Number(10_000.0),
+        },
+    )?;
+    let still_changing = pass(&mut h, second);
+    check(
+        seen == Some(second) && still_changing == Some(second) && !dir.session().exists(),
+        "a session still being edited was written",
+    )?;
+    let written = pass(&mut h, second);
+    let saved = read_json(&dir.session())?;
+    let module = &saved["windows"][0]["layout"]["module"];
+    check(
+        written.is_none()
+            && module["style"] == BARS_SPECTRUM_STYLE_ID
+            && module["view"]["max_frequency_hz"]
+                .to_string()
+                .contains("10000"),
+        &format!("the settled edits were not written: {module}"),
+    )?;
+    h.ws.check_ownership()?;
+    Ok(
+        json!({"interval_seconds":1,"first_write":"after one unchanged check",
+        "steady":"no writes","edits":"written once they stop"}),
     )
 }

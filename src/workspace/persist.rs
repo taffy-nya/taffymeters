@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 
 use eframe::egui::{Rect, pos2, vec2};
@@ -32,6 +33,14 @@ use crate::{
 };
 
 pub(crate) const MISSING_MODULE_ID: &str = "taffymeters.missing";
+const AUTOSAVE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+pub(super) struct SessionAutosave {
+    written: Option<WorkspaceFile>,
+    changed: Option<WorkspaceFile>,
+    next_check: Duration,
+}
 
 pub(super) struct ModuleConfig {
     pub(super) type_id: &'static str,
@@ -228,16 +237,46 @@ impl Workspace {
         Ok(warnings)
     }
 
-    /// Called on exit, Quit and before the last window closes.
+    /// Called on exit, Quit, logoff and before the last window closes.
     pub(crate) fn autosave(&mut self) {
         if !self.can_save() || self.windows.is_empty() {
             return;
         }
         let file = self.saved_file();
+        self.write_session(file);
+    }
+
+    /// Called once per host pass, after `tick`. Returns the delay until a pass is
+    /// needed to finish a pending save.
+    pub(crate) fn autosave_when_settled(&mut self) -> Option<Duration> {
+        if !self.can_save() || self.windows.is_empty() {
+            return None;
+        }
+        let now = self.display_time;
+        if now < self.autosave.next_check {
+            return Some(self.autosave.next_check - now);
+        }
+        self.autosave.next_check = now + AUTOSAVE_CHECK_INTERVAL;
+        let file = self.saved_file();
+        if self.autosave.written.as_ref() == Some(&file) {
+            self.autosave.changed = None;
+            return None;
+        }
+        if self.autosave.changed.as_ref() != Some(&file) {
+            self.autosave.changed = Some(file);
+            return Some(AUTOSAVE_CHECK_INTERVAL);
+        }
+        self.autosave.changed = None;
+        self.write_session(file);
+        None
+    }
+
+    fn write_session(&mut self, file: WorkspaceFile) {
         let store = self.store.as_ref().expect("can_save checked the store");
         if let Err(error) = store.save_session(&file) {
             self.push_notice(format!("Couldn't save the session: {error}"));
         }
+        self.autosave.written = Some(file);
     }
 
     fn preset_file(&self, preset: &PresetRef) -> Result<WorkspaceFile, WorkspaceError> {

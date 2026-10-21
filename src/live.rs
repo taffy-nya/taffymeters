@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt, io, sync::Arc};
 
 use crate::{
     audio::{
@@ -50,6 +50,7 @@ pub enum LiveAudioError {
     Input(String),
     Synthetic(String),
     Transport(String),
+    Worker(io::Error),
     Control(ControlError),
     Stopped,
 }
@@ -60,6 +61,7 @@ impl fmt::Display for LiveAudioError {
             Self::Input(error) => write!(f, "system audio input failed: {error}"),
             Self::Synthetic(error) => write!(f, "synthetic audio input failed: {error}"),
             Self::Transport(error) => write!(f, "audio transport failed: {error}"),
+            Self::Worker(error) => write!(f, "couldn't start the analysis thread: {error}"),
             Self::Control(error) => error.fmt(f),
             Self::Stopped => f.write_str("live audio source is stopped"),
         }
@@ -180,7 +182,8 @@ impl LiveAudio {
             processing_endpoint,
             telemetry,
             fill_silence,
-        );
+        )
+        .map_err(LiveAudioError::Worker)?;
         endpoint.set_worker(dataflow.worker_thread());
         Ok((endpoint, dataflow, handle))
     }
