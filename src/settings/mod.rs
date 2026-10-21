@@ -46,6 +46,18 @@ pub struct Choice {
     pub label: &'static str,
 }
 
+/// Units of numeric settings; the settings window formats and parses values by them.
+pub mod unit {
+    pub const HZ: &str = "Hz";
+    pub const MS: &str = "ms";
+    pub const SECONDS: &str = "s";
+    pub const DB: &str = "dB";
+    pub const DBFS: &str = "dBFS";
+    pub const DB_PER_OCTAVE: &str = "dB/oct";
+    pub const DB_PER_SECOND_SQUARED: &str = "dB/s²";
+    pub const TIMES: &str = "×";
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SettingKind {
     Number {
@@ -146,15 +158,15 @@ impl NodeParam {
     /// Range and unit of numeric parameters (`None` for choices).
     pub fn range(self) -> Option<(f32, f32, &'static str)> {
         Some(match self {
-            Self::FftFloor => (-200.0, -120.0, "dBFS"),
+            Self::FftFloor => (-200.0, -120.0, unit::DBFS),
             // Centered on the 4.5 dB/oct default: music already falls with
             // frequency, so negative tilts are of little use.
-            Self::Tilt => (0.0, 9.0, "dB/oct"),
-            Self::SmoothAttack | Self::SmoothRelease => (0.0, 2_000.0, "ms"),
-            Self::Gain => (-60.0, 60.0, "dB"),
-            Self::PeakHold => (0.0, 3_000.0, "ms"),
+            Self::Tilt => (0.0, 9.0, unit::DB_PER_OCTAVE),
+            Self::SmoothAttack | Self::SmoothRelease => (0.0, 2_000.0, unit::MS),
+            Self::Gain => (-60.0, 60.0, unit::DB),
+            Self::PeakHold => (0.0, 3_000.0, unit::MS),
             // Centered on the 30 dB/s² default: 60 dB falls in 2 s.
-            Self::PeakFall => (0.0, 60.0, "dB/s²"),
+            Self::PeakFall => (0.0, 60.0, unit::DB_PER_SECOND_SQUARED),
             Self::Channel | Self::FftWindow | Self::FftHop => return None,
         })
     }

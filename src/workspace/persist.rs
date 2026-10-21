@@ -9,7 +9,6 @@ use std::{
 };
 
 use eframe::egui::{Rect, pos2, vec2};
-use serde_json::Value;
 
 use super::{
     ActionOutcome, EMPTY_WINDOW_MIN_SIZE, ModuleEntry, ModuleInstanceId, SplitId, WindowId,
@@ -31,7 +30,7 @@ use crate::{
         WorkspaceStore, builtin_preset, builtin_presets, same_name, valid_name,
     },
     settings::SettingValue,
-    theme::RoleOverrides,
+    theme::{ColorRole, RoleOverrides},
 };
 
 /// Type of the stand-in for an instance this build cannot restore.
@@ -207,7 +206,10 @@ impl Workspace {
         config: &ModuleConfig,
     ) -> Result<Vec<String>, String> {
         let mut warnings = Vec::new();
-        let entry = self.modules.get_mut(&id).expect("instance just created");
+        let entry = self
+            .modules
+            .get_mut(&id)
+            .expect("the instance was created before applying its config");
         if let Some(style) = &config.style
             && entry.module.active_style() != Some(style.as_str())
         {
@@ -587,8 +589,8 @@ impl Workspace {
             .colors
             .iter()
             .map(|(role, color)| {
-                let role = serde_json::from_value(Value::String(role.clone()))
-                    .map_err(|error| format!("color role {role}: {error}"))?;
+                let role = ColorRole::from_id(role)
+                    .ok_or_else(|| format!("unknown color role {role:?}"))?;
                 let color = serde_json::from_value(color.clone())
                     .map_err(|error| format!("color: {error}"))?;
                 Ok((role, color))
@@ -766,7 +768,7 @@ impl Workspace {
                 let number = *numbers.entry(binding).or_insert_with(|| {
                     let number = (1..)
                         .find(|candidate| !used.contains(candidate))
-                        .expect("free number");
+                        .expect("finite bindings leave unused numbers");
                     used.insert(number);
                     number
                 });
@@ -793,12 +795,8 @@ impl Workspace {
             .colors
             .iter()
             .map(|(role, color)| {
-                let Value::String(role) = serde_json::to_value(role).expect("a role serializes")
-                else {
-                    unreachable!("roles serialize as strings")
-                };
                 (
-                    role,
+                    role.id().to_owned(),
                     serde_json::to_value(color).expect("a color serializes"),
                 )
             })

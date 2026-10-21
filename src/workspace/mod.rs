@@ -441,6 +441,16 @@ impl WindowState {
         }
     }
 
+    /// Where a window opened from this one goes: down-right of its outer frame by
+    /// the detach offset, in logical points.
+    fn offset_position(&self) -> Option<Pos2> {
+        let ppp = self.pixels_per_point;
+        self.outer.map(|outer| {
+            let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
+            egui::pos2(physical.x / ppp, physical.y / ppp)
+        })
+    }
+
     pub(crate) fn viewport_builder(&self, id: WindowId) -> egui::ViewportBuilder {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("Taffymeters #{}", id.0))

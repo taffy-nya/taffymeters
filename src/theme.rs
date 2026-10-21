@@ -5,12 +5,11 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::render::Color;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ColorRole {
     /// Window and plot background.
     Background,
@@ -71,8 +70,43 @@ impl ColorRole {
         }
     }
 
+    /// Saved form of the role.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Surface => "surface",
+            Self::Divider => "divider",
+            Self::Accent => "accent",
+            Self::Text => "text",
+            Self::Muted => "muted",
+            Self::Guide => "guide",
+            Self::Primary => "primary",
+            Self::Secondary => "secondary",
+            Self::Low => "low",
+            Self::Mid => "mid",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|role| role.id() == id)
+    }
+
     fn index(self) -> usize {
         self as usize
+    }
+}
+
+impl Serialize for ColorRole {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.id())
+    }
+}
+
+impl<'de> Deserialize<'de> for ColorRole {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let id = String::deserialize(deserializer)?;
+        Self::from_id(&id).ok_or_else(|| de::Error::custom(format!("unknown color role {id:?}")))
     }
 }
 

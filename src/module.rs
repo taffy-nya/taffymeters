@@ -4,11 +4,11 @@ use crate::{
     audio::SourceReader,
     dataflow::{
         ChannelError, ChannelSelection, ControlError, DataController, DataSpec, DataflowHandle,
-        OutputId,
+        Keep, OutputId,
     },
     extensions::{Registry, RegistryError},
     render::{Flow, Point, Rect, RenderTarget, Size, TextStyle},
-    settings::{Choice, SettingKind, SettingValue, ViewSetting},
+    settings::{Choice, SettingKind, SettingValue, ViewSetting, unit},
     theme::{ColorRole, Palette},
 };
 
@@ -46,6 +46,9 @@ pub const REFERENCE_HEIGHT: f32 = 0.9;
 /// Wheel zoom of every view per scroll point: the zoomed quantity scales by
 /// `exp(k · dy)`, the pace of the previous implementation's `1 + 0.001 · dy`.
 pub const WHEEL_ZOOM_PER_POINT: f32 = 0.001;
+/// Smallest wheel scroll (points) and pinch zoom change a view reacts to.
+pub const MIN_SCROLL_POINTS: f32 = 0.01;
+pub const MIN_ZOOM_CHANGE: f32 = 0.001;
 
 /// Linear view gain: a sample at the reference level reaches `REFERENCE_HEIGHT`
 /// of the (half) height.
@@ -243,34 +246,74 @@ pub fn overlay_setting(key: &'static str, label: &'static str, shown: bool) -> V
 /// Choices of a time view's `flow` setting: the direction the picture moves.
 const FLOW_CHOICES: &[Choice] = &[
     Choice {
-        id: "left",
+        id: Flow::Left.id(),
         label: "Left",
     },
     Choice {
-        id: "right",
+        id: Flow::Right.id(),
         label: "Right",
     },
     Choice {
-        id: "up",
+        id: Flow::Up.id(),
         label: "Up",
     },
     Choice {
-        id: "down",
+        id: Flow::Down.id(),
         label: "Down",
     },
 ];
+
+pub const FLOW_KEY: &str = "flow";
 
 /// The direction a time-scrolling view (Waveform, Spectrogram) moves; new
 /// instances move left, newest at the right edge.
 pub fn flow_setting(flow: Flow) -> ViewSetting {
     ViewSetting {
-        key: "flow",
+        key: FLOW_KEY,
         label: "Flow",
         section: "Display",
         kind: SettingKind::Choice(FLOW_CHOICES),
         value: SettingValue::Choice(flow.id().to_owned()),
         default: SettingValue::Choice(Flow::default().id().to_owned()),
     }
+}
+
+pub const VISIBLE_SECONDS_KEY: &str = "visible_seconds";
+
+/// The visible span of a time-scrolling view, inside `range`.
+pub fn visible_seconds_setting(value: f32, range: (f32, f32), default: f32) -> ViewSetting {
+    ViewSetting {
+        key: VISIBLE_SECONDS_KEY,
+        label: "Visible time",
+        section: "Display",
+        kind: SettingKind::Number {
+            min: range.0,
+            max: range.1,
+            unit: unit::SECONDS,
+            logarithmic: false,
+        },
+        value: SettingValue::Number(value),
+        default: SettingValue::Number(default),
+    }
+}
+
+/// Shortest and longest visible span of a time-scrolling view reading `output`:
+/// never more than the output's History, even a History shorter than `min_seconds`.
+/// `default_history_seconds` stands in when the output keeps no History.
+pub fn visible_range(
+    controller: &DataController,
+    output: OutputId,
+    default_history_seconds: f32,
+    min_seconds: f32,
+) -> (f32, f32) {
+    let history = controller.with_spec(|spec| match spec.outputs().get(output.index()) {
+        Some(output) => match output.keep {
+            Keep::Seconds(seconds) => seconds,
+            Keep::Latest => default_history_seconds,
+        },
+        None => default_history_seconds,
+    });
+    (min_seconds.min(history), history)
 }
 
 /// A view setting value as a flow direction.

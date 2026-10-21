@@ -12,6 +12,7 @@ use super::{
 use crate::{
     audio::SourceState,
     persistence::{PresetRef, builtin_presets, same_name, valid_name},
+    settings::unit,
     workspace::{Workspace, WorkspaceAction, window::Controls},
 };
 
@@ -161,7 +162,7 @@ impl Workspace {
                     key: SettingsItem::ReferenceLevel,
                     current: self.reference_dbfs(),
                     range: crate::module::REFERENCE_DBFS_RANGE,
-                    unit: "dBFS",
+                    unit: unit::DBFS,
                     logarithmic: false,
                     default: Some(default),
                 },

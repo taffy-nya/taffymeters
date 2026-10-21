@@ -8,13 +8,13 @@ use crate::{
     },
     extensions::{Registry, RegistryError},
     module::{
-        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        StyleOption, WHEEL_ZOOM_PER_POINT, flag_setting, number_setting, overlay_setting,
-        spec_from_saved, styled_color_roles,
+        MIN_SCROLL_POINTS, MIN_ZOOM_CHANGE, Module, ModuleError, ModuleFactory, ModuleFrame,
+        ModuleResponse, ModuleServices, StyleOption, WHEEL_ZOOM_PER_POINT, flag_setting,
+        number_setting, overlay_setting, spec_from_saved, styled_color_roles,
     },
     plotting::{SpectrumCoordinates, spectrum_dbfs_at},
     render::{Point, Rect, TextStyle},
-    settings::{SettingKind, SettingValue, ViewSetting},
+    settings::{SettingKind, SettingValue, ViewSetting, unit},
     snapshot::{DataReader, Snapshot},
     theme::ColorRole,
 };
@@ -26,6 +26,12 @@ use self::style::{SpectrumPlot, SpectrumStyle, SpectrumStyleContext};
 pub use self::styles::{BARS_SPECTRUM_STYLE_ID, LINE_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID};
 
 pub const SPECTRUM_MODULE_ID: &str = "taffymeters.spectrum";
+
+const MAX_FREQUENCY_KEY: &str = "max_frequency_hz";
+const BOTTOM_DB_KEY: &str = "bottom_db";
+const RANGE_DB_KEY: &str = "range_db";
+const SHOW_PEAK_KEY: &str = "show_peak";
+const SHOW_READOUT_KEY: &str = "show_readout";
 
 const STYLE_OPTIONS: &[StyleOption] = &[
     StyleOption {
@@ -207,11 +213,11 @@ impl SpectrumModule {
         nyquist: f32,
     ) {
         if frame.pointer.is_some_and(|point| plot.contains(point)) {
-            if (frame.zoom_delta - 1.0).abs() > 0.001 {
+            if (frame.zoom_delta - 1.0).abs() > MIN_ZOOM_CHANGE {
                 coordinates.max_frequency_hz = (coordinates.max_frequency_hz / frame.zoom_delta)
                     .clamp(MAX_FREQUENCY_RANGE.0, nyquist.max(MAX_FREQUENCY_RANGE.0));
             }
-            if frame.scroll_delta_y.abs() > 0.01 {
+            if frame.scroll_delta_y.abs() > MIN_SCROLL_POINTS {
                 let span = coordinates.max_dbfs - coordinates.min_dbfs;
                 let next_span = (span * (-frame.scroll_delta_y * WHEEL_ZOOM_PER_POINT).exp())
                     .clamp(DB_RANGE.0, DB_RANGE.1);
@@ -299,65 +305,65 @@ impl Module for SpectrumModule {
     fn view_settings(&self) -> Vec<ViewSetting> {
         vec![
             ViewSetting {
-                key: "max_frequency_hz",
+                key: MAX_FREQUENCY_KEY,
                 label: "Max frequency",
                 section: "Display",
                 kind: SettingKind::Number {
                     min: MAX_FREQUENCY_RANGE.0,
                     max: MAX_FREQUENCY_RANGE.1,
-                    unit: "Hz",
+                    unit: unit::HZ,
                     logarithmic: true,
                 },
                 value: SettingValue::Number(self.view.max_frequency_hz),
                 default: SettingValue::Number(DEFAULT_MAX_FREQUENCY_HZ),
             },
             ViewSetting {
-                key: "bottom_db",
+                key: BOTTOM_DB_KEY,
                 label: "Bottom",
                 section: "Display",
                 kind: SettingKind::Number {
                     min: BOTTOM_DB_RANGE.0,
                     max: BOTTOM_DB_RANGE.1,
-                    unit: "dB",
+                    unit: unit::DB,
                     logarithmic: false,
                 },
                 value: SettingValue::Number(self.view.min_dbfs),
                 default: SettingValue::Number(DEFAULT_BOTTOM_DB),
             },
             ViewSetting {
-                key: "range_db",
+                key: RANGE_DB_KEY,
                 label: "Range",
                 section: "Display",
                 kind: SettingKind::Number {
                     min: DB_RANGE.0,
                     max: DB_RANGE.1,
-                    unit: "dB",
+                    unit: unit::DB,
                     logarithmic: false,
                 },
                 value: SettingValue::Number(self.view.max_dbfs - self.view.min_dbfs),
                 default: SettingValue::Number(DEFAULT_RANGE_DB),
             },
-            overlay_setting("show_peak", "Peak curve", self.show_peak),
-            overlay_setting("show_readout", "Cursor readout", self.show_readout),
+            overlay_setting(SHOW_PEAK_KEY, "Peak curve", self.show_peak),
+            overlay_setting(SHOW_READOUT_KEY, "Cursor readout", self.show_readout),
         ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
         let range = self.view.max_dbfs - self.view.min_dbfs;
         match key {
-            "max_frequency_hz" => {
+            MAX_FREQUENCY_KEY => {
                 self.view.max_frequency_hz = number_setting(key, value, MAX_FREQUENCY_RANGE)?;
             }
             // Moving the bottom keeps the range: the whole view shifts.
-            "bottom_db" => {
+            BOTTOM_DB_KEY => {
                 self.view.min_dbfs = number_setting(key, value, BOTTOM_DB_RANGE)?;
                 self.view.max_dbfs = self.view.min_dbfs + range;
             }
-            "range_db" => {
+            RANGE_DB_KEY => {
                 self.view.max_dbfs = self.view.min_dbfs + number_setting(key, value, DB_RANGE)?;
             }
-            "show_peak" => self.show_peak = flag_setting(key, value)?,
-            "show_readout" => self.show_readout = flag_setting(key, value)?,
+            SHOW_PEAK_KEY => self.show_peak = flag_setting(key, value)?,
+            SHOW_READOUT_KEY => self.show_readout = flag_setting(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())

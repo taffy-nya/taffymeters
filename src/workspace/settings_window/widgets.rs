@@ -8,6 +8,7 @@ use super::{SettingsItem, swatches};
 use crate::{
     dataflow::ChannelSelection,
     render::Color,
+    settings::unit,
     theme::ColorRole,
     workspace::{
         ColorScope, WorkspaceAction,
@@ -277,17 +278,17 @@ pub(super) fn warning(ui: &mut egui::Ui, text: &str) -> egui::Response {
 /// milliseconds, and never "-0".
 pub(super) fn format_value(value: f32, unit: &str) -> String {
     let (value, unit, decimals) = match unit {
-        "Hz" if value.abs() >= 1_000.0 => (value / 1_000.0, "kHz", 1),
-        "Hz" | "ms" => (value, unit, 0),
-        "s" if value.abs() >= 10.0 => (value, unit, 0),
-        "×" if value.abs() < 10.0 => (value, unit, 2),
+        unit::HZ if value.abs() >= 1_000.0 => (value / 1_000.0, "kHz", 1),
+        unit::HZ | unit::MS => (value, unit, 0),
+        unit::SECONDS if value.abs() >= 10.0 => (value, unit, 0),
+        unit::TIMES if value.abs() < 10.0 => (value, unit, 2),
         _ => (value, unit, 1),
     };
     let scale = 10_f32.powi(decimals);
     let rounded = (value * scale).round() / scale;
     // Values that round to zero print as "0", not "-0".
     let rounded = if rounded == 0.0 { 0.0 } else { rounded };
-    let separator = if unit.is_empty() || unit == "×" {
+    let separator = if unit.is_empty() || unit == unit::TIMES {
         ""
     } else {
         " "
@@ -311,7 +312,7 @@ pub(super) fn parse_value(text: &str, unit: &str) -> Option<f32> {
     let suffix = suffix.trim();
     let scale = match suffix {
         "" => 1.0,
-        "k" | "kHz" | "khz" | "KHz" if unit == "Hz" => 1_000.0,
+        "k" | "kHz" | "khz" | "KHz" if unit == unit::HZ => 1_000.0,
         _ if suffix.eq_ignore_ascii_case(unit) => 1.0,
         _ => return None,
     };

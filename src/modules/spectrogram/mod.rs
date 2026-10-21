@@ -6,12 +6,13 @@ use crate::{
     },
     extensions::{Registry, RegistryError},
     module::{
-        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        flow_setting, flow_value, number_setting, spec_from_saved,
+        FLOW_KEY, MIN_SCROLL_POINTS, MIN_ZOOM_CHANGE, Module, ModuleError, ModuleFactory,
+        ModuleFrame, ModuleResponse, ModuleServices, VISIBLE_SECONDS_KEY, flow_setting, flow_value,
+        number_setting, spec_from_saved, visible_range, visible_seconds_setting,
     },
     plotting::{ColumnRing, ViewClock, spectrum_dbfs_between},
     render::{Color, Flow},
-    settings::{SettingKind, SettingValue, ViewSetting},
+    settings::{SettingKind, SettingValue, ViewSetting, unit},
     snapshot::{DataReader, HistoryView},
     theme::ColorRole,
 };
@@ -33,6 +34,7 @@ const GAIN_DB_RANGE: (f32, f32) = (-24.0, 24.0);
 /// Wheel gain per scroll point (a wheel notch scrolls about 36 points): the
 /// zoom pace of the other views is a fraction of a dB here, too slow to see.
 const WHEEL_GAIN_DB_PER_POINT: f32 = 0.05;
+const GAIN_DB_KEY: &str = "gain_db";
 
 pub const SPECTROGRAM_MODULE_ID: &str = "taffymeters.spectrogram";
 
@@ -149,19 +151,13 @@ struct PictureKey {
 }
 
 impl SpectrogramModule {
-    /// Shortest and longest visible span: the view never shows more than the
-    /// output's History, even a History shorter than the usual shortest span.
     fn visible_range(&self) -> (f32, f32) {
-        let history = self.controller.with_spec(|spec| {
-            match spec.outputs().get(self.history_output.index()) {
-                Some(output) => match output.keep {
-                    Keep::Seconds(seconds) => seconds,
-                    Keep::Latest => HISTORY_SECONDS,
-                },
-                None => HISTORY_SECONDS,
-            }
-        });
-        (MIN_VISIBLE_SECONDS.min(history), history)
+        visible_range(
+            &self.controller,
+            self.history_output,
+            HISTORY_SECONDS,
+            MIN_VISIBLE_SECONDS,
+        )
     }
 }
 
@@ -199,29 +195,20 @@ impl Module for SpectrogramModule {
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
-        let (min, max) = self.visible_range();
         vec![
+            visible_seconds_setting(
+                self.visible_seconds,
+                self.visible_range(),
+                DEFAULT_VISIBLE_SECONDS,
+            ),
             ViewSetting {
-                key: "visible_seconds",
-                label: "Visible time",
-                section: "Display",
-                kind: SettingKind::Number {
-                    min,
-                    max,
-                    unit: "s",
-                    logarithmic: false,
-                },
-                value: SettingValue::Number(self.visible_seconds),
-                default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
-            },
-            ViewSetting {
-                key: "gain_db",
+                key: GAIN_DB_KEY,
                 label: "Gain",
                 section: "Display",
                 kind: SettingKind::Number {
                     min: GAIN_DB_RANGE.0,
                     max: GAIN_DB_RANGE.1,
-                    unit: "dB",
+                    unit: unit::DB,
                     logarithmic: false,
                 },
                 value: SettingValue::Number(self.gain_db),
@@ -233,11 +220,11 @@ impl Module for SpectrogramModule {
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
         match key {
-            "visible_seconds" => {
+            VISIBLE_SECONDS_KEY => {
                 self.visible_seconds = number_setting(key, value, self.visible_range())?;
             }
-            "gain_db" => self.gain_db = number_setting(key, value, GAIN_DB_RANGE)?,
-            "flow" => self.flow = flow_value(key, value)?,
+            GAIN_DB_KEY => self.gain_db = number_setting(key, value, GAIN_DB_RANGE)?,
+            FLOW_KEY => self.flow = flow_value(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())
@@ -248,12 +235,12 @@ impl Module for SpectrogramModule {
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
         {
-            if (frame.zoom_delta - 1.0).abs() > 0.001 {
+            if (frame.zoom_delta - 1.0).abs() > MIN_ZOOM_CHANGE {
                 let (min, max) = self.visible_range();
                 self.visible_seconds = (self.visible_seconds / frame.zoom_delta).clamp(min, max);
             }
             // The wheel brightens (up) or dims the picture, about 2 dB per notch.
-            if frame.scroll_delta_y.abs() > 0.01 {
+            if frame.scroll_delta_y.abs() > MIN_SCROLL_POINTS {
                 self.gain_db = (self.gain_db + frame.scroll_delta_y * WHEEL_GAIN_DB_PER_POINT)
                     .clamp(GAIN_DB_RANGE.0, GAIN_DB_RANGE.1);
             }

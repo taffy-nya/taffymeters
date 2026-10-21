@@ -1,10 +1,10 @@
 //! BSP arrangement of instances: splitting, moving and detaching.
 
-use eframe::egui::{Rect, Vec2, pos2};
+use eframe::egui::{Rect, Vec2};
 
 use super::{
-    ActionOutcome, DETACH_OFFSET_POINTS, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget,
-    PendingDetach, Side, SplitId, WindowId, WindowState, Workspace, WorkspaceError,
+    ActionOutcome, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget, PendingDetach, Side, SplitId,
+    WindowId, WindowState, Workspace, WorkspaceError,
     layout::{Layout, fits},
     persist,
 };
@@ -189,10 +189,7 @@ impl Workspace {
             .map_or(INITIAL_WINDOW_SIZE, |rect| rect.size())
             .max(self.module_min_size(instance_id));
         let ppp = source.pixels_per_point;
-        let position = source.outer.map(|outer| {
-            let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
-            pos2(physical.x / ppp, physical.y / ppp)
-        });
+        let position = source.offset_position();
         // The app-wide clock: the source window's own pass time stops while it is
         // minimized (detach can be requested from the settings window then).
         let requested_at = self.display_time;
@@ -232,11 +229,11 @@ impl Workspace {
         let source = self
             .windows
             .get_mut(&pending.source)
-            .expect("source window located above");
+            .expect("the source window was located before detaching");
         source
             .layout
             .remove_leaf(pending.instance_id)
-            .expect("instance located in source above");
+            .expect("the instance was located in the source window");
         let source_empty = source.layout.is_empty();
         let window = self
             .windows
@@ -277,16 +274,19 @@ impl Workspace {
             MoveTarget::EmptyWindow(_) => None,
         };
         // All preconditions hold; the two tree updates below cannot fail.
-        let source = self.windows.get_mut(&source_id).expect("located");
+        let source = self
+            .windows
+            .get_mut(&source_id)
+            .expect("the source window was located before moving");
         source
             .layout
             .remove_leaf(instance_id)
-            .expect("instance located in source");
+            .expect("the instance was located in the source window");
         let source_empty = source.layout.is_empty();
         let window = self
             .windows
             .get_mut(&target_window)
-            .expect("target located");
+            .expect("the target window was located before moving");
         match (target, split_id) {
             (
                 MoveTarget::Beside {
@@ -297,11 +297,11 @@ impl Workspace {
             ) => window
                 .layout
                 .insert_beside(target_leaf, side, instance_id, split_id)
-                .expect("validated target"),
+                .expect("the target was validated before moving the module"),
             _ => window
                 .layout
                 .place_root(instance_id)
-                .expect("validated empty window"),
+                .expect("the target window was validated as empty"),
         }
         if self.move_source == Some(instance_id) {
             self.move_source = None;

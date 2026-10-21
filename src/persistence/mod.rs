@@ -387,7 +387,10 @@ fn write(path: &std::path::Path, file: &WorkspaceFile) -> Result<(), PersistErro
     let io = |error| PersistError::Io(label.clone(), error);
     let directory = path.parent().expect("files live in a directory");
     fs::create_dir_all(directory).map_err(io)?;
-    let name = path.file_name().expect("a file name").to_string_lossy();
+    let name = path
+        .file_name()
+        .expect("store paths include a file name")
+        .to_string_lossy();
     let temporary = directory.join(format!(".{name}.tmp"));
     let bytes = serde_json::to_vec_pretty(file).expect("a workspace file serializes");
     fs::write(&temporary, bytes).map_err(io)?;

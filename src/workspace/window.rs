@@ -552,7 +552,10 @@ impl Workspace {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         self.publish_groups();
-        let window = self.windows.get_mut(&window_id).expect("checked above");
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .expect("the window was checked at the start of the pass");
         if let Some(drag) = window.ui.divider_drag
             && (drag.pixels_per_point - pixels_per_point).abs() > f32::EPSILON
         {
@@ -564,7 +567,10 @@ impl Workspace {
         }
         window.content_size = rect.size();
         let min_size = self.window_min_size(&self.windows[&window_id]);
-        let window = self.windows.get_mut(&window_id).expect("checked above");
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .expect("the window was checked at the start of the pass");
         if window.ui.min_size_sent != Some(min_size) {
             window.ui.min_size_sent = Some(min_size);
             window
@@ -657,7 +663,10 @@ impl Workspace {
                             .is_some_and(|pending| pending.source == window_id)
                 })
                 .map(|(id, _)| *id);
-            let window = self.windows.get_mut(&window_id).expect("pass checked");
+            let window = self
+                .windows
+                .get_mut(&window_id)
+                .expect("the window was checked at the start of the pass");
             if let Some(drag) = window
                 .ui
                 .divider_drag
@@ -1068,7 +1077,10 @@ impl Workspace {
                 Sense::click_and_drag(),
             );
             controls.record(ControlKey::Divider(divider.id), &response);
-            let window = self.windows.get_mut(&window_id).expect("pass checked");
+            let window = self
+                .windows
+                .get_mut(&window_id)
+                .expect("the window was checked at the start of the pass");
             let active = window
                 .ui
                 .divider_drag
@@ -1119,7 +1131,11 @@ impl Workspace {
                     });
                 }
                 if response.drag_stopped() {
-                    let drag = window.ui.divider_drag.take().expect("matched above");
+                    let drag = window
+                        .ui
+                        .divider_drag
+                        .take()
+                        .expect("the active divider drag was matched above");
                     if !drag.cancelled
                         && (drag.current_ratio - drag.start_ratio).abs() > f32::EPSILON
                     {
@@ -1140,7 +1156,10 @@ impl Workspace {
             ui.painter().line_segment(line, Stroke::new(1.0_f32, color));
         }
         // The dragged split disappeared (closed leaf / moved module): end the capture.
-        let window = self.windows.get_mut(&window_id).expect("pass checked");
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .expect("the window was checked at the start of the pass");
         if !drag_seen && window.ui.divider_drag.is_some() {
             window.ui.divider_drag = None;
         }

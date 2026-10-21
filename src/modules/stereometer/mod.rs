@@ -12,7 +12,9 @@ use crate::{
     theme::ColorRole,
 };
 
-use crate::modules::pcm_view::{SCALE_RANGE, scale_setting, subscribe_pcm, wheel_scale};
+use crate::modules::pcm_view::{SCALE_KEY, SCALE_RANGE, scale_setting, subscribe_pcm, wheel_scale};
+
+const SHOW_GUIDES_KEY: &str = "show_guides";
 
 pub const STEREOMETER_MODULE_ID: &str = "taffymeters.stereometer";
 
@@ -83,14 +85,14 @@ impl Module for StereometerModule {
     fn view_settings(&self) -> Vec<ViewSetting> {
         vec![
             scale_setting(self.scale),
-            overlay_setting("show_guides", "Axes", self.show_guides),
+            overlay_setting(SHOW_GUIDES_KEY, "Axes", self.show_guides),
         ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
         match key {
-            "scale" => self.scale = number_setting(key, value, SCALE_RANGE)?,
-            "show_guides" => self.show_guides = flag_setting(key, value)?,
+            SCALE_KEY => self.scale = number_setting(key, value, SCALE_RANGE)?,
+            SHOW_GUIDES_KEY => self.show_guides = flag_setting(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())

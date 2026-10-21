@@ -2,8 +2,11 @@
 
 use crate::{
     dataflow::{ChannelSelection, DataSpec, DataSubscription, Keep, OutputId, SOURCE},
-    module::{ModuleError, ModuleFrame, ModuleServices, WHEEL_ZOOM_PER_POINT, spec_from_saved},
-    settings::{SettingKind, SettingValue, ViewSetting},
+    module::{
+        MIN_SCROLL_POINTS, ModuleError, ModuleFrame, ModuleServices, WHEEL_ZOOM_PER_POINT,
+        spec_from_saved,
+    },
+    settings::{SettingKind, SettingValue, ViewSetting, unit},
 };
 
 /// The source PCM output kept as `keep`: the whole analysis of these Modules.
@@ -27,17 +30,19 @@ pub(super) fn subscribe_pcm(
 /// Scale of every PCM view, relative to the workspace reference level: 1× in the
 /// middle of a ±20 dB (logarithmic) range.
 pub(super) const SCALE_RANGE: (f32, f32) = (0.1, 10.0);
+pub(super) const SCALE_KEY: &str = "scale";
+pub(super) const CHANNEL_KEY: &str = "channel";
 
 /// Every PCM view starts at unit scale.
 pub(super) fn scale_setting(value: f32) -> ViewSetting {
     ViewSetting {
-        key: "scale",
+        key: SCALE_KEY,
         label: "Scale",
         section: "Display",
         kind: SettingKind::Number {
             min: SCALE_RANGE.0,
             max: SCALE_RANGE.1,
-            unit: "×",
+            unit: unit::TIMES,
             logarithmic: true,
         },
         value: SettingValue::Number(value),
@@ -50,7 +55,7 @@ pub(super) fn wheel_scale(scale: f32, frame: &ModuleFrame<'_>) -> f32 {
     if frame
         .pointer
         .is_some_and(|point| frame.rect.contains(point))
-        && frame.scroll_delta_y.abs() > 0.01
+        && frame.scroll_delta_y.abs() > MIN_SCROLL_POINTS
     {
         (scale * (frame.scroll_delta_y * WHEEL_ZOOM_PER_POINT).exp())
             .clamp(SCALE_RANGE.0, SCALE_RANGE.1)
@@ -62,7 +67,7 @@ pub(super) fn wheel_scale(scale: f32, frame: &ModuleFrame<'_>) -> f32 {
 /// Every PCM view starts with the mono average.
 pub(super) fn channel_setting(channel: ChannelSelection) -> ViewSetting {
     ViewSetting {
-        key: "channel",
+        key: CHANNEL_KEY,
         label: "Channel",
         section: "Display",
         kind: SettingKind::Channel,

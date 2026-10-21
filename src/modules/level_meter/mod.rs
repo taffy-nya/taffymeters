@@ -25,6 +25,8 @@ pub use loudness::LOUDNESS_METER_MODULE_ID;
 
 pub const LEVEL_METER_MODULE_ID: &str = "taffymeters.level_meter";
 
+const SHOW_PEAK_KEY: &str = "show_peak";
+
 /// Scale of both meters (dBFS or LUFS): headroom above full scale, as in DAWs.
 const METER_BOTTOM: f32 = -60.0;
 const METER_TOP: f32 = 3.0;
@@ -218,11 +220,11 @@ impl Module for LevelMeterModule {
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
-        vec![overlay_setting("show_peak", "Peak hold", self.show_peak)]
+        vec![overlay_setting(SHOW_PEAK_KEY, "Peak hold", self.show_peak)]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
-        if key != "show_peak" {
+        if key != SHOW_PEAK_KEY {
             return Err(ModuleError::UnknownSetting(key.to_owned()));
         }
         self.show_peak = flag_setting(key, value)?;

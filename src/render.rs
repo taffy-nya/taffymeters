@@ -278,7 +278,7 @@ pub enum Flow {
 impl Flow {
     pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
 
-    pub fn id(self) -> &'static str {
+    pub const fn id(self) -> &'static str {
         match self {
             Self::Left => "left",
             Self::Right => "right",
@@ -467,7 +467,10 @@ impl RenderTarget for EguiRenderTarget<'_> {
                         last_pass: pass,
                     },
                 );
-                cache.entries.get_mut(&image.id()).expect("just inserted")
+                cache
+                    .entries
+                    .get_mut(&image.id())
+                    .expect("the image entry was just inserted")
             }
         };
         entry.last_pass = pass;

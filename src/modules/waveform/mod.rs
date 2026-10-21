@@ -3,19 +3,20 @@ use crate::{
     dataflow::{ChannelSelection, DataController, DataSpec, DataSubscription, Keep, OutputId},
     extensions::{Registry, RegistryError},
     module::{
-        Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse, ModuleServices,
-        flow_setting, flow_value, number_setting, reference_gain,
+        FLOW_KEY, MIN_ZOOM_CHANGE, Module, ModuleError, ModuleFactory, ModuleFrame, ModuleResponse,
+        ModuleServices, VISIBLE_SECONDS_KEY, flow_setting, flow_value, number_setting,
+        reference_gain, visible_range, visible_seconds_setting,
     },
     plotting::{ColumnRing, ViewClock},
     render::{Color, Flow},
-    settings::{SettingKind, SettingValue, ViewSetting},
+    settings::{SettingValue, ViewSetting},
     snapshot::{DataReader, HistoryView},
     theme::ColorRole,
 };
 
 use crate::modules::pcm_view::{
-    SCALE_RANGE, channel_setting, channel_value, pcm_spec, scale_setting, subscribe_pcm,
-    wheel_scale,
+    CHANNEL_KEY, SCALE_KEY, SCALE_RANGE, channel_setting, channel_value, pcm_spec, scale_setting,
+    subscribe_pcm, wheel_scale,
 };
 
 /// Visible span a new Waveform shows.
@@ -116,19 +117,13 @@ struct PictureKey {
 }
 
 impl WaveformModule {
-    /// Shortest and longest visible span: the view never shows more than the
-    /// output's History, even a History shorter than the usual shortest span.
     fn visible_range(&self) -> (f32, f32) {
-        let history =
-            self.controller
-                .with_spec(|spec| match spec.outputs().get(self.output.index()) {
-                    Some(output) => match output.keep {
-                        Keep::Seconds(seconds) => seconds,
-                        Keep::Latest => WAVEFORM_HISTORY_SECONDS,
-                    },
-                    None => WAVEFORM_HISTORY_SECONDS,
-                });
-        (WAVEFORM_MIN_SECONDS.min(history), history)
+        visible_range(
+            &self.controller,
+            self.output,
+            WAVEFORM_HISTORY_SECONDS,
+            WAVEFORM_MIN_SECONDS,
+        )
     }
 }
 
@@ -172,22 +167,9 @@ impl Module for WaveformModule {
     }
 
     fn view_settings(&self) -> Vec<ViewSetting> {
-        let (min, max) = self.visible_range();
         vec![
             channel_setting(self.channel),
-            ViewSetting {
-                key: "visible_seconds",
-                label: "Visible time",
-                section: "Display",
-                kind: SettingKind::Number {
-                    min,
-                    max,
-                    unit: "s",
-                    logarithmic: false,
-                },
-                value: SettingValue::Number(self.seconds),
-                default: SettingValue::Number(DEFAULT_VISIBLE_SECONDS),
-            },
+            visible_seconds_setting(self.seconds, self.visible_range(), DEFAULT_VISIBLE_SECONDS),
             scale_setting(self.y_scale),
             flow_setting(self.flow),
         ]
@@ -195,12 +177,12 @@ impl Module for WaveformModule {
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
         match key {
-            "channel" => return self.set_channel(channel_value(key, value)?),
-            "visible_seconds" => {
+            CHANNEL_KEY => return self.set_channel(channel_value(key, value)?),
+            VISIBLE_SECONDS_KEY => {
                 self.seconds = number_setting(key, value, self.visible_range())?;
             }
-            "scale" => self.y_scale = number_setting(key, value, SCALE_RANGE)?,
-            "flow" => self.flow = flow_value(key, value)?,
+            SCALE_KEY => self.y_scale = number_setting(key, value, SCALE_RANGE)?,
+            FLOW_KEY => self.flow = flow_value(key, value)?,
             _ => return Err(ModuleError::UnknownSetting(key.to_owned())),
         }
         Ok(())
@@ -211,7 +193,7 @@ impl Module for WaveformModule {
             .pointer
             .is_some_and(|point| frame.rect.contains(point))
         {
-            if (frame.zoom_delta - 1.0).abs() > 0.001 {
+            if (frame.zoom_delta - 1.0).abs() > MIN_ZOOM_CHANGE {
                 let (min, max) = self.visible_range();
                 self.seconds = (self.seconds / frame.zoom_delta).clamp(min, max);
             }
@@ -373,6 +355,7 @@ mod tests {
         modules::test_support::{
             BLOCK_FRAMES, PcmFixture, RecordedImage, RecordingTarget, TEST_RECT, draw, repeat_frame,
         },
+        settings::SettingKind,
     };
 
     fn waveform(fixture: &PcmFixture, data: Option<&DataSpec>) -> Box<dyn Module> {

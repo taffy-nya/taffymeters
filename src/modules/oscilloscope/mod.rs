@@ -20,8 +20,11 @@ use crate::{
 };
 
 use crate::modules::pcm_view::{
-    SCALE_RANGE, channel_setting, channel_value, scale_setting, subscribe_pcm, wheel_scale,
+    CHANNEL_KEY, SCALE_KEY, SCALE_RANGE, channel_setting, channel_value, scale_setting,
+    subscribe_pcm, wheel_scale,
 };
+
+const SHOW_GUIDE_KEY: &str = "show_guide";
 
 pub const OSCILLOSCOPE_MODULE_ID: &str = "taffymeters.oscilloscope";
 
@@ -121,18 +124,18 @@ impl Module for OscilloscopeModule {
         vec![
             channel_setting(self.channel),
             scale_setting(self.y_scale),
-            overlay_setting("show_guide", "Center line", self.show_guide),
+            overlay_setting(SHOW_GUIDE_KEY, "Center line", self.show_guide),
         ]
     }
 
     fn set_view_setting(&mut self, key: &str, value: &SettingValue) -> Result<(), ModuleError> {
         match key {
-            "channel" => self.set_channel(channel_value(key, value)?),
-            "scale" => {
+            CHANNEL_KEY => self.set_channel(channel_value(key, value)?),
+            SCALE_KEY => {
                 self.y_scale = number_setting(key, value, SCALE_RANGE)?;
                 Ok(())
             }
-            "show_guide" => {
+            SHOW_GUIDE_KEY => {
                 self.show_guide = flag_setting(key, value)?;
                 Ok(())
             }

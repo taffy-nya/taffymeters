@@ -345,14 +345,22 @@ fn parent_and_child(
     if parent < child {
         let (head, tail) = nodes.split_at_mut(child);
         (
-            head[parent].as_ref().expect("live parent"),
-            tail[0].as_mut().expect("live child"),
+            head[parent]
+                .as_ref()
+                .expect("planned parents refer to live nodes"),
+            tail[0]
+                .as_mut()
+                .expect("planned children refer to live nodes"),
         )
     } else {
         let (head, tail) = nodes.split_at_mut(parent);
         (
-            tail[0].as_ref().expect("live parent"),
-            head[child].as_mut().expect("live child"),
+            tail[0]
+                .as_ref()
+                .expect("planned parents refer to live nodes"),
+            head[child]
+                .as_mut()
+                .expect("planned children refer to live nodes"),
         )
     }
 }
@@ -429,11 +437,15 @@ impl Engine {
     }
 
     fn node(&self, id: NodeId) -> &Node {
-        self.nodes[id].as_ref().expect("live node")
+        self.nodes[id]
+            .as_ref()
+            .expect("node IDs refer to live interned nodes")
     }
 
     fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        self.nodes[id].as_mut().expect("live node")
+        self.nodes[id]
+            .as_mut()
+            .expect("node IDs refer to live interned nodes")
     }
 
     // ---- interning -------------------------------------------------------------
@@ -530,7 +542,9 @@ impl Engine {
             return;
         }
         debug_assert!(node.children.is_empty() && node.ring.is_none());
-        let node = self.nodes[id].take().expect("live node");
+        let node = self.nodes[id]
+            .take()
+            .expect("the node remains live until its last reference is released");
         self.index.remove(&node.key);
         if let Some(input) = node.input {
             self.node_mut(input).children.retain(|child| *child != id);
@@ -622,7 +636,11 @@ impl Engine {
     }
 
     fn detach_ring(&mut self, node: NodeId) {
-        let ring = self.node_mut(node).ring.as_mut().expect("attached ring");
+        let ring = self
+            .node_mut(node)
+            .ring
+            .as_mut()
+            .expect("subscription outputs have attached rings");
         ring.consumers -= 1;
         if ring.consumers > 0 {
             return;
@@ -809,7 +827,7 @@ impl Engine {
         let old = self
             .subscriptions
             .remove(&id)
-            .expect("checked live subscription");
+            .expect("subscriptions are checked before replacement");
         self.unregister_bindings(id, &old.spec);
         for (output, &node) in spec.outputs().iter().zip(&outputs) {
             if let Some(binding) = output.binding {
@@ -1206,7 +1224,12 @@ impl Engine {
                     .zip(&subscription.outputs)
                     .zip(&subscription.starts)
                     .map(|((output, &node), &start_frame)| RouteOutput {
-                        ring: self.node(node).ring.as_ref().expect("output ring").index,
+                        ring: self
+                            .node(node)
+                            .ring
+                            .as_ref()
+                            .expect("subscription outputs have attached rings")
+                            .index,
                         start_frame,
                         keep_frames: self.keep_frames(output.keep),
                         reset_epoch: subscription.reset_epoch,
@@ -1588,7 +1611,7 @@ impl Engine {
         let sample_rate = self.descriptor.sample_rate_hz;
         for order_index in 0..self.plan.levels[levels_index].1.len() {
             let id = self.plan.levels[levels_index].1[order_index];
-            let parent = self.node(id).input.expect("Levels readers have an input");
+            let parent = self.node(id).input.expect("levels readers have an input");
             let (parent, node) = parent_and_child(&mut self.nodes, parent, id);
             node.produced = parent.produced && context.processed_through_frame >= node.accept_from;
             if !node.produced {
@@ -1620,7 +1643,10 @@ impl Engine {
         let version = self.next_version();
         let node = self.node_mut(id);
         let fft = node.fft;
-        let ring = node.ring.as_mut().expect("checked ring");
+        let ring = node
+            .ring
+            .as_mut()
+            .expect("nodes without rings return before staging");
         let mut frame = take_frame(&mut ring.pool, || match fft {
             Some(fft) => FrameData::Spectrum(SpectrumData {
                 fft,
@@ -1661,7 +1687,11 @@ impl Engine {
         }
         let momentary_lufs = analyzer.lufs();
         let version = self.next_version();
-        let ring = self.node_mut(id).ring.as_mut().expect("checked ring");
+        let ring = self
+            .node_mut(id)
+            .ring
+            .as_mut()
+            .expect("nodes without rings return before staging");
         let mut frame = take_frame(&mut ring.pool, || {
             FrameData::Loudness(LoudnessData::default())
         });
@@ -1696,7 +1726,10 @@ impl Engine {
         else {
             return;
         };
-        let ring = node.ring.as_mut().expect("checked ring");
+        let ring = node
+            .ring
+            .as_mut()
+            .expect("nodes without rings return before staging");
         let mut frame = take_frame(&mut ring.pool, || FrameData::Pcm(AudioChunk::default()));
         let target = Arc::get_mut(&mut frame).expect("pooled frames are unshared");
         target.result_version = version;
@@ -1738,7 +1771,10 @@ impl Engine {
                 match attach.keep_frames {
                     None => {
                         while ring.frames.len() > 1 {
-                            let old = ring.frames.pop_front().expect("non-empty ring");
+                            let old = ring
+                                .frames
+                                .pop_front()
+                                .expect("the loop only removes frames while more than one remains");
                             self.evicted.push((attach.index, old));
                         }
                     }
@@ -1749,7 +1785,10 @@ impl Engine {
                                 oldest.processed_through_frame <= window_start
                             })
                         {
-                            let old = ring.frames.pop_front().expect("non-empty ring");
+                            let old = ring
+                                .frames
+                                .pop_front()
+                                .expect("the loop only removes frames while more than one remains");
                             self.evicted.push((attach.index, old));
                         }
                     }

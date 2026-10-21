@@ -3,12 +3,11 @@
 
 use std::time::Duration;
 
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2};
+use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand};
 
 use super::{
-    ActionOutcome, DETACH_OFFSET_POINTS, DETACH_TIMEOUT, EMPTY_WINDOW_MIN_SIZE,
-    INITIAL_WINDOW_SIZE, WindowId, WindowState, Workspace, WorkspaceError, desktop, layout::Layout,
-    moving::MoveRequest,
+    ActionOutcome, DETACH_TIMEOUT, EMPTY_WINDOW_MIN_SIZE, INITIAL_WINDOW_SIZE, WindowId,
+    WindowState, Workspace, WorkspaceError, desktop, layout::Layout, moving::MoveRequest,
 };
 
 impl Workspace {
@@ -52,10 +51,7 @@ impl Workspace {
         }
         .max(EMPTY_WINDOW_MIN_SIZE);
         let ppp = source.pixels_per_point;
-        let position = source.outer.map(|outer| {
-            let physical = outer.min + Vec2::splat(DETACH_OFFSET_POINTS * ppp);
-            pos2(physical.x / ppp, physical.y / ppp)
-        });
+        let position = source.offset_position();
         let mut window = WindowState::new(Layout::default(), size, source.always_on_top);
         window.initial_position = position;
         window.pixels_per_point = ppp;
@@ -285,7 +281,7 @@ impl Workspace {
         if window.maximized || !window.tracked {
             self.windows
                 .get_mut(&window_id)
-                .expect("checked above")
+                .expect("the window was found before starting the move")
                 .commands
                 .push(ViewportCommand::StartDrag);
             return;
@@ -379,7 +375,10 @@ impl Workspace {
         pixels_per_point: f32,
         probe: &dyn desktop::DesktopProbe,
     ) -> Vec<(WindowId, Pos2)> {
-        let window = self.windows.get_mut(&window_id).expect("observed above");
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .expect("placement is only observed for existing windows");
         if let Some(target) = window
             .restore_target
             .take()
