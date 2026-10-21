@@ -1,6 +1,3 @@
-//! Runtime behavior through the real transport, worker and readers: sharing,
-//! state scopes, reconfiguration, demand, continuity and release.
-
 use std::{
     f32::consts::PI,
     sync::{
@@ -72,7 +69,6 @@ fn fft32() -> FftConfig {
     FftConfig::new(32, 16, -160.0).unwrap()
 }
 
-/// `Channel(Mono) → Fft(32/16)`; returns the spec and the FFT node.
 fn fft_spec(fft: FftConfig) -> (DataSpec, NodeRef) {
     let mut spec = DataSpec::new();
     let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::MonoAverage));
@@ -153,14 +149,12 @@ fn retry_busy(mut operation: impl FnMut() -> Result<(), ControlError>) {
     }
 }
 
-/// Write interleaved stereo in pieces the transport can hold, waiting for each piece
-/// to be processed, so no block is dropped.
 fn feed(capture: &mut CaptureEndpoint, dataflow: &TestDataflow, samples: &[f32]) {
     write_processed(capture, dataflow, 2, samples);
 }
 
-/// Write interleaved `channels`-wide samples and wait until the worker has processed
-/// them, so "no work happened" assertions observe a block the worker really saw.
+/// Waits between bounded pieces to avoid drops and make "no work happened" assertions
+/// observe audio the worker actually saw.
 fn write_processed(
     capture: &mut CaptureEndpoint,
     dataflow: &TestDataflow,
@@ -176,8 +170,6 @@ fn write_processed(
         });
     }
 }
-
-// ---- sharing, state scopes and reconfiguration -----------------------------------
 
 #[test]
 fn identical_pure_chains_share_one_fft_and_reads_do_not_advance() {
@@ -252,8 +244,7 @@ fn readers_keep_the_previous_results_until_a_changed_node_produces() {
     let kept = history.len();
     assert!(kept > 0);
 
-    // A new FFT size restarts the FFT: until its first full window, both readers
-    // keep what they showed instead of going empty.
+    // The replacement FFT needs 64 fresh frames before publishing its first result.
     subscription
         .controller()
         .update(|spec| spec.set_node(fft, NodeSpec::Fft(FftConfig::new(64, 32, -100.0).unwrap())))
@@ -267,8 +258,6 @@ fn readers_keep_the_previous_results_until_a_changed_node_produces() {
     assert!(Arc::ptr_eq(snapshot.get(output).expect("kept"), &before));
     assert_eq!((history.len(), history.newest_frontier()), (kept, Some(64)));
 
-    // The new results replace the latest one and follow the earlier History, each
-    // frame with the FFT that produced it.
     capture.write(&mono_tone(64, 3_000.0, 0.25));
     latest_at(&reader, output, 128);
     reader.read(&mut snapshot);
@@ -472,8 +461,6 @@ fn gain_change_keeps_upstream_smooth_and_peak_but_restarts_the_changed_output() 
         (newest(&changed_view)[2] - newest(&control_view)[2] - 6.0).abs() < 1e-4,
         "Smooth kept its state; only the gain differs"
     );
-    // The changed output starts over at the change; the view keeps the frames it
-    // showed before and appends the new one after them.
     let after_change = |view: &HistoryView| {
         view.iter()
             .filter(|entry| entry.frame.processed_through_frame > 64)
@@ -596,8 +583,6 @@ fn concurrent_edits_of_one_subscription_serialize() {
     assert_eq!(failures.load(Ordering::Relaxed), 0);
 }
 
-// ---- demand, visibility, pause and continuity ------------------------------------
-
 #[test]
 fn hidden_latest_without_state_stops_while_history_continues() {
     let (mut capture, dataflow, _) = fixture(1, 8, 128);
@@ -628,7 +613,6 @@ fn hidden_latest_without_state_stops_while_history_continues() {
     let visible = view.len();
     history.controller().set_visible(false).unwrap();
     capture.write(&mono_tone(32, 3_000.0, 0.25));
-    // Hidden: the Module does not draw; the History still records.
     wait("hidden history", || {
         (history
             .reader()
@@ -816,8 +800,6 @@ fn outputs_of_one_block_are_read_together() {
     assert_eq!(reader.config_revision(), Some(1));
 }
 
-// ---- time-domain demand (A3–A7) -------------------------------------------------
-
 fn pcm_spec(keep: Keep) -> (DataSpec, OutputId) {
     let mut spec = DataSpec::new();
     let output = spec.output(SOURCE, keep);
@@ -877,7 +859,7 @@ fn time_demand_matrix_only_does_requested_work() {
     feed(&mut capture, &dataflow, &stereo(6_400, 1_600));
     let frame = latest_at(&levels.reader(), output, 8_000);
     let data = frame.levels().unwrap();
-    // 20·log10(0.4) ≈ −8 dBFS.
+    // 20 * log10(0.4) is about -8 dBFS.
     assert!(data.dbfs[0] > -8.0, "{:?}", data.dbfs);
     let after = dataflow.metrics();
     assert_eq!(
@@ -1097,7 +1079,7 @@ fn time_history_keeps_its_window_and_drops_old_chunks_after_gaps() {
     release.wait();
     assert_eq!(telemetry.snapshot().dropped_blocks, 7);
     drained(3_200);
-    // The capture keeps counting source frames across dropped blocks.
+    // Source positions include the seven dropped 1,600-frame blocks.
     capture.write(&stereo(14_400, 1_600));
     history_at(&history.reader(), output, &mut view, 16_000);
     assert!(
@@ -1106,8 +1088,6 @@ fn time_history_keeps_its_window_and_drops_old_chunks_after_gaps() {
     );
     assert!(view.iter().any(|frame| frame.gap_before));
 }
-
-// ---- errors and control path (A8) -----------------------------------------------
 
 #[test]
 fn invalid_specs_fail_without_creating_demand() {
@@ -1167,7 +1147,6 @@ fn invalid_specs_fail_without_creating_demand() {
         dataflow.handle.subscribe(spec),
         Err(ControlError::InvalidSpec(SpecError::HistoryTooLarge))
     ));
-    // One spec naming one binding for two different Peaks.
     let (mut spec, fft) = fft_spec(fft32());
     let short = spec.add(fft, peak(100.0));
     let long = spec.add(fft, peak(900.0));
@@ -1234,8 +1213,6 @@ fn sustained_control_load_does_not_starve_audio() {
     });
 }
 
-// ---- steady-state cost ------------------------------------------------------------
-
 #[test]
 fn steady_state_worker_does_not_allocate_while_readers_keep_up() {
     let (mut capture, dataflow, _) = fixture(2, 32, 480);
@@ -1257,7 +1234,6 @@ fn steady_state_worker_does_not_allocate_while_readers_keep_up() {
     let spectrum = dataflow.subscribe(spectrum);
     let (pcm, pcm_output) = pcm_spec(Keep::Seconds(1.0));
     let pcm = dataflow.subscribe(pcm);
-    // The Level Meter's shape: Levels read as they are and by a held Peak.
     let mut levels = DataSpec::new();
     let levels_node = levels.add(SOURCE, NodeSpec::Levels);
     let held = levels.add(levels_node, peak(2_000.0));
@@ -1311,8 +1287,6 @@ fn saved_spec_round_trips_and_malformed_graphs_are_rejected_before_use() {
     let text = serde_json::to_string(&spec).unwrap();
     assert_eq!(serde_json::from_str::<DataSpec>(&text).unwrap(), spec);
 
-    // A node reading a later node, or an output naming a missing node, would make
-    // the graph walk out of bounds: refused when reading the file.
     for broken in [
         r#"{"nodes":[{"input":1,"kind":"levels"},{"input":null,"kind":"levels"}],"outputs":[]}"#,
         r#"{"nodes":[{"input":null,"kind":"levels"}],"outputs":[{"node":4,"keep":"latest"}]}"#,
@@ -1323,7 +1297,6 @@ fn saved_spec_round_trips_and_malformed_graphs_are_rejected_before_use() {
             "{broken}"
         );
     }
-    // Structurally sound but wrong for the source: rejected by subscribe.
     let (_capture, dataflow, _) = fixture(2, 4, 512);
     let saved: DataSpec = serde_json::from_str(&text).unwrap();
     assert!(matches!(

@@ -7,6 +7,7 @@ pub enum WindowFunction {
     PeriodicHann,
 }
 
+/// Window and hop sizes count source frames.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FftConfig {
     pub window_size: usize,
@@ -14,9 +15,7 @@ pub struct FftConfig {
     pub floor_dbfs: f32,
 }
 
-/// Largest accepted FFT window: four times the largest the settings offer. Saved
-/// or hand-written configurations beyond it are rejected before anything is
-/// planned or allocated.
+/// Four times the largest window in settings; checked before planning or allocation.
 pub(super) const MAX_WINDOW_SIZE: usize = 65_536;
 
 impl FftConfig {
@@ -99,9 +98,8 @@ impl fmt::Display for FftConfigError {
 
 impl Error for FftConfigError {}
 
-/// Sliding-window magnitude spectrum: the first result after `window_size`
-/// samples, then one every `hop_size` samples. Bins are peak amplitude in dBFS
-/// (a full-scale sine centered on a bin reads 0 dBFS), clamped to the floor.
+/// Bins are peak amplitude in dBFS, clamped to the floor; a full-scale bin-centered sine is 0 dBFS.
+/// First result follows `window_size` source frames, then one follows every `hop_size` frames.
 pub(crate) struct StreamingFft {
     config: FftConfig,
     fft: Arc<dyn RealToComplex<f32>>,
@@ -155,9 +153,7 @@ impl StreamingFft {
         }
     }
 
-    /// Consume samples until a result is due. Returns how many samples were
-    /// consumed when a new result was computed, or None when all of `samples` were
-    /// consumed without one.
+    /// Returns the consumed prefix length when a result is ready; `None` consumes all input.
     pub(crate) fn push(&mut self, samples: &[f32]) -> Option<usize> {
         let size = self.config.window_size;
         let mut consumed = 0;

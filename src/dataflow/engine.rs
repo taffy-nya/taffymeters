@@ -1,7 +1,5 @@
-//! Worker-side analysis graph. Subscriptions intern their `DataSpec` into shared
-//! nodes (pure nodes by key, stateful nodes per owner or explicit binding), the
-//! graph is compiled into a flat per-block plan, and results are staged into
-//! pooled frames and pushed to the output rings once per block.
+//! Pure nodes share keys; stateful nodes are private per subscription unless explicitly bound.
+//! Block processing reuses a compiled plan and pooled frames; control changes rebuild the plan.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -36,7 +34,6 @@ type NodeId = usize;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeMetrics {
-    /// Live subscriptions.
     pub subscriptions: u64,
     /// Interned nodes, including the source and inactive nodes.
     pub nodes: u64,
@@ -46,7 +43,6 @@ pub struct RuntimeMetrics {
     pub active_spectrum_nodes: u64,
     /// Active Levels and Loudness nodes and the Peak nodes after Levels.
     pub active_level_nodes: u64,
-    /// Output rings (nodes some subscription reads).
     pub rings: u64,
     pub fft_evaluations: u64,
     /// Runs of spectrum nodes after the FFT.
@@ -55,7 +51,6 @@ pub struct RuntimeMetrics {
     pub pcm_frames: u64,
     /// Source frames analyzed, summed over Levels and Loudness nodes.
     pub level_frames: u64,
-    /// Frames pushed into output rings.
     pub publications: u64,
 }
 
@@ -96,8 +91,6 @@ impl Metrics {
     }
 }
 
-/// Who owns a node's state: nobody (pure, shared by key), one subscription, or an
-/// explicit binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum StateScope {
     Pure,
@@ -184,9 +177,8 @@ enum Kernel {
         state: PeakState,
     },
     Levels {
-        /// Largest absolute sample per channel since the last publication.
+        /// Per-channel sample maxima accumulated since the last publication.
         interval_peaks: Vec<f32>,
-        /// The last published interval, per channel in dBFS.
         dbfs: Vec<f32>,
         start_frame: u64,
     },
@@ -197,7 +189,6 @@ enum Kernel {
 }
 
 impl Kernel {
-    /// The dB vector a spectrum or Levels node produced last.
     fn values(&self) -> &[f32] {
         match self {
             Self::Fft(fft) => fft.bins_dbfs(),
@@ -209,8 +200,6 @@ impl Kernel {
         }
     }
 
-    /// Forget what a Levels or Loudness node measured; with `start`, its results
-    /// only cover audio from that source frame on.
     fn reset_time_domain(&mut self, start: Option<u64>) {
         let start_frame = match self {
             Self::Levels {
@@ -254,18 +243,15 @@ struct Node {
     kernel: Kernel,
     /// This node or an ancestor keeps state.
     stateful_chain: bool,
-    /// FFT parameters of the chain (spectrum nodes and the FFT itself).
     fft: Option<FftMetadata>,
     active: bool,
     activated_before: bool,
-    /// Some subscription currently wants this node's own output.
     ring_demanded: bool,
     /// Its output was read at some point; a later restart is a gap for readers.
     ring_served: bool,
     /// Spectrum results before this source frame are not accepted (after reset or
     /// reactivation the FFT window still holds older audio).
     accept_from: u64,
-    /// Produced a result in the current hop.
     produced: bool,
     ring: Option<RingAttach>,
 }
@@ -277,9 +263,8 @@ struct BindingState {
 
 struct Subscription {
     spec: DataSpec,
-    /// Node of each spec node, in spec order.
+    /// Source first, then spec nodes in declaration order.
     nodes: Vec<NodeId>,
-    /// Node of each output.
     outputs: Vec<NodeId>,
     starts: Vec<u64>,
     revision: u64,
@@ -289,21 +274,20 @@ struct Subscription {
     gap_epoch: u64,
 }
 
-/// A spec the runtime accepted, as finally applied (bindings may have forked).
+/// Bindings may differ from the submitted spec after a private fork.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Applied {
     pub(super) spec: DataSpec,
     pub(super) revision: u64,
 }
 
+/// Descendant lists run inputs before their readers.
 #[derive(Default)]
 struct Plan {
     source: Option<NodeId>,
     channels: Vec<NodeId>,
-    /// Active Levels nodes with their active descendants in pre-order.
     levels: Vec<(NodeId, Vec<NodeId>)>,
     loudness: Vec<NodeId>,
-    /// Active FFT nodes with their active descendants in pre-order.
     ffts: Vec<(NodeId, Vec<NodeId>)>,
 }
 
@@ -335,7 +319,6 @@ pub(super) struct Engine {
     publish_interval_frames: usize,
 }
 
-/// Borrow a parent immutably and its child mutably.
 fn parent_and_child(
     nodes: &mut [Option<Node>],
     parent: NodeId,
@@ -365,7 +348,6 @@ fn parent_and_child(
     }
 }
 
-/// A binding that two outputs of one spec resolve to different nodes.
 fn conflicting_binding(spec: &DataSpec, outputs: &[NodeId]) -> Option<SharedAnalysisId> {
     let mut agreed: HashMap<SharedAnalysisId, NodeId> = HashMap::new();
     spec.outputs()
@@ -377,7 +359,7 @@ fn conflicting_binding(spec: &DataSpec, outputs: &[NodeId]) -> Option<SharedAnal
         })
 }
 
-/// A pooled frame no reader holds, or a new one.
+/// Readers retaining every pooled frame force a new allocation.
 fn take_frame(pool: &mut Vec<Arc<Frame>>, empty: impl FnOnce() -> FrameData) -> Arc<Frame> {
     if let Some(index) = pool
         .iter_mut()
@@ -447,8 +429,6 @@ impl Engine {
             .as_mut()
             .expect("node IDs refer to live interned nodes")
     }
-
-    // ---- interning -------------------------------------------------------------
 
     fn intern(&mut self, key: NodeKey, spec: Option<NodeSpec>) -> NodeId {
         if let Some(&id) = self.index.get(&key) {
@@ -552,8 +532,6 @@ impl Engine {
         self.free_nodes.push(id);
     }
 
-    /// Intern every node of `spec` for subscription `owner`: the source first, then
-    /// one reference per spec node (spec node `i` at index `i + 1`).
     fn intern_spec(&mut self, owner: u64, spec: &DataSpec) -> (Vec<NodeId>, Vec<NodeId>) {
         let scopes = spec
             .binding_scopes()
@@ -593,7 +571,6 @@ impl Engine {
         (ids, outputs)
     }
 
-    /// Release in reverse so children go before their inputs.
     fn release_all(&mut self, ids: &[NodeId]) {
         for &id in ids.iter().rev() {
             self.release(id);
@@ -652,8 +629,6 @@ impl Engine {
         // reader never sees a route pointing at a vanished or reused ring.
         self.retired_rings.push(index);
     }
-
-    // ---- subscription control ---------------------------------------------------
 
     pub(super) fn subscribe(
         &mut self,
@@ -723,8 +698,6 @@ impl Engine {
         Ok(Applied { spec, revision: 1 })
     }
 
-    /// Re-intern `spec` for subscription `id`. A binding whose output would change
-    /// while other members keep it forks: this subscription continues privately.
     pub(super) fn update(&mut self, id: u64, mut spec: DataSpec) -> Result<Applied, ControlError> {
         if !self.subscriptions.contains_key(&id) {
             return Err(ControlError::SubscriptionClosed);
@@ -764,8 +737,7 @@ impl Engine {
         Ok(Applied { spec, revision })
     }
 
-    /// Apply new specs to every member of `binding` together. Fails without any
-    /// change unless all members (and other bindings they use) stay consistent.
+    /// All members switch together; inconsistent bindings leave every member unchanged.
     pub(super) fn update_shared(
         &mut self,
         binding: SharedAnalysisId,
@@ -822,7 +794,6 @@ impl Engine {
         Ok(applied)
     }
 
-    /// Swap a subscription to already-interned nodes, then release the old ones.
     fn replace(&mut self, id: u64, spec: DataSpec, nodes: Vec<NodeId>, outputs: Vec<NodeId>) {
         let old = self
             .subscriptions
@@ -897,7 +868,6 @@ impl Engine {
             self.detach_ring(node);
         }
         self.release_all(&subscription.nodes);
-        // `reconcile` drops the route together with its retired rings.
         self.reconcile();
     }
 
@@ -920,7 +890,6 @@ impl Engine {
         }
         subscription.paused = paused;
         if !paused {
-            // Resume reading from now; what was not recorded is not claimed.
             subscription.starts.fill(frontier);
             subscription.gap_epoch += 1;
             self.flush_pcm_for(&[id]);
@@ -928,9 +897,8 @@ impl Engine {
         self.reconcile();
     }
 
-    /// Reset the stateful nodes in this subscription's scope (shared ones for every
-    /// member) and restart reading for this subscription and every other one that
-    /// reads a reset node. Pure shared outputs are never cleared for others.
+    /// Shared state resets for all readers of the affected nodes, restarting their histories.
+    /// Pure shared outputs are not cleared for other subscriptions.
     pub(super) fn reset_state(&mut self, id: u64) {
         let Some(subscription) = self.subscriptions.get(&id) else {
             return;
@@ -998,8 +966,6 @@ impl Engine {
             self.publish();
         }
     }
-
-    // ---- demand, activation and plan --------------------------------------------
 
     fn reconcile(&mut self) {
         let previously_demanded: HashSet<NodeId> = self
@@ -1171,7 +1137,6 @@ impl Engine {
         self.plan = plan;
     }
 
-    /// Active descendants of `node` in pre-order, so inputs run before readers.
     fn active_descendants(&self, node: &Node) -> Vec<NodeId> {
         let mut order = Vec::new();
         let mut stack: Vec<NodeId> = node.children.iter().rev().copied().collect();
@@ -1236,7 +1201,6 @@ impl Engine {
                         gap_epoch: subscription.gap_epoch,
                     })
                     .collect();
-                // A paused subscription keeps showing what was visible when it paused.
                 let frozen = if !subscription.paused {
                     Vec::new()
                 } else if let Some(previous) = store.routes.get(&id).filter(|route| route.paused) {
@@ -1268,7 +1232,6 @@ impl Engine {
                 self.free_rings.push(index);
             }
         }
-        // Readers may still hold frames; this only releases our references.
         drop(stale);
     }
 
@@ -1289,7 +1252,6 @@ impl Engine {
                 Kernel::Channel { .. } => channels += 1,
                 Kernel::Fft(_) => ffts += 1,
                 Kernel::Tilt { .. } | Kernel::Smooth { .. } | Kernel::Gain { .. } => spectrum += 1,
-                // A Peak counts with the chain it follows.
                 Kernel::Peak { .. } if node.fft.is_some() => spectrum += 1,
                 Kernel::Levels { .. } | Kernel::Loudness { .. } | Kernel::Peak { .. } => {
                     levels += 1;
@@ -1312,8 +1274,6 @@ impl Engine {
         metrics.active_level_nodes.store(levels, Ordering::Release);
         metrics.rings.store(rings, Ordering::Release);
     }
-
-    // ---- continuity -------------------------------------------------------------
 
     pub(super) fn resume_at(&mut self, continuity: u64) {
         self.minimum_continuity = continuity;
@@ -1369,8 +1329,7 @@ impl Engine {
         self.discontinuity_count = self.discontinuity_count.wrapping_add(1);
     }
 
-    // ---- per block --------------------------------------------------------------
-
+    /// Reuses warm buffers and pooled frames; readers must release frames for allocation-free reuse.
     pub(super) fn process_block(&mut self, block: &AudioBlock) {
         if block.continuity < self.minimum_continuity {
             return;
@@ -1539,7 +1498,6 @@ impl Engine {
         self.publish();
     }
 
-    /// Run one FFT result through its active descendants and stage their outputs.
     fn run_hop(&mut self, fft_index: usize, context: &StageContext) {
         let fft_id = self.plan.ffts[fft_index].0;
         self.node_mut(fft_id).produced = true;
@@ -1586,8 +1544,6 @@ impl Engine {
             .fetch_add(evaluations, Ordering::Relaxed);
     }
 
-    /// Publish one Levels interval in dBFS and run it through the Levels node's
-    /// active descendants (Peak nodes), staging their outputs.
     fn run_levels(&mut self, levels_index: usize, context: &StageContext) {
         let levels_id = self.plan.levels[levels_index].0;
         let node = self.node_mut(levels_id);
@@ -1634,8 +1590,6 @@ impl Engine {
         self.result_version
     }
 
-    /// Stage the dB vector of a spectrum node (a Spectrum frame) or of a Levels
-    /// chain node (a Levels frame).
     fn stage_values(&mut self, id: NodeId, context: &StageContext) {
         if self.node(id).ring.is_none() {
             return;
@@ -1705,7 +1659,6 @@ impl Engine {
         self.staged.push((id, frame));
     }
 
-    /// Publish the merged PCM as one chunk, swapping buffers with a pooled frame.
     fn stage_pcm(&mut self, source: NodeId) {
         let pending_frames = match &self.node(source).kernel {
             Kernel::Source { pending_frames, .. } => *pending_frames,
@@ -1747,8 +1700,6 @@ impl Engine {
         self.staged.push((source, frame));
     }
 
-    /// Push staged frames into their rings under one lock, trim each ring to its
-    /// kept duration, and return evicted frames to the pools.
     fn publish(&mut self) {
         if self.staged.is_empty() {
             return;

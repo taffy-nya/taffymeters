@@ -1,8 +1,5 @@
-//! `DataSpec`: the value a Module declares for its audio data. It names the
-//! processing chain (nodes and their parameters), the outputs the Module reads and
-//! the explicit sharing of outputs. The same value is the source of the Module's
-//! analysis settings and of what persistence will save; the runtime interns it into
-//! the shared node graph.
+//! Modules, persistence and the runtime use the same graph declaration; runtime
+//! interning determines which declared nodes share analysis state.
 
 use std::{error::Error, fmt};
 
@@ -48,7 +45,6 @@ impl SmoothConfig {
     }
 }
 
-/// Peak hold, then a fall at constant acceleration (dB/s²) starting from rest.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PeakConfig {
     pub hold_ms: f32,
@@ -79,34 +75,25 @@ impl PeakConfig {
     }
 }
 
-/// One processing step and its parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum NodeSpec {
-    /// Source PCM → one channel (Left/Right by layout, a discrete index, or the
-    /// average of all channels).
     Channel(ChannelSelection),
-    /// One channel → magnitude spectrum in dBFS, periodic Hann, every hop.
     Fft(FftConfig),
-    /// Spectrum + `db_per_octave · log2(f / 1 kHz)`.
-    Tilt { db_per_octave: f32 },
-    /// Per-bin attack/release exponential smoothing in source time (stateful).
+    Tilt {
+        db_per_octave: f32,
+    },
     Smooth(SmoothConfig),
-    /// Spectrum + `db`.
-    Gain { db: f32 },
-    /// Per element (spectrum bin or Levels channel) peak hold, then a fall at
-    /// constant acceleration, in source time (stateful). Reads and produces the
-    /// kind of its input.
+    Gain {
+        db: f32,
+    },
     Peak(PeakConfig),
-    /// Source PCM → per channel the sample peak of each publication interval, in
-    /// dBFS (stateful: the interval starts at the reader's start).
+    /// Per-channel interval sample peaks in dBFS; private intervals begin at the reader's start.
     Levels,
-    /// Source PCM → 400 ms K-weighted momentary loudness of the whole programme
-    /// (BS.1770, every channel weighted 1), in LUFS (stateful).
+    /// 400 ms K-weighted whole-programme loudness in LUFS; every channel has weight 1.
     Loudness,
 }
 
-/// Kind of data a node produces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SignalKind {
     Pcm,
@@ -117,8 +104,6 @@ pub(crate) enum SignalKind {
 }
 
 impl NodeSpec {
-    /// Kind this node produces from an input of kind `input`, or `None` when it
-    /// cannot read that kind.
     pub(crate) fn output_kind(&self, input: SignalKind) -> Option<SignalKind> {
         match (self, input) {
             (Self::Channel(_), SignalKind::Pcm) => Some(SignalKind::Mono),
@@ -133,8 +118,6 @@ impl NodeSpec {
         }
     }
 
-    /// Stateful nodes are private per subscription unless an explicit binding
-    /// covers them; pure nodes are shared whenever their key matches.
     pub fn is_stateful(&self) -> bool {
         matches!(
             self,
@@ -174,11 +157,9 @@ impl NodeSpec {
     }
 }
 
-/// A node of a `DataSpec`, or the source itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeRef(u32);
 
-/// The interleaved source PCM every chain starts from.
 pub const SOURCE: NodeRef = NodeRef(u32::MAX);
 
 impl NodeRef {
@@ -187,13 +168,11 @@ impl NodeRef {
     }
 }
 
-/// How much of an output a reader keeps available.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Keep {
-    /// Only the most recent result.
     Latest,
-    /// Every result of the last `seconds` of source time (History).
+    /// Measured in source time.
     Seconds(f32),
 }
 
@@ -229,8 +208,7 @@ pub struct DataSpec {
     outputs: Vec<OutputSpec>,
 }
 
-/// Saved form of a `DataSpec`: node inputs and output nodes are indices into
-/// `nodes`, `null` meaning the source.
+/// Node references are indices; `null` denotes the source.
 #[derive(Clone, Serialize, Deserialize)]
 struct SpecFile {
     nodes: Vec<NodeFile>,
@@ -283,8 +261,7 @@ impl From<DataSpec> for SpecFile {
 impl TryFrom<SpecFile> for DataSpec {
     type Error = String;
 
-    /// Only the graph structure is checked here (inputs come before their nodes,
-    /// outputs name existing nodes); parameters are validated on subscribe.
+    /// Deserialization checks structure only; subscribe validates against the source.
     fn try_from(file: SpecFile) -> Result<Self, Self::Error> {
         let mut spec = Self::new();
         for (index, node) in file.nodes.into_iter().enumerate() {
@@ -319,7 +296,6 @@ impl DataSpec {
         Self::default()
     }
 
-    /// Append `node` reading from `input` (an earlier node or `SOURCE`).
     pub fn add(&mut self, input: NodeRef, node: NodeSpec) -> NodeRef {
         assert!(
             input == SOURCE || (input.0 as usize) < self.nodes.len(),
@@ -329,7 +305,6 @@ impl DataSpec {
         NodeRef(self.nodes.len() as u32 - 1)
     }
 
-    /// Append `nodes` one after another, starting from `input`; returns the last.
     pub fn chain(&mut self, input: NodeRef, nodes: impl IntoIterator<Item = NodeSpec>) -> NodeRef {
         nodes
             .into_iter()
@@ -345,8 +320,6 @@ impl DataSpec {
         OutputId(self.outputs.len() as u32 - 1)
     }
 
-    /// Share `output` (and the stateful nodes it depends on) under `binding`, or
-    /// make it private again with `None`.
     pub fn bind(&mut self, output: OutputId, binding: Option<SharedAnalysisId>) {
         self.outputs[output.index()].binding = binding;
     }
@@ -357,14 +330,13 @@ impl DataSpec {
             .map(|node| node.spec)
     }
 
-    /// Replace the parameters of `node`; the edit is checked when submitted.
+    /// Validation is deferred until submission to the runtime.
     pub fn set_node(&mut self, node: NodeRef, spec: NodeSpec) {
         if let Some(entry) = node.index().and_then(|index| self.nodes.get_mut(index)) {
             entry.spec = spec;
         }
     }
 
-    /// `(node, input, parameters)` in declaration order (inputs come first).
     pub fn nodes(&self) -> impl Iterator<Item = (NodeRef, NodeRef, NodeSpec)> + '_ {
         self.nodes
             .iter()
@@ -380,8 +352,7 @@ impl DataSpec {
         &self.nodes
     }
 
-    /// Same graph: node kinds and inputs, output nodes and kinds of retention.
-    /// Parameters, durations and bindings may differ.
+    /// Ignores parameter values, retention durations and bindings.
     pub fn same_shape(&self, other: &Self) -> bool {
         self.nodes.len() == other.nodes.len()
             && self.outputs.len() == other.outputs.len()
@@ -395,23 +366,18 @@ impl DataSpec {
             })
     }
 
-    /// Replace every binding through `map`.
     pub fn rebind(&mut self, mut map: impl FnMut(SharedAnalysisId) -> SharedAnalysisId) {
         for output in &mut self.outputs {
             output.binding = output.binding.map(&mut map);
         }
     }
 
-    /// Set how long `output` is kept.
     pub fn set_keep(&mut self, output: OutputId, keep: Keep) {
         if let Some(entry) = self.outputs.get_mut(output.index()) {
             entry.keep = keep;
         }
     }
 
-    /// Canonical copy checked against the source: node kinds connect, parameters
-    /// are finite and in range, channels exist, histories fit the memory budget, and
-    /// no stateful node is claimed by two different bindings.
     pub(crate) fn validated(&self, descriptor: &AudioDescriptor) -> Result<Self, SpecError> {
         if self.outputs.is_empty() {
             return Err(SpecError::NoOutputs);
@@ -461,9 +427,8 @@ impl DataSpec {
         Ok(validated)
     }
 
-    /// Binding covering each node: an output's binding claims every stateful node
-    /// the output depends on (including the output node itself). Pure nodes stay
-    /// shared by key and are never claimed.
+    /// A binding claims stateful nodes on its output's chain, including the output
+    /// only if stateful. Pure nodes remain shared by key.
     pub(crate) fn binding_scopes(&self) -> Result<Vec<Option<SharedAnalysisId>>, SpecError> {
         let mut scopes: Vec<Option<SharedAnalysisId>> = vec![None; self.nodes.len()];
         for output in &self.outputs {
@@ -486,9 +451,7 @@ impl DataSpec {
         Ok(scopes)
     }
 
-    /// Upper estimate of the memory one History keeps: per retained result its
-    /// payload plus the frame allocation, metadata and ring entry, with one extra
-    /// result kept at the window boundary.
+    /// Includes one extra result at the retention window boundary.
     fn history_bytes(
         &self,
         node: NodeRef,
@@ -526,18 +489,15 @@ impl DataSpec {
     }
 }
 
-/// Time-domain results (PCM chunks, Levels, Loudness) are published at most this
-/// often.
 pub(crate) const TIME_PUBLICATIONS_PER_SECOND: usize = 30;
 
-/// Storage of one retained result besides its payload: the frame and its
-/// metadata, the `Arc` counts, the ring entry and allocator bookkeeping.
+/// Includes frame metadata, Arc counts, a ring entry and 32 bytes of allocator bookkeeping.
 const FRAME_OVERHEAD_BYTES: f64 = (std::mem::size_of::<crate::snapshot::Frame>()
     + 2 * std::mem::size_of::<usize>()
     + std::mem::size_of::<std::sync::Arc<crate::snapshot::Frame>>()
     + 32) as f64;
 
-/// Largest History a single output may keep.
+/// Applied per output, not per subscription.
 pub const HISTORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) fn canonical_zero(value: f32) -> f32 {
@@ -548,11 +508,8 @@ pub(crate) fn canonical_zero(value: f32) -> f32 {
 pub enum SpecError {
     NoOutputs,
     UnknownNode,
-    /// The output's data kind is not published (a Channel node's mono samples).
     UnsupportedOutput,
-    KindMismatch {
-        node: usize,
-    },
+    KindMismatch { node: usize },
     InvalidChannel(ChannelError),
     InvalidFft,
     InvalidTilt,
@@ -607,13 +564,8 @@ mod tests {
         AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo).unwrap()
     }
 
-    /// Checks the History budget boundary of `node`. The frame model is
-    /// `bytes = (results_per_second * seconds + 1) *
-    /// (payload + FRAME_OVERHEAD_BYTES)`, i.e. one extra result at the window
-    /// boundary. `max_results` is the largest whole number of retained results
-    /// whose bytes stay within `HISTORY_BUDGET_BYTES`; the two probes sit half a
-    /// result inside and 1.5 results beyond that limit, so f32 rounding of the
-    /// seconds cannot flip either side.
+    /// Probe half a result inside and 1.5 results beyond the budget so rounding
+    /// the duration to f32 cannot flip either side.
     fn assert_history_boundary(
         mut spec: DataSpec,
         node: NodeRef,
@@ -660,7 +612,6 @@ mod tests {
         let descriptor = stereo_48k();
         let mut spec = DataSpec::new();
         let levels = spec.add(SOURCE, NodeSpec::Levels);
-        // A Peak over Levels keeps one value per channel, like Levels.
         let node = spec.add(levels, NodeSpec::Peak(PeakConfig::new(0.0, 1.0).unwrap()));
         assert_history_boundary(
             spec,

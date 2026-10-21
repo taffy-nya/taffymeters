@@ -1,5 +1,3 @@
-//! Worker thread, control path and the handles Modules hold.
-
 use std::{
     error::Error,
     fmt,
@@ -28,9 +26,8 @@ use super::{
 const CONTROL_QUEUE_CAPACITY: usize = 16;
 const COMMAND_BUDGET_PER_TICK: usize = 16;
 
-/// Called on the worker thread after a processed block published new results. Lets
-/// a UI sleep until there is something new to draw. It must be cheap and must not
-/// block; it never runs in the audio callback.
+/// Called on the worker, never the audio callback, after a block publishes results.
+/// Must be cheap and nonblocking.
 pub type PublicationWaker = Box<dyn Fn() + Send + Sync>;
 
 type Response<T> = SyncSender<Result<T, ControlError>>;
@@ -104,7 +101,7 @@ pub(crate) struct Dataflow {
     worker: Option<JoinHandle<()>>,
 }
 
-/// Cloneable capability to create subscriptions; does not keep the worker alive.
+/// Does not keep the worker alive.
 #[derive(Clone)]
 pub struct DataflowHandle {
     commands: SyncSender<Command>,
@@ -117,7 +114,6 @@ pub struct DataflowHandle {
     store: SharedStore,
     metrics: Arc<Metrics>,
     waker: Arc<ArcSwapOption<PublicationWaker>>,
-    /// Live controllers, for edits of a whole binding.
     controls: Arc<Mutex<Vec<Weak<ControlShared>>>>,
     #[cfg(any(test, feature = "automation"))]
     processed_through_frame: Arc<AtomicU64>,
@@ -131,7 +127,7 @@ pub struct DataSubscription {
     reader: DataReader,
 }
 
-/// Cloneable control of one subscription; does not add demand.
+/// Clones do not add demand.
 #[derive(Clone)]
 pub struct DataController {
     inner: Arc<ControlShared>,
@@ -143,8 +139,7 @@ struct ControlShared {
     worker: Thread,
     stopped: Arc<AtomicBool>,
     descriptor: Arc<AudioDescriptor>,
-    /// The applied spec and its revision; held while an update is in flight so
-    /// concurrent edits of one subscription serialize.
+    /// Held across in-flight updates to serialize concurrent edits.
     applied: Mutex<Applied>,
     active: AtomicBool,
 }
@@ -184,8 +179,7 @@ fn send(
     }
 }
 
-/// Send and wait for the worker's answer. Control path only: never call from the
-/// audio callback or the worker.
+/// Control path only: waiting for the worker would deadlock on the worker or block audio capture.
 fn request<T>(
     commands: &SyncSender<Command>,
     worker: &Thread,
@@ -220,7 +214,6 @@ impl Drop for DataSubscription {
 }
 
 impl DataController {
-    /// The spec as the runtime applied it.
     pub fn spec(&self) -> DataSpec {
         lock(&self.inner.applied).spec.clone()
     }
@@ -233,11 +226,9 @@ impl DataController {
         lock(&self.inner.applied).revision
     }
 
-    /// Edit this subscription's spec and wait until the runtime switched to it.
-    /// Unchanged nodes keep their state; changed nodes and their stateful
-    /// descendants start fresh. If a bound output would change while other members
-    /// keep the binding, this subscription forks to a private copy. A failed
-    /// update leaves the subscription unchanged.
+    /// Waits for the worker to switch; failure leaves the subscription unchanged.
+    /// Changed nodes and their stateful descendants start fresh; unchanged nodes keep state.
+    /// Changing a bound output forks this subscription if other members keep the binding.
     pub fn update(&self, edit: impl FnOnce(&mut DataSpec)) -> Result<(), ControlError> {
         self.inner.ensure_active()?;
         let mut applied = lock(&self.inner.applied);
@@ -287,7 +278,6 @@ impl DataController {
 }
 
 impl Dataflow {
-    /// A worker for a source that always delivers (test fixtures).
     #[cfg(test)]
     pub(crate) fn spawn(
         descriptor: Arc<AudioDescriptor>,
@@ -297,8 +287,7 @@ impl Dataflow {
         Self::spawn_with(descriptor, endpoint, telemetry, false)
     }
 
-    /// `fill_silence`: a source that may stop delivering samples while silent (the
-    /// system loopback); the worker then stands in silence (see `silence`).
+    /// Enable `fill_silence` for loopback sources that stop delivering samples while idle.
     pub(crate) fn spawn_with(
         descriptor: Arc<AudioDescriptor>,
         mut endpoint: ProcessingEndpoint,
@@ -394,8 +383,6 @@ impl Dataflow {
 }
 
 impl DataflowHandle {
-    /// Register `spec` as a new subscription. Private stateful nodes start empty;
-    /// pure nodes are shared with identical chains of other subscriptions.
     pub fn subscribe(&self, spec: DataSpec) -> Result<DataSubscription, ControlError> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(ControlError::Stopped);
@@ -443,6 +430,7 @@ impl DataflowHandle {
             .filter_map(Weak::upgrade)
             .filter(|control| control.active.load(Ordering::Acquire))
             .collect();
+        // Lock subscriptions in id order to avoid deadlocks between concurrent shared edits.
         members.sort_by_key(|control| control.id);
         let mut guards = Vec::new();
         let mut specs = Vec::new();
@@ -476,7 +464,6 @@ impl DataflowHandle {
         Ok(())
     }
 
-    /// A binding no subscription of this process uses yet.
     pub fn allocate_binding(&self) -> SharedAnalysisId {
         SharedAnalysisId(self.next_binding_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -485,12 +472,10 @@ impl DataflowHandle {
         self.metrics.snapshot()
     }
 
-    /// Install (or clear) the callback run after the worker publishes new results.
     pub fn set_publication_waker(&self, waker: Option<PublicationWaker>) {
         self.waker.store(waker.map(Arc::new));
     }
 
-    /// Allocations and CPU time of the worker thread so far (test/automation only).
     #[cfg(any(test, feature = "automation"))]
     pub(crate) fn worker_sample(&self) -> crate::probe::WorkerSample {
         self.probe.sample()

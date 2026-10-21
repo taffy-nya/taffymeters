@@ -1,7 +1,5 @@
-//! Published results shared between the worker and readers. The worker takes the
-//! lock once per processed block to push that block's results (so outputs of one
-//! block appear together) and on control changes; readers take it once per read.
-//! Only pointer operations happen under the lock, never analysis.
+//! All outputs of one processed block are published under one lock; route changes are atomic too.
+//! The shared lock protects pointer operations, never analysis.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -14,7 +12,6 @@ use crate::snapshot::Frame;
 pub(crate) struct Store {
     /// Output rings, indexed by ring id; `None` slots are free.
     pub(crate) rings: Vec<Option<Ring>>,
-    /// What each live subscription reads, by subscription id.
     pub(crate) routes: HashMap<u64, Route>,
 }
 
@@ -25,9 +22,7 @@ pub(crate) struct Ring {
 }
 
 pub(crate) struct Route {
-    /// Revision of the applied spec.
     pub(crate) revision: u64,
-    /// Readers keep their last results while the subscription's analysis is paused.
     pub(crate) paused: bool,
     /// Indexed by `OutputId`.
     pub(crate) outputs: Vec<RouteOutput>,

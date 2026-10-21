@@ -2,10 +2,8 @@ use std::collections::VecDeque;
 
 const MOMENTARY_SECONDS: f32 = 0.4;
 pub(super) const LUFS_FLOOR: f32 = -60.0;
-/// Sample peaks below this (and silence) read as this, never −∞.
 pub(super) const LEVELS_FLOOR_DBFS: f32 = -150.0;
 
-/// Fold the largest absolute sample per channel of `interleaved` into `peaks`.
 pub(super) fn accumulate_peaks(interleaved: &[f32], peaks: &mut [f32]) {
     for frame in interleaved.chunks_exact(peaks.len()) {
         for (peak, sample) in peaks.iter_mut().zip(frame) {
@@ -14,7 +12,6 @@ pub(super) fn accumulate_peaks(interleaved: &[f32], peaks: &mut [f32]) {
     }
 }
 
-/// Sample peak amplitude in dBFS, floored at `LEVELS_FLOOR_DBFS`.
 pub(super) fn peak_dbfs(amplitude: f32) -> f32 {
     if amplitude > 0.0 {
         (20.0 * amplitude.log10()).max(LEVELS_FLOOR_DBFS)
@@ -23,8 +20,7 @@ pub(super) fn peak_dbfs(amplitude: f32) -> f32 {
     }
 }
 
-/// Momentary loudness of the whole programme: every channel K-weighted, the
-/// 400 ms mean squares summed with weight 1 (BS.1770).
+/// BS.1770 momentary loudness; K-weighted channel powers use equal weights.
 pub(super) struct LoudnessAnalyzer {
     channels: Vec<ChannelLevel>,
 }
@@ -77,6 +73,7 @@ impl ChannelLevel {
         Self {
             stage1: Biquad::stage1(sample_rate),
             stage2: Biquad::stage2(sample_rate),
+            // Push precedes eviction, so reserve one extra slot to avoid growth on the worker.
             squared: VecDeque::with_capacity(window_size + 1),
             sum: 0.0,
             window_size,
@@ -95,7 +92,6 @@ impl ChannelLevel {
         }
     }
 
-    /// Mean square of the window so far; zero before any sample.
     fn mean_square(&self) -> f64 {
         if self.squared.is_empty() {
             0.0
@@ -145,6 +141,7 @@ impl Biquad {
     }
 
     fn stage1(sample_rate: f64) -> Self {
+        // BS.1770 K-weighting shelf parameters; frequency is in Hz.
         let frequency = 1_681.974_450_955_533;
         let gain_db = 3.999_843_853_973_347;
         let q = 0.707_175_236_955_419_6;
@@ -166,6 +163,7 @@ impl Biquad {
     }
 
     fn stage2(sample_rate: f64) -> Self {
+        // BS.1770 RLB high-pass parameters; frequency is in Hz.
         let frequency = 38.135_470_876_024_44;
         let q = 0.500_327_037_323_877_3;
         let k = (std::f64::consts::PI * frequency / sample_rate).tan();
@@ -211,10 +209,10 @@ mod tests {
 
     #[test]
     fn full_scale_1khz_sine_reads_minus_3_01_lufs_after_a_full_momentary_window() {
-        // BS.1770: K-weighting is +0.691 dB at 1 kHz, which the -0.691 offset
-        // cancels, so a 0 dBFS sine (mean square 1/2) reads 10*log10(0.5) = -3.01
-        // LUFS. The 0.1 dB tolerance covers the biquad's deviation from the
-        // reference at 48 kHz. One second (> 400 ms window + filter settling).
+        // At 1 kHz, K-weighting's +0.691 dB cancels the -0.691 offset;
+        // a full-scale sine's mean square of 1/2 therefore gives -3.01 LUFS.
+        // One second covers the 400 ms window and filter settling. The 0.1 dB tolerance
+        // covers the K-weighting biquad's deviation from the reference at 48 kHz.
         let mut analyzer = LoudnessAnalyzer::new(RATE, 1);
         analyzer.process(&sine_1khz(RATE as usize));
         let lufs = analyzer.lufs();
@@ -223,8 +221,7 @@ mod tests {
 
     #[test]
     fn programme_loudness_sums_the_channels() {
-        // The same sine in both channels is twice the power of one channel:
-        // -3.01 + 3.01 = 0 LUFS; in the left channel only, -3.01 LUFS.
+        // Duplicating the sine doubles power: -3.01 + 3.01 = 0 LUFS.
         let sine = sine_1khz(RATE as usize);
         let mut both = LoudnessAnalyzer::new(RATE, 2);
         both.process(&sine.iter().flat_map(|&s| [s, s]).collect::<Vec<_>>());
@@ -243,8 +240,7 @@ mod tests {
         let mut analyzer = LoudnessAnalyzer::new(RATE, 1);
         analyzer.process(&sine_1khz(RATE as usize));
         assert!(analyzer.lufs() > -10.0);
-        // 0.6 s of silence: the 0.4 s window holds only silence (and no filter
-        // ringing) by now.
+        // Longer than the 400 ms window so filter ringing has also decayed.
         analyzer.process(&vec![0.0; 28_800]);
         assert_eq!(analyzer.lufs(), LUFS_FLOOR);
     }
@@ -252,11 +248,8 @@ mod tests {
     #[test]
     fn sample_peak_is_the_largest_absolute_value_per_channel() {
         let mut peaks = [0.0; 2];
-        // Left: 0.5, -0.8, 0.3 (the negative sample is the peak);
-        // right: 0.25, 0.1, -0.2.
         accumulate_peaks(&[0.5, 0.25, -0.8, 0.1, 0.3, -0.2], &mut peaks);
         assert_eq!(peaks, [0.8, 0.25]);
-        // Accumulates over blocks until the caller starts a new interval.
         accumulate_peaks(&[0.1, -0.9], &mut peaks);
         assert_eq!(peaks, [0.8, 0.9]);
     }

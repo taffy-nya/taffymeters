@@ -1,11 +1,6 @@
-//! Silence for a source that delivers nothing. A system loopback sends no samples
-//! at all while nothing plays, so every analysis would stop at its last result:
-//! meters hold their level, the Spectrum its curve, the peak markers never fall.
-//! The worker then processes silent blocks in real time itself, for a bounded
-//! time that lets stateful nodes (peak hold and fall, loudness windows) settle,
-//! and stops; the time views keep scrolling on their own after that (see
-//! `plotting::ViewClock`). Captured blocks are moved later by the silence
-//! inserted before them, so the analysis timeline stays continuous.
+//! System loopback emits no samples while idle. Bounded worker-generated silence
+//! lets stateful analysis settle; later captured blocks shift by the inserted
+//! silence to keep the analysis timeline continuous.
 
 use std::{
     sync::Arc,
@@ -14,14 +9,11 @@ use std::{
 
 use crate::audio::{AudioBlock, SourceState, SourceTelemetry};
 
-/// How long the source may deliver nothing before silence stands in for it
-/// (blocks normally arrive every 10 ms). Shorter than the time views' own grace,
-/// so they see the silent samples rather than a gap first.
+/// Shorter than the time views' grace so they see silent samples before marking a gap.
 const GRACE: Duration = Duration::from_millis(100);
 /// Longest silence inserted per pause in the source: enough for the peak markers
 /// (hold up to 3 s, then falling) and the 400 ms loudness window to settle.
 const LIMIT: Duration = Duration::from_secs(6);
-/// Silent frames per inserted block: 10 ms.
 const BLOCK_SECONDS: f64 = 0.01;
 
 pub(super) struct SilenceFill {
@@ -29,16 +21,14 @@ pub(super) struct SilenceFill {
     sample_rate: f64,
     block: AudioBlock,
     block_frames: usize,
-    /// Frames and blocks inserted so far; every captured block moves on by them.
     inserted_frames: u64,
     inserted_blocks: u64,
     /// Start frame and sequence the next block continues with (engine timeline);
     /// `None` until the source delivered something.
     next: Option<(u64, u64)>,
-    /// When the current lack of samples began (the last captured block, or the
-    /// source resuming from a pause).
+    /// Start of the current idle interval: last captured block or paused-source observation.
     quiet_since: Instant,
-    /// Frames inserted since then.
+    /// Silent source frames inserted in the current idle interval.
     filled: u64,
 }
 
@@ -58,7 +48,6 @@ impl SilenceFill {
         }
     }
 
-    /// A captured block, moved later by the silence inserted before it.
     pub(super) fn captured(&mut self, block: &mut AudioBlock, now: Instant) {
         block.start_frame = block.start_frame.saturating_add(self.inserted_frames);
         block.sequence = block.sequence.wrapping_add(self.inserted_blocks);
@@ -70,8 +59,6 @@ impl SilenceFill {
         self.filled = 0;
     }
 
-    /// The silent block due now, if the source has been quiet past the grace; it
-    /// covers the time since samples stopped, up to the limit, in real time.
     pub(super) fn due(&mut self, now: Instant) -> Option<&AudioBlock> {
         if self.telemetry.state() != SourceState::Running {
             // A paused (or stopped) source is not silent; its pause never counts.
@@ -130,7 +117,7 @@ mod tests {
             "within the grace"
         );
 
-        // 1 s quiet: 1 s of silence follows frame 480, in 10 ms blocks.
+        // One second idle must add 48,000 frames after the captured 480, in 10 ms blocks.
         let mut covered = 480;
         while let Some(silent) = fill.due(start + Duration::from_secs(1)) {
             assert_eq!(silent.start_frame, covered);
@@ -139,20 +126,17 @@ mod tests {
         }
         assert_eq!(covered, 480 + 48_000);
 
-        // Never more than the limit, however long the source stays quiet.
         while fill.due(start + Duration::from_secs(60)).is_some() {}
         assert_eq!(
             fill.inserted_frames,
             (LIMIT.as_secs_f64() * 48_000.0) as u64
         );
 
-        // Audio again: it continues right after the silence.
         capture.write(&[0.5_f32; 480]);
         let mut block = processing.try_pop().unwrap();
         fill.captured(&mut block, start + Duration::from_secs(61));
         assert_eq!(block.start_frame, 480 + fill.inserted_frames);
 
-        // A paused source is not silence.
         telemetry.set_state(SourceState::Paused);
         assert!(fill.due(start + Duration::from_secs(70)).is_none());
         telemetry.set_state(SourceState::Running);

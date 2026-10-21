@@ -1,11 +1,10 @@
-//! Per-hop spectrum algorithms. Each writes into buffers it owns, so steady-state
-//! processing does not allocate.
+//! Per-hop buffers are reused once their dimensions stabilize.
 
 use super::spec::{PeakConfig, SmoothConfig};
 
 const TILT_REFERENCE_HZ: f32 = 1_000.0;
 
-/// `db_per_octave · log2(f / 1 kHz)` per bin; bin 0 uses the first bin frequency.
+/// Offsets are `db_per_octave * log2(f / 1 kHz)`; DC uses the first nonzero bin to keep log finite.
 pub(crate) fn tilt_table(table: &mut Vec<f32>, bins: usize, bin_hz: f32, db_per_octave: f32) {
     table.clear();
     table.extend((0..bins).map(|index| {
@@ -29,8 +28,7 @@ pub(crate) fn add_with_floor(output: &mut Vec<f32>, input: &[f32], offset: f32, 
     output.extend(input.iter().map(|value| (value + offset).max(floor)));
 }
 
-/// Exponential approach to each bin, with attack for rising and release for
-/// falling values, over elapsed source time.
+/// Exponential attack for rises and release for falls, measured in source time, not wall time.
 #[derive(Default)]
 pub(crate) struct SmoothState {
     pub(crate) values: Vec<f32>,
@@ -75,9 +73,8 @@ impl SmoothState {
     }
 }
 
-/// Per element maximum held for `hold_ms`, then falling from rest at a constant
-/// acceleration toward the current value, in source time. The fall is integrated
-/// exactly, so the result does not depend on how often the input arrives.
+/// Holds maxima, then falls from rest at constant acceleration in source time.
+/// Exact fall integration avoids cadence-dependent drift.
 #[derive(Default)]
 pub(crate) struct PeakState {
     pub(crate) values: Vec<f32>,
@@ -123,7 +120,6 @@ impl PeakState {
                     / sample_rate_hz as f32;
                 let fallen = *peak - (*velocity + 0.5 * acceleration * elapsed) * elapsed;
                 if fallen <= sample {
-                    // Landed on the signal: follow it from rest.
                     *peak = sample;
                     *velocity = 0.0;
                 } else {
@@ -170,7 +166,7 @@ mod tests {
 
     #[test]
     fn peak_holds_then_falls_with_constant_acceleration_in_source_time() {
-        // 1 s hold, 10 dB/s²; time in frames at 1 kHz.
+        // 1 s hold, 10 dB/s²; source-frame timestamps use a 1 kHz sample rate.
         let config = PeakConfig::new(1_000.0, 10.0).unwrap();
         let mut stepped = PeakState::default();
         stepped.process(&[-10.0], 0, 1_000, config);
@@ -205,10 +201,9 @@ mod tests {
         let config = PeakConfig::new(0.0, 10.0).unwrap();
         let mut state = PeakState::default();
         state.process(&[0.0], 0, 1_000, config);
-        // Falls 20 dB in 2 s; the signal at −5 dB stops it there.
+        // A 20 dB free fall overshoots -5 dB; the next second must restart from rest.
         state.process(&[-5.0], 2_000, 1_000, config);
         assert_eq!(state.values[0], -5.0);
-        // From rest again: 5 dB in the next second, not 5 + 20.
         state.process(&[-90.0], 3_000, 1_000, config);
         assert!(
             (state.values[0] - -10.0).abs() < 1e-4,
