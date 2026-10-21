@@ -1,13 +1,10 @@
-//! Settings descriptions. The analysis part of a Module's settings is generated
-//! from its `DataSpec` (each node listed once); the view part comes from the Module
-//! as descriptors whose values are also what persistence saves. The Workspace
-//! renders both; Modules never depend on the UI toolkit to describe their settings.
+//! Modules describe settings without depending on the UI toolkit; the Workspace renders
+//! them. Analysis descriptors come from `DataSpec`; view values also serve as saved values.
 
 use serde::{Deserialize, Serialize};
 
 use crate::dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId};
 
-/// Value of one view setting; also its saved form.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingValue {
@@ -46,7 +43,6 @@ pub struct Choice {
     pub label: &'static str,
 }
 
-/// Units of numeric settings; the settings window formats and parses values by them.
 pub mod unit {
     pub const HZ: &str = "Hz";
     pub const MS: &str = "ms";
@@ -67,27 +63,22 @@ pub enum SettingKind {
         logarithmic: bool,
     },
     Choice(&'static [Choice]),
-    /// One of the source's channels or the mono mix.
     Channel,
-    /// Shown or hidden: a Module's optional overlay (peak curve, guides, readout).
     Toggle,
 }
 
-/// One view parameter a Module shows in its settings and saves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewSetting {
     pub key: &'static str,
     pub label: &'static str,
-    /// Section title; Modules arrange their own settings area by section.
+    /// Settings in one section must be contiguous to share a card in the UI.
     pub section: &'static str,
     pub kind: SettingKind,
     pub value: SettingValue,
-    /// What a new instance shows; the settings offer to reset to it.
     pub default: SettingValue,
 }
 
 impl ViewSetting {
-    /// Check `value` against the kind's range; numbers are clamped.
     pub fn accept(&self, value: &SettingValue) -> Option<SettingValue> {
         match (self.kind, value) {
             (SettingKind::Number { min, max, .. }, SettingValue::Number(number))
@@ -107,7 +98,6 @@ impl ViewSetting {
     }
 }
 
-/// A parameter of one node kind, as the settings UI edits it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NodeParam {
     Channel,
@@ -122,9 +112,7 @@ pub enum NodeParam {
     PeakFall,
 }
 
-/// Window sizes the settings offer.
 pub const FFT_WINDOWS: [usize; 6] = [512, 1024, 2048, 4096, 8192, 16384];
-/// Hop as a fraction of the window: 1/2, 1/4, 1/8.
 pub const FFT_HOP_DIVISORS: [usize; 3] = [2, 4, 8];
 
 impl NodeParam {
@@ -155,7 +143,6 @@ impl NodeParam {
         }
     }
 
-    /// Range and unit of numeric parameters (`None` for choices).
     pub fn range(self) -> Option<(f32, f32, &'static str)> {
         Some(match self {
             Self::FftFloor => (-200.0, -120.0, unit::DBFS),
@@ -184,7 +171,6 @@ impl NodeParam {
         })
     }
 
-    /// `node` with this numeric parameter set to `value` (clamped to the range).
     pub fn with_number(self, node: NodeSpec, value: f32) -> Option<NodeSpec> {
         let (min, max, _) = self.range()?;
         if !value.is_finite() {
@@ -221,7 +207,7 @@ impl NodeParam {
     }
 }
 
-/// `fft` with a new window size, keeping the hop's fraction of the window.
+/// Preserve the hop's fraction of the window when changing its size.
 pub fn with_fft_window(fft: FftConfig, window_size: usize) -> FftConfig {
     let divisor = (fft.window_size / fft.hop_size.max(1)).max(1);
     FftConfig {
@@ -231,25 +217,21 @@ pub fn with_fft_window(fft: FftConfig, window_size: usize) -> FftConfig {
     }
 }
 
-/// One node as the settings show it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeEntry {
     pub node: NodeRef,
     pub spec: NodeSpec,
 }
 
-/// One output as the settings show it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputEntry {
     pub output: OutputId,
     pub keep: Keep,
 }
 
-/// The analysis settings of one `DataSpec`. Sharing is not part of them: every
-/// instance edits its own analysis and the dataflow shares what stays identical.
+/// Each instance edits its own analysis; the dataflow shares what stays identical.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DataSettings {
-    /// Every node with parameters, once, in declaration order.
     pub nodes: Vec<NodeEntry>,
     pub outputs: Vec<OutputEntry>,
 }
@@ -274,7 +256,6 @@ impl DataSettings {
     }
 }
 
-/// Label of a node kind for the settings.
 pub fn node_label(node: &NodeSpec) -> &'static str {
     match node {
         NodeSpec::Channel(_) => "Channel",
@@ -386,7 +367,6 @@ mod tests {
             setting.accept(&SettingValue::Choice("pixels".to_owned())),
             None
         );
-        // Ids match exactly: the label of a choice is not its id.
         assert_eq!(
             setting.accept(&SettingValue::Choice("Bars".to_owned())),
             None
@@ -425,7 +405,6 @@ mod tests {
         assert_eq!(NodeParam::FftFloor.number(&tilt), None);
         assert_eq!(NodeParam::Tilt.number(&gain), None);
         assert_eq!(NodeParam::PeakHold.number(&NodeSpec::Levels), None);
-        // Choices have no number even on the node kind they belong to.
         let fft = NodeSpec::Fft(FftConfig::default());
         assert_eq!(NodeParam::FftWindow.number(&fft), None);
     }

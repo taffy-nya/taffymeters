@@ -22,16 +22,10 @@ use crate::{
     theme::ColorRole,
 };
 
-/// Width of the right / bottom split entries, in logical points; a quarter of the leaf
-/// when that is less.
 pub(crate) const SPLIT_ZONE_POINTS: f32 = 20.0;
-/// Thickness of the native resize edges and size of the corner squares; small windows
-/// scale both down so the middle stays content.
 pub(crate) const RESIZE_EDGE_POINTS: f32 = 6.0;
 pub(crate) const RESIZE_CORNER_POINTS: f32 = 12.0;
-/// Poll interval for state that changes without new audio data or input.
 const STATE_POLL: Duration = Duration::from_millis(250);
-/// How long a left press in a locked window shows the "locked" hint.
 const LOCK_HINT: Duration = Duration::from_secs(2);
 
 /// Catppuccin Mocha colors of chrome that has no theme role.
@@ -44,18 +38,12 @@ const MOCHA_PEACH: Color32 = Color32::from_rgb(0xfa, 0xb3, 0x87);
 const LATTE_RED: Color32 = Color32::from_rgb(0xd2, 0x0f, 0x39);
 const LATTE_PEACH: Color32 = Color32::from_rgb(0xfe, 0x64, 0x0b);
 
-/// egui color of a theme color.
 pub(crate) fn color32(color: crate::render::Color) -> Color32 {
     Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
 }
 
-/// Make egui's widgets (menus, buttons, the settings window) follow the global
-/// palette. Every viewport shares one style, so each pass applies it; the style is
-/// only rebuilt when the palette differs from the one last applied to `ctx`.
-///
-/// Labels are plain text: egui's label selection is one state per `Context`, and
-/// every viewport's pass ends by dropping a selection it did not draw, so with
-/// several viewports it never selects anything and only showed a text cursor.
+// Viewports share a Context and style. egui drops a label selection when a pass does
+// not draw it, so cross-viewport selection cannot survive; disable selectable labels.
 pub(crate) fn apply_chrome_style(ctx: &egui::Context, palette: &crate::theme::Palette) {
     let id = Id::new("taffymeters.chrome_palette");
     if ctx.data(|data| data.get_temp::<crate::theme::Palette>(id)) == Some(*palette) {
@@ -81,7 +69,6 @@ fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
         )
     };
     let background = opaque(ColorRole::Background).0;
-    // Translucent roles are seen over the background.
     let over = |role| {
         let (color, alpha) = opaque(role);
         background.lerp_to_gamma(color, f32::from(alpha) / 255.0)
@@ -91,7 +78,6 @@ fn chrome_visuals(palette: &crate::theme::Palette) -> egui::Visuals {
     let accent = over(ColorRole::Accent);
     let text = over(ColorRole::Text);
     let muted = over(ColorRole::Muted);
-    // Readable text on an accent fill.
     let [red, green, blue, _] = accent.to_array();
     let luma = 0.299 * f32::from(red) + 0.587 * f32::from(green) + 0.114 * f32::from(blue);
     let on_accent = if luma > 140.0 {
@@ -194,8 +180,7 @@ impl ResizeEdge {
         }
     }
 
-    /// Non-overlapping hit rect: corners are squares, edges stop at the corners. A
-    /// corner is at most a quarter of the shorter side, edges half a corner thick.
+    // Shrink hit zones in small windows so the center remains content, not native resizing.
     fn rect(self, window: Rect) -> Rect {
         let (min, max) = (window.min, window.max);
         let c = RESIZE_CORNER_POINTS.min(window.width().min(window.height()) / 4.0);
@@ -223,14 +208,11 @@ pub(crate) enum ControlKey {
     Divider(SplitId),
     Resize(ResizeEdge),
     EmptyBody,
-    /// The empty window's "Add module" button and its entries.
     AddOpen,
     AddModule(&'static str),
     MoveTarget(MoveTarget),
     Settings(SettingsItem),
-    /// The typed value next to a slider in the settings window.
     SettingsValue(SettingsItem),
-    /// The Reset next to a value in the settings window.
     SettingsReset(SettingsItem),
 }
 
@@ -253,10 +235,8 @@ pub(crate) struct DividerDrag {
     cancelled: bool,
 }
 
-/// A line drawn along a window's frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EdgeLine {
-    /// Another window touches this edge.
     Divider,
     /// The window moves with the one the settings' Window tab edits.
     Outline,
@@ -291,7 +271,6 @@ pub(crate) struct WindowUiState {
     min_size_sent: Option<Vec2>,
     /// Native resizability last commanded (`None`: still the builder's).
     resizable_sent: Option<bool>,
-    /// Display time until which the "locked" hint shows.
     lock_hint_until: Option<Duration>,
     #[cfg(feature = "automation")]
     targets: std::collections::HashMap<ControlKey, ControlTarget>,
@@ -299,15 +278,13 @@ pub(crate) struct WindowUiState {
     frame_token: u64,
     #[cfg(feature = "automation")]
     pass_token: u64,
-    /// Lines the last pass drew along the frame.
     #[cfg(feature = "automation")]
     pub(crate) edges: Vec<DrawnEdge>,
-    /// The module the last pass outlined, and the logical rect of the outline.
+    /// Outline from the last pass, in logical points.
     #[cfg(feature = "automation")]
     pub(crate) module_outline: Option<(ModuleInstanceId, Rect)>,
 }
 
-/// Responses of probe-visible controls collected during one pass.
 #[derive(Default)]
 pub(crate) struct Controls {
     #[cfg(feature = "automation")]
@@ -334,7 +311,6 @@ fn to_render_rect(rect: Rect) -> RenderRect {
     }
 }
 
-/// Sides with a split entry: the leaf's right and bottom edges.
 const SPLIT_SIDES: [Side; 2] = [Side::Right, Side::Below];
 
 fn split_zone(rect: Rect, side: Side) -> Rect {
@@ -418,8 +394,6 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// Run one UI pass of `window_id` inside its own viewport. Returns whether the
-    /// window was drawn (a minimized window is not).
     pub(crate) fn window_ui(
         &mut self,
         window_id: WindowId,
@@ -428,9 +402,8 @@ impl Workspace {
     ) -> bool {
         let pass_started = std::time::Instant::now();
         let ctx = ui.ctx().clone();
-        // A minimized window is not drawn; its Modules' continuous analysis continues
-        // and work that only serves the display stops until it is shown again. Its
-        // native commands (e.g. from the settings window) are still sent.
+        // Minimized windows retain continuous analysis and native commands, but skip
+        // display-only work.
         let minimized = ctx.input(|input| input.viewport().minimized == Some(true));
         self.set_window_minimized(window_id, minimized);
         if minimized {
@@ -448,10 +421,8 @@ impl Workspace {
         if let Some(delay) = repaint {
             let now = std::time::Instant::now();
             let wait = if delay <= FRAME_INTERVAL {
-                // All animating windows share one frame clock, so their repaints come
-                // due together instead of each window rescheduling itself at once.
-                // Back-to-back immediate repaints of one window keep the Windows message
-                // queue busy, and the OS then never delivers the other windows' paints.
+                // Share a frame clock: immediate self-repaints can starve other windows'
+                // paint messages in the Windows queue.
                 self.next_frame(now).saturating_duration_since(now)
             } else {
                 delay.saturating_sub(pass_started.elapsed())
@@ -467,9 +438,7 @@ impl Workspace {
             // The host (root) pass owns native viewport creation and removal.
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
-        // Drawing is otherwise driven by published data and input; keep polling only
-        // for state that changes without either: a detach waiting for its window to
-        // open (timeout) and a source that is not running (status badge).
+        // Detach deadlines and source status can change without data or input to wake the UI.
         let pending_detach = self
             .windows
             .values()
@@ -477,8 +446,6 @@ impl Workspace {
         if pending_detach || self.source_status().state != SourceState::Running {
             ctx.request_repaint_after_for(STATE_POLL, egui::ViewportId::ROOT);
         }
-        // The status badge drops an error or the notices after a while, with or
-        // without new data.
         if let Some(change) = self.badge_change_in() {
             ctx.request_repaint_after_for(
                 change.max(Duration::from_millis(1)),
@@ -489,7 +456,6 @@ impl Workspace {
         true
     }
 
-    /// Send the viewport commands queued for `window_id` to its native window.
     fn send_window_commands(&mut self, window_id: WindowId, ctx: &egui::Context) {
         if let Some(window) = self.windows.get_mut(&window_id) {
             for command in window.commands.drain(..) {
@@ -498,7 +464,6 @@ impl Workspace {
         }
     }
 
-    /// Next tick of the shared 60 fps clock after `now`.
     fn next_frame(&mut self, now: std::time::Instant) -> std::time::Instant {
         let next = match self.frame_clock {
             Some(tick) if tick > now => tick,
@@ -509,7 +474,6 @@ impl Workspace {
         next
     }
 
-    /// One window pass; returns the shortest repaint delay its Modules asked for.
     fn window_pass(
         &mut self,
         window_id: WindowId,
@@ -538,7 +502,6 @@ impl Workspace {
             }
         }
 
-        // Native placement, in this window's own scale.
         let pixels_per_point = ctx.pixels_per_point();
         let (outer, maximized, minimized) = ctx.input(|input| {
             let viewport = input.viewport();
@@ -577,7 +540,6 @@ impl Workspace {
                 .commands
                 .push(ViewportCommand::MinInnerSize(min_size));
         }
-        // A locked window takes right clicks only and has no native sizing either.
         let locked = window.locked;
         if window.ui.resizable_sent.unwrap_or(window.initial_resizable) == locked {
             window.commands.push(ViewportCommand::Resizable(!locked));
@@ -696,8 +658,6 @@ impl Workspace {
         }
     }
 
-    /// Hit rect of a leaf's split entry, or `None` when it is hidden (`hidden`: while
-    /// picking a move target or in a locked window) or a copy would not fit there.
     fn split_entry(
         &self,
         leaf: ModuleInstanceId,
@@ -728,13 +688,11 @@ impl Workspace {
             window.layout.geometry(rect, &|id| self.module_min_size(id))
         };
         let picking = self.move_source.is_some();
-        // No split entries while picking a move target or in a locked window.
         let no_entries = picking || locked;
         let popup_open = egui::Popup::is_any_open(&ctx);
         let reference_dbfs = self.reference_dbfs();
 
-        // Leaf bodies first: everything registered later sits on top of them. A
-        // locked window's bodies only take right clicks.
+        // egui gives later hit regions priority; register leaf bodies below the chrome.
         let body_sense = if locked {
             Sense::click()
         } else {
@@ -747,7 +705,6 @@ impl Workspace {
                 body_sense,
             );
             controls.record(ControlKey::LeafBody(leaf), &body);
-            // With the settings window open, a left click selects the module there.
             if body.clicked() && !locked && !picking && self.settings_open() {
                 actions.push(WorkspaceAction::SelectModule { instance_id: leaf });
             }
@@ -761,15 +718,12 @@ impl Workspace {
                 self.start_move(window_id, press);
             }
             if !picking && body.secondary_clicked() {
-                // Right click edits the module in the settings window.
                 actions.push(WorkspaceAction::OpenSettings {
                     window_id,
                     instance_id: Some(leaf),
                 });
             }
-            // The Module only sees the pointer over its own content, not over the
-            // window chrome drawn on top of it (split entries, dividers, resize edges);
-            // in a locked window it sees no pointer, wheel or zoom at all.
+            // Chrome must not leak pointer input into the Module; locking suppresses it all.
             let entries =
                 SPLIT_SIDES.map(|side| self.split_entry(leaf, leaf_rect, side, no_entries));
             let pointer = (body.contains_pointer() && !popup_open && !picking && !locked)
@@ -864,11 +818,7 @@ impl Workspace {
         repaint
     }
 
-    /// Lines along this window's frame. Where another window touches it, the
-    /// divider Modules have between them (each window draws its half of the
-    /// width). While the settings' Window tab is open, the outline of the windows
-    /// that move with the window it edits, and, dimmer while its Group button is
-    /// hovered, of the windows grouping would add; edges they share are dividers.
+    // Touching windows each draw half a divider to match dividers inside a window.
     fn window_edges(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
         #[cfg(feature = "automation")]
         let mut drawn = Vec::new();
@@ -961,10 +911,6 @@ impl Workspace {
         }
     }
 
-    /// Outline of the selected module: the one "Move to…" moves (it stays undimmed
-    /// under the target overlay), otherwise the one the settings' Module tab edits.
-    /// An accent line inside the leaf, one logical point in whole pixels and on
-    /// pixel edges, as the window outline.
     fn module_outline(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
         let target = self
             .move_source
@@ -982,6 +928,7 @@ impl Workspace {
         let mut drawn = None;
         if let Some(leaf_rect) = leaf_rect {
             let ppp = ui.ctx().pixels_per_point();
+            // Keep the one-point outline on whole pixel edges to avoid blurred borders.
             let snap = |value: f32| (value * ppp).round() / ppp;
             let min = pos2(snap(leaf_rect.min.x), snap(leaf_rect.min.y));
             let max = pos2(snap(leaf_rect.max.x), snap(leaf_rect.max.y));
@@ -1013,9 +960,6 @@ impl Workspace {
         }
     }
 
-    /// Which outline a window gets: the windows that move with the one the
-    /// settings' Window tab edits, and, while its Group button is hovered, the
-    /// windows grouping would add.
     fn window_highlight(&self) -> impl Fn(WindowId) -> Option<EdgeLine> + '_ {
         let target = self.window_tab_target();
         move |id| {
@@ -1041,8 +985,6 @@ impl Workspace {
         }
     }
 
-    /// Draw the dividers; outside a locked window they also take hover, drags and
-    /// double clicks.
     fn dividers(
         &mut self,
         window_id: WindowId,
@@ -1183,8 +1125,6 @@ impl Workspace {
         }
     }
 
-    /// An empty window: its body drags the window and an "Add module" button sits in
-    /// the middle; a locked one takes right clicks only and shows no button.
     fn empty_window(
         &mut self,
         window_id: WindowId,
@@ -1225,7 +1165,6 @@ impl Workspace {
         if picking {
             return;
         }
-        // With the settings window open, a left click selects the window there.
         if body.clicked() && !locked && self.settings_open() {
             actions.push(WorkspaceAction::SelectWindow { window_id });
         }
@@ -1256,7 +1195,6 @@ impl Workspace {
             })
             .inner
         };
-        // A right click anywhere in the empty window opens its settings.
         if body.secondary_clicked() || button {
             actions.push(WorkspaceAction::OpenSettings {
                 window_id,
@@ -1282,10 +1220,6 @@ impl Workspace {
         }
     }
 
-    /// Modal target overlay of "Move to…": every other leaf is dimmed and offers four
-    /// edge targets, an empty window is dimmed and offers itself; hovering an edge
-    /// shows the half of the leaf the module would take. The moved leaf stays
-    /// undimmed, outlined by `module_outline`. Escape or a right click cancels.
     fn move_targets(
         &mut self,
         window_id: WindowId,
@@ -1344,7 +1278,6 @@ impl Workspace {
                         .inner;
                     controls.record(ControlKey::MoveTarget(target), &response);
                     let hovered = valid && response.hovered();
-                    // Under the zones: where the module would land.
                     if hovered
                         && let MoveTarget::Beside { instance_id, side } = target
                         && let Some(landing) =
@@ -1374,10 +1307,6 @@ impl Workspace {
         }
     }
 
-    /// Text of the status badge: the source state when it is not running, the
-    /// operation error and the notices. A single notice shows in full when the
-    /// whole line `fits`; otherwise the badge counts them and points to where
-    /// they are listed.
     pub(crate) fn badge_text(&self, fits: impl Fn(&str) -> bool) -> Option<String> {
         let status = self.source_status();
         let mut parts = Vec::new();
@@ -1431,8 +1360,6 @@ impl Workspace {
         painter.galley(origin, galley, Color32::WHITE);
     }
 
-    /// The hint a left press in a locked window shows for a while; returns how long
-    /// it still shows.
     fn lock_hint(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) -> Option<Duration> {
         let window = self.windows.get_mut(&window_id)?;
         let now = window.ui.display_time;
@@ -1513,7 +1440,6 @@ mod tests {
                 }
             }
             assert!(ResizeEdge::NorthWest.rect(window).contains(pos2(1.0, 1.0)));
-            // A square half the shorter side wide stays content, not resize.
             let middle =
                 Rect::from_center_size(window.center(), egui::Vec2::splat(size.min_elem() / 2.0));
             assert!(

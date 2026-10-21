@@ -1,6 +1,3 @@
-//! Native window state and desktop sync: minimize, close, always-on-top, groups,
-//! body drags and placement.
-
 use std::time::Duration;
 
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand};
@@ -11,8 +8,7 @@ use super::{
 };
 
 impl Workspace {
-    /// Report whether a native window is minimized. Instances in a minimized window
-    /// may stop work that only serves the display; their analysis keeps running.
+    /// Minimized instances may suspend display work, but analysis must keep running.
     pub(crate) fn set_window_minimized(&mut self, id: WindowId, minimized: bool) {
         if let Some(window) = self.windows.get_mut(&id)
             && window.minimized != minimized
@@ -35,10 +31,7 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// An empty window the size of `window_id` (its restored size is unknown while
-    /// maximized: then the default size), down-right of it by the detach offset.
-    /// Always-on-top carries over as for a detached window; lock and group do not.
-    /// The settings window, when open, moves on to the new window's Window tab.
+    /// A maximized window's restored size is unknown, so use the default size.
     pub(super) fn new_window(
         &mut self,
         window_id: WindowId,
@@ -78,8 +71,6 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// Lock or unlock a window. Locking ends a divider drag in it, back to where the
-    /// drag started.
     pub(super) fn set_locked(
         &mut self,
         window_id: WindowId,
@@ -95,8 +86,7 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// A body drag in this window may not start a native move: the window is
-    /// locked, or a member of its group is (a group moves as one).
+    /// Groups move as one, so a locked member vetoes body drags for the whole group.
     pub(super) fn drag_locked(&self, window_id: WindowId) -> bool {
         let Some(window) = self.windows.get(&window_id) else {
             return false;
@@ -176,16 +166,13 @@ impl Workspace {
         Ok(())
     }
 
-    /// Outer frame of a window as the desktop has it now, else as its last pass
-    /// saw it. Other windows' passes may not have run since the desktop moved them.
+    /// Prefer native geometry: another window's UI pass may not have run since a move.
     pub(super) fn frame_of(&self, window_id: WindowId) -> Option<Rect> {
         self.desktop
             .frame(window_id)
             .or_else(|| self.windows.get(&window_id)?.outer)
     }
 
-    /// Windows touching `window_id` on the desktop; fails while its position is
-    /// not known yet.
     pub(super) fn touching_windows(
         &self,
         window_id: WindowId,
@@ -237,10 +224,8 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// Advance time-based state shared by all windows (detach timeouts, the status
-    /// badge's messages). Every pass that runs (the host's logic, each drawn window,
-    /// the settings window) ticks, so the clock also moves while the windows involved
-    /// are minimized.
+    /// Called by host, window and settings passes so timeouts still advance when
+    /// the source or destination window is minimized.
     pub(crate) fn tick(&mut self, display_time: Duration) {
         self.display_time = self.display_time.max(display_time);
         let now = self.display_time;
@@ -270,10 +255,8 @@ impl Workspace {
         }
     }
 
-    /// A body drag in `window_id`, pressed at `press` (logical, in the window):
-    /// the window and its group follow the pointer until the button is released.
-    /// A maximized window, or one the desktop does not track, gets the OS move
-    /// loop instead (the OS restores a maximized window as it moves).
+    /// `press` is window-local logical points. Use the OS loop for maximized windows
+    /// so Windows restores them under the pointer.
     pub(super) fn start_move(&mut self, window_id: WindowId, press: Pos2) {
         let Some(window) = self.windows.get(&window_id) else {
             return;
@@ -313,9 +296,7 @@ impl Workspace {
         }
     }
 
-    /// Apply one window's observed native placement. Returns whether the host must
-    /// run another pass: other windows got position commands to deliver, or this
-    /// window moved and the others draw the edges they share with it.
+    /// Return whether the host needs another pass to deliver commands or redraw shared edges.
     pub(super) fn observe_placement(
         &mut self,
         window_id: WindowId,
@@ -336,7 +317,6 @@ impl Workspace {
         let Some(outer_points) = outer_points else {
             return false;
         };
-        // Whole physical pixels: the native frame, without the logical round trip.
         let outer = Rect::from_min_max(
             (outer_points.min * pixels_per_point).round(),
             (outer_points.max * pixels_per_point).round(),
@@ -350,8 +330,7 @@ impl Workspace {
             }
             return changed;
         }
-        // The user places the window (or corrects it during a drag): wait for the
-        // release, and the saved position no longer applies.
+        // Do not rescue a window or reapply its saved position during a user's drag.
         if probe.primary_button_down() {
             if previous.is_some() && changed {
                 window.restore_target = None;
@@ -365,9 +344,6 @@ impl Workspace {
         self.place_windows(&moves) || changed
     }
 
-    /// Where windows must go after `window_id` was seen at `outer`: the saved
-    /// position still to land on (once), or, when it shows too little of itself on
-    /// the nearest monitor, its group moved as one into that monitor's work area.
     fn placement_moves(
         &mut self,
         window_id: WindowId,
@@ -419,9 +395,8 @@ impl Workspace {
             .collect()
     }
 
-    /// Move windows (outer top-left, physical pixels) together without their
-    /// groups following. Returns whether some got viewport commands instead (the
-    /// desktop does not track them), which need a pass to be sent.
+    /// Targets are physical outer top-lefts. Return whether viewport-command fallback
+    /// needs a UI pass to deliver the moves.
     pub(super) fn place_windows(&mut self, moves: &[(WindowId, Pos2)]) -> bool {
         if moves.is_empty() || self.desktop.place(moves) {
             return false;
@@ -437,8 +412,6 @@ impl Workspace {
         true
     }
 
-    /// Tell the desktop which windows move with their group, when that changed:
-    /// grouped windows that are neither maximized nor minimized.
     pub(super) fn publish_groups(&mut self) {
         let current = || {
             self.windows.iter().filter_map(|(id, window)| {

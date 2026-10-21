@@ -1,6 +1,3 @@
-//! The Module tab: layout actions, type, style and channel, analysis nodes, the
-//! Module's own view sections, colors and closing the instance.
-
 use std::sync::Arc;
 
 use eframe::egui::{self, RichText};
@@ -56,8 +53,7 @@ impl Workspace {
         }
     }
 
-    /// Split (copies), detach, move and close the instance: first on the page,
-    /// where they stay in reach.
+    // Keep layout actions first so they remain within reach when the settings need scrolling.
     fn layout_actions(
         &self,
         ui: &mut egui::Ui,
@@ -128,7 +124,6 @@ impl Workspace {
         });
     }
 
-    /// Style and the instance's channel.
     fn style_rows(
         &self,
         ui: &mut egui::Ui,
@@ -167,8 +162,6 @@ impl Workspace {
                 warning(ui, &format!("Style {kept} unavailable; showing default"));
             }
         }
-        // The channel is one row however the Module implements it (an analysis
-        // Channel node or a display choice), matching the 1 / 2 / M shortcuts.
         if let Some(selected) = module.channel() {
             let descriptor = Arc::clone(self.services.source.descriptor());
             row(ui, "Channel", |ui| {
@@ -192,8 +185,6 @@ impl Workspace {
         }
     }
 
-    /// Analysis nodes, the Module's view sections and the instance's colors, each
-    /// card with ↺ while something in it differs from the type's defaults.
     fn module_settings(
         &self,
         ui: &mut egui::Ui,
@@ -225,8 +216,7 @@ impl Workspace {
                 .iter()
                 .filter(|output| matches!(output.keep, Keep::Seconds(_)))
                 .count();
-            // What resetting the card changes: shown nodes and History lengths that
-            // differ from the type's default analysis (same shape, same positions).
+            // Default analysis has the same node and output positions as the edited spec.
             let mut resets = Vec::new();
             if let Some(defaults) = defaults {
                 for node in &nodes {
@@ -302,9 +292,7 @@ impl Workspace {
                 }
             }
         }
-        // One card per section the Module declares, in its order. Channel settings
-        // never show here: with the capability they are the channel row, without it
-        // there is no display channel.
+        // Channel settings stay out of section cards; the dedicated row requires channel support.
         let view = module.view_settings();
         let mut rest = view.as_slice();
         while let Some(first) = rest.first() {
@@ -479,9 +467,7 @@ impl Workspace {
     }
 }
 
-/// What a view setting returns to: its default, numbers kept inside the current
-/// range (a short History narrows the visible time). Channels reset with the
-/// channel row, not here.
+// A short History can narrow the current range below the default visible time.
 fn view_default(setting: &ViewSetting) -> Option<SettingValue> {
     match (setting.kind, &setting.default) {
         (SettingKind::Number { min, max, .. }, SettingValue::Number(default)) => {

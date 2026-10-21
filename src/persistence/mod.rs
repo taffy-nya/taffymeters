@@ -1,13 +1,5 @@
-//! The saved form of a workspace and the directory that holds it.
-//!
-//! One format serves the session (`<root>/session.json`, saved automatically) and
-//! presets (`<root>/presets/<name>.json`, saved only on request, plus the built-in
-//! ones compiled into the program). A file stores logical configuration only:
-//! windows (frame relative to their display's work area, flags, group) with their
-//! BSP trees, and in each leaf the Module's type, its `DataSpec`, style, view
-//! settings and color overrides. Process identities (instance, window, split,
-//! subscription IDs), readers, results, caches and hover state are never written.
-//! Bindings are renumbered per file.
+//! Sessions and presets share a format containing only logical configuration.
+//! Runtime identities and state are excluded; binding numbers are local to each file.
 
 use std::{collections::BTreeMap, error::Error, fmt, fs, io, path::PathBuf};
 
@@ -16,14 +8,10 @@ use serde_json::Value;
 
 use crate::theme::ThemeSettings;
 
-/// Version written by this build; other versions are not read.
 pub(crate) const FORMAT_VERSION: u32 = 2;
-/// Input kind of the product's system loopback.
 pub(crate) const SYSTEM_INPUT: &str = "system_default";
-/// The built-in preset a new session starts from.
 pub(crate) const DEFAULT_PRESET: &str = "Default";
 
-/// Presets compiled into the program, in the order the settings list them.
 const BUILTIN_PRESETS: [(&str, &str); 3] = [
     (DEFAULT_PRESET, include_str!("presets/default.json")),
     ("Bar - Top", include_str!("presets/bar-top.json")),
@@ -33,22 +21,20 @@ const BUILTIN_PRESETS: [(&str, &str); 3] = [
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WorkspaceFile {
     pub(crate) format_version: u32,
-    /// The preset the session was loaded from (session file only).
+    /// Session origin; omitted from presets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) preset: Option<PresetRef>,
     #[serde(default)]
     pub(crate) input: InputConfig,
-    /// Display reference level (dBFS); absent follows the build's default.
+    /// Absence follows the build's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reference_dbfs: Option<f32>,
     #[serde(default = "ThemeSettings::dark")]
     pub(crate) theme: ThemeSettings,
-    /// The displays the windows were on, in the order windows refer to them.
     pub(crate) displays: Vec<DisplayFile>,
     pub(crate) windows: Vec<WindowFile>,
 }
 
-/// A preset by origin. User presets are named by their file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PresetRef {
@@ -64,12 +50,10 @@ impl PresetRef {
     }
 }
 
-/// A display as it was when the file was saved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DisplayFile {
     /// Size of its work area, logical points.
     pub(crate) work_area: [f32; 2],
-    /// Identifies the same display again; built-in presets have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) hint: Option<DisplayHint>,
 }
@@ -78,10 +62,11 @@ pub(crate) struct DisplayFile {
 pub(crate) struct DisplayHint {
     /// Top-left of the work area on the desktop, physical pixels.
     pub(crate) origin_px: [f32; 2],
+    /// Physical pixels per logical point.
     pub(crate) scale: f32,
 }
 
-/// The workspace's input. Kinds this build does not provide are kept verbatim.
+/// Unsupported input kinds and options are preserved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct InputConfig {
     pub(crate) kind: String,
@@ -103,13 +88,11 @@ pub(crate) struct WindowFile {
     /// Index into `displays`.
     #[serde(default)]
     pub(crate) display: usize,
-    /// Outer left, top, right and bottom edge in logical points of that display,
-    /// relative to the top-left of its work area. For a maximized window, the
-    /// frame it had when saved.
+    /// Outer [left, top, right, bottom] in logical points relative to the display's
+    /// work-area origin; maximized windows store their frame at save time.
     pub(crate) frame: [f32; 4],
     #[serde(default)]
     pub(crate) always_on_top: bool,
-    /// Takes right clicks only; body drags move neither it nor its group.
     #[serde(default)]
     pub(crate) locked: bool,
     #[serde(default)]
@@ -144,8 +127,7 @@ pub(crate) enum LayoutFile {
     },
 }
 
-/// One Module instance. `data`, `view` and `colors` stay raw JSON here so a
-/// Module that cannot be restored keeps its configuration byte for byte.
+/// Raw JSON preserves configuration that this build cannot restore.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ModuleFile {
     pub(crate) type_id: String,
@@ -160,7 +142,6 @@ pub(crate) struct ModuleFile {
 }
 
 impl ModuleFile {
-    /// Binding numbers its raw `DataSpec` uses.
     pub(crate) fn bindings(&self) -> Vec<u64> {
         self.data
             .as_ref()
@@ -180,7 +161,6 @@ impl ModuleFile {
 pub(crate) enum PersistError {
     Io(String, io::Error),
     Parse(String, String),
-    /// Written in another format version (an older one, or by a newer build).
     Version(String, u32),
     InvalidName(String),
 }
@@ -201,9 +181,6 @@ impl fmt::Display for PersistError {
 
 impl Error for PersistError {}
 
-/// A workspace from the bytes of a file (`label` names it in errors). Besides
-/// the format, the geometry must be usable: at least one window, each on a listed
-/// display, with a finite frame of positive size.
 fn parse(label: &str, bytes: &[u8]) -> Result<WorkspaceFile, PersistError> {
     let error = |reason: String| PersistError::Parse(label.to_owned(), reason);
     let value: Value = serde_json::from_slice(bytes).map_err(|e| error(e.to_string()))?;
@@ -250,12 +227,10 @@ fn parse(label: &str, bytes: &[u8]) -> Result<WorkspaceFile, PersistError> {
     Ok(file)
 }
 
-/// Built-in preset names, in the order the settings list them.
 pub(crate) fn builtin_presets() -> impl Iterator<Item = &'static str> {
     BUILTIN_PRESETS.iter().map(|(name, _)| *name)
 }
 
-/// The built-in preset `name`, `None` when there is none.
 pub(crate) fn builtin_preset(name: &str) -> Option<Result<WorkspaceFile, PersistError>> {
     BUILTIN_PRESETS
         .iter()
@@ -263,8 +238,7 @@ pub(crate) fn builtin_preset(name: &str) -> Option<Result<WorkspaceFile, Persist
         .map(|(name, json)| parse(&format!("built-in preset {name:?}"), json.as_bytes()))
 }
 
-/// Preset names double as file names: printable, no path or reserved characters,
-/// no trailing dot or space, at most 64 characters.
+/// Preset names become file names, so Windows reserved names and characters are excluded.
 pub(crate) fn valid_name(name: &str) -> bool {
     const RESERVED: [&str; 22] = [
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
@@ -282,14 +256,11 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
-/// Whether two preset names denote the same file (Windows file names are
-/// case-insensitive).
+/// Windows file names are case-insensitive.
 pub(crate) fn same_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 
-/// The configuration directory: `<root>/session.json` and
-/// `<root>/presets/<name>.json`.
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceStore {
     root: PathBuf,
@@ -300,7 +271,6 @@ impl WorkspaceStore {
         Self { root: root.into() }
     }
 
-    /// `%APPDATA%\taffymeters`.
     pub(crate) fn default_root() -> Result<PathBuf, String> {
         std::env::var_os("APPDATA")
             .map(|appdata| PathBuf::from(appdata).join("taffymeters"))
@@ -319,7 +289,6 @@ impl WorkspaceStore {
         self.root.join("session.json")
     }
 
-    /// Saved preset names, sorted.
     pub(crate) fn list_presets(&self) -> Vec<String> {
         let Ok(entries) = fs::read_dir(self.presets()) else {
             return Vec::new();
@@ -338,7 +307,6 @@ impl WorkspaceStore {
         names
     }
 
-    /// The saved preset `name`, `None` when there is no such file.
     pub(crate) fn load_preset(&self, name: &str) -> Result<Option<WorkspaceFile>, PersistError> {
         if !valid_name(name) {
             return Err(PersistError::InvalidName(name.to_owned()));
@@ -361,7 +329,6 @@ impl WorkspaceStore {
         fs::remove_file(&path).map_err(|error| PersistError::Io(path.display().to_string(), error))
     }
 
-    /// The last session, `None` when there is none yet.
     pub(crate) fn load_session(&self) -> Result<Option<WorkspaceFile>, PersistError> {
         read(&self.session_path())
     }
@@ -380,8 +347,7 @@ fn read(path: &std::path::Path) -> Result<Option<WorkspaceFile>, PersistError> {
     }
 }
 
-/// Write `file` to `path`: a temporary file next to it, then a rename, so an
-/// interrupted save never leaves a truncated file.
+// Replace by rename so an interrupted write cannot truncate the saved file.
 fn write(path: &std::path::Path, file: &WorkspaceFile) -> Result<(), PersistError> {
     let label = path.display().to_string();
     let io = |error| PersistError::Io(label.clone(), error);
@@ -402,8 +368,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// A unique temporary directory (not created until used) that is removed on
-    /// drop, also when the test fails.
     struct TestDir(PathBuf);
 
     impl TestDir {

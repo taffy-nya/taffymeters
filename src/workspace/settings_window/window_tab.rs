@@ -1,6 +1,3 @@
-//! The Window tab: new and close, adding to an empty window, always-on-top, lock,
-//! maximize and grouping of the targeted window.
-
 use eframe::egui::{self, RichText};
 
 use super::{
@@ -10,8 +7,6 @@ use super::{
 use crate::workspace::{WindowId, Workspace, WorkspaceAction, window::Controls};
 
 impl Workspace {
-    /// Returns whether the Group button is hovered (the windows then outline the
-    /// windows it would add).
     pub(super) fn window_tab(
         &self,
         ui: &mut egui::Ui,
@@ -27,7 +22,6 @@ impl Workspace {
             count => format!("{count} modules"),
         };
         ui.horizontal_wrapped(|ui| header(ui, "Window", &detail));
-        // First on the page, like the Module tab's layout actions.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             if button(ui, true, "New", SettingsItem::NewWindow, controls) {

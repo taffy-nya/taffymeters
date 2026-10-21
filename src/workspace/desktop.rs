@@ -1,41 +1,32 @@
-//! Desktop geometry shared by all windows. Everything here is in physical pixels;
-//! each window converts with its own `pixels_per_point` at the boundary. Saved
-//! frames are the exception: logical points of their display, relative to its
-//! work area, so a saved arrangement fits displays of another size or scale.
+//! Desktop geometry uses physical pixels, converted at each window's DPI boundary.
+//! Saved frames instead use display-local logical points relative to the work area.
 
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 use super::{WindowId, moving::MoveRequest};
 
-/// Snap distance in logical points of the window being moved.
 pub(crate) const SNAP_DISTANCE_POINTS: f32 = 12.0;
-/// Two outer frames closer than this (physical pixels) count as touching.
+/// Frames within this tolerance count as touching.
 pub(crate) const TOUCH_TOLERANCE_PX: f32 = 2.0;
-/// A window shows at least this much of itself (logical points per axis, or all
-/// of a smaller window) on a monitor to count as reachable.
+/// Reachability requires this much of each axis, or the whole axis of a smaller window.
 pub(crate) const MIN_VISIBLE_POINTS: f32 = 32.0;
 
-/// The desktop beyond what egui's viewport info carries: monitors, the mouse
-/// button, and moving the Workspace windows' native windows. Moves go through
-/// here so a whole group moves at once, synchronously with the pointer; a
-/// desktop that cannot (`false`) leaves them to egui's viewport commands.
+/// Workspace calls this on the UI thread. Group moves must land synchronously;
+/// returning `false` delegates placement or drag initiation to egui viewport commands.
 pub(crate) trait DesktopProbe {
-    /// Whether the primary mouse button is currently held anywhere on the desktop.
+    /// Must report desktop-wide state, including presses outside this application's windows.
     fn primary_button_down(&self) -> bool;
-    /// Work area of the monitor containing `point` (physical pixels).
+    /// Return the work area containing `point`, or the nearest one if outside all monitors.
     fn work_area(&self, point: Pos2) -> Option<Rect>;
-    /// Every monitor (empty when the platform does not tell).
+    /// Return an empty list if monitor enumeration is unavailable.
     fn displays(&self) -> Vec<Display>;
-    /// Track the native window of a Workspace window; `false` while it cannot be
-    /// found.
+    /// Return `false` until the native window can be tracked.
     fn attach(&self, _window: WindowId) -> bool {
         false
     }
-    /// Windows of each group (only those that move: not maximized or minimized).
-    /// Another program moving one of them moves the others by as much.
+    /// Only movable windows are supplied; external moves must carry their group along.
     fn set_groups(&self, _groups: &[(WindowId, u64)]) {}
-    /// Outer frame (physical pixels) of a tracked window as the desktop has it
-    /// now, which may be newer than the window's last pass saw.
+    /// Return the current native frame, not geometry cached by a UI pass.
     fn frame(&self, _window: WindowId) -> Option<Rect> {
         None
     }
@@ -44,23 +35,20 @@ pub(crate) trait DesktopProbe {
     fn begin_move(&self, _request: MoveRequest) -> bool {
         false
     }
-    /// A move started by `begin_move` is in progress.
+    /// Report only a move started by `begin_move`, not the OS move loop.
     fn moving(&self) -> bool {
         false
     }
-    /// Move windows (outer top-left, physical pixels) at once; their groups do
-    /// not follow. `false` when one of them is not tracked.
+    /// Place outer top-lefts together without group following; `false` if any is untracked.
     fn place(&self, _moves: &[(WindowId, Pos2)]) -> bool {
         false
     }
 }
 
-/// A monitor: where windows are placed and what they snap to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Display {
-    /// Work area (without the taskbar and other app bars), physical pixels.
+    /// Excludes the taskbar and other app bars.
     pub(crate) work: Rect,
-    /// The whole monitor, physical pixels.
     pub(crate) bounds: Rect,
     /// Physical pixels per logical point.
     pub(crate) scale: f32,
@@ -68,13 +56,11 @@ pub(crate) struct Display {
 }
 
 impl Display {
-    /// Size of the work area in this display's logical points.
     pub(crate) fn logical_size(&self) -> Vec2 {
         self.work.size() / self.scale
     }
 }
 
-/// Stands in when the desktop reports no monitor.
 pub(crate) const FALLBACK_DISPLAY: Display = Display {
     work: Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1040.0)),
     bounds: Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1080.0)),
@@ -82,8 +68,6 @@ pub(crate) const FALLBACK_DISPLAY: Display = Display {
     primary: true,
 };
 
-/// The native desktop, queried through Win32; window moves go through the
-/// subclassed native windows (`super::native`).
 pub(crate) struct NativeDesktop;
 
 #[cfg(windows)]
@@ -135,9 +119,8 @@ impl DesktopProbe for NativeDesktop {
             monitors.push(monitor);
             1
         }
-        // Monitor geometry and DPI come unscaled only to a DPI-aware process. winit
-        // makes the process per-monitor aware when its event loop starts, which is
-        // after the session is first restored; this is the same call, made first.
+        // Restoration precedes winit's event loop, so enable DPI awareness before querying
+        // unscaled monitor geometry; winit will request the same context later.
         static DPI_AWARE: std::sync::Once = std::sync::Once::new();
         // SAFETY: takes a constant awareness context; failing leaves it unchanged.
         DPI_AWARE.call_once(|| unsafe {
@@ -220,11 +203,7 @@ impl DesktopProbe for NativeDesktop {
     }
 }
 
-/// Best offset (per axis) that aligns an edge of one of `members` (windows moving
-/// together) with an edge of another window, or with an edge of the work area or
-/// of the whole monitor (the work area's edge stops at the taskbar, the monitor's
-/// at the screen edge) nearest the member's center, when within `threshold`. Other
-/// windows only count for a member within `threshold` of it on both axes.
+/// Other windows only attract members within `threshold` on both axes.
 pub(crate) fn snap_group(
     members: impl Iterator<Item = Rect>,
     others: &[Rect],
@@ -240,8 +219,6 @@ pub(crate) fn snap_group(
     };
     for moving in members {
         for other in others {
-            // Only windows within the threshold on both axes interact: side by side
-            // they offer adjacent x edges and aligned y edges, stacked the converse.
             let near = moving.min.x <= other.max.x + threshold
                 && other.min.x <= moving.max.x + threshold
                 && moving.min.y <= other.max.y + threshold
@@ -280,7 +257,6 @@ pub(crate) fn snap_group(
     vec2(best_x.unwrap_or(0.0), best_y.unwrap_or(0.0))
 }
 
-/// The sides of a frame a resize moves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ResizeSides {
     pub(crate) left: bool,
@@ -289,8 +265,6 @@ pub(crate) struct ResizeSides {
     pub(crate) bottom: bool,
 }
 
-/// `start` with its moving `sides` moved by the pointer's `delta`, each kept far
-/// enough from the opposite edge for the frame to be at least `min`.
 pub(crate) fn resize_frame(start: Rect, sides: ResizeSides, delta: Vec2, min: Vec2) -> Rect {
     let mut frame = start;
     if sides.left {
@@ -308,13 +282,10 @@ pub(crate) fn resize_frame(start: Rect, sides: ResizeSides, delta: Vec2, min: Ve
     frame
 }
 
-/// `frame` as a resize of its `sides` leaves it, each moving edge put on the
-/// nearest edge (within `threshold`) of another window or of the work area nearest
-/// the frame's center: adjacent or aligned, as when moving. Not the monitor's
-/// edges: Windows keeps the pointer inside the work area while resizing, and
-/// releasing it on the work area's edge maximizes vertically. Other windows only
-/// count within `threshold` of the frame on both axes. Snaps that would make the
-/// frame smaller than `min` are left out; the other edges stay.
+/// Snap moving edges to nearby windows and the nearest work area, but not monitor bounds.
+/// Windows confines the resize pointer to the work area and vertically maximizes on
+/// release at its edge. Other windows count only within `threshold` on both axes;
+/// reject snaps below `min` and leave fixed edges unchanged.
 pub(crate) fn snap_resize(
     frame: Rect,
     sides: ResizeSides,
@@ -373,10 +344,8 @@ pub(crate) fn snap_resize(
     snapped
 }
 
-/// Shift (per axis, as small as possible) after which every one of `members` (a
-/// frame and how much of it must show) shows at least that much of itself (or all
-/// of a smaller window) inside the work area nearest its center. When they cannot
-/// all, earlier members win. Zero when they all do already.
+/// Each member supplies its minimum visible span in physical pixels. When the
+/// constraints conflict, earlier members win.
 pub(crate) fn keep_reachable(
     members: impl Iterator<Item = (Rect, f32)>,
     displays: &[Display],
@@ -419,12 +388,10 @@ pub(crate) fn keep_reachable(
     vec2(0.0_f32.clamp(x.0, x.1), 0.0_f32.clamp(y.0, y.1))
 }
 
-/// The display whose work area contains `point`, else the nearest one.
 fn nearest_display(displays: &[Display], point: Pos2) -> Option<&Display> {
     display_at(displays, point).map(|index| &displays[index])
 }
 
-/// Index of the area (of `count`) containing `point`, else of the nearest one.
 fn nearest_index(count: usize, area: impl Fn(usize) -> Rect, point: Pos2) -> Option<usize> {
     (0..count)
         .find(|index| area(*index).contains(point))
@@ -437,7 +404,6 @@ fn nearest_index(count: usize, area: impl Fn(usize) -> Rect, point: Pos2) -> Opt
         })
 }
 
-/// A side of a window frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Edge {
     Left,
@@ -449,7 +415,6 @@ pub(crate) enum Edge {
 impl Edge {
     pub(crate) const ALL: [Self; 4] = [Self::Left, Self::Top, Self::Right, Self::Bottom];
 
-    /// The span of `frame` along this edge.
     pub(crate) fn span(self, frame: Rect) -> (f32, f32) {
         match self {
             Self::Left | Self::Right => (frame.min.y, frame.max.y),
@@ -458,8 +423,7 @@ impl Edge {
     }
 }
 
-/// Where `other` touches `own` (edges at most the touch tolerance apart, sharing
-/// more than a corner): the edge of `own` and the shared span along it.
+/// Returns the edge of `own` and the shared span; corner-only contact does not count.
 pub(crate) fn shared_edge(own: Rect, other: Rect) -> Option<(Edge, f32, f32)> {
     shared_edge_within(own, other, TOUCH_TOLERANCE_PX)
 }
@@ -487,19 +451,15 @@ fn shared_edge_within(own: Rect, other: Rect, tolerance: f32) -> Option<(Edge, f
     None
 }
 
-/// Whether two outer frames share an edge segment.
 pub(crate) fn touching(a: Rect, b: Rect) -> bool {
     shared_edge(a, b).is_some()
 }
 
-/// Whether two frames share an edge segment, edges `tolerance` apart counting as
-/// one.
 fn touching_within(a: Rect, b: Rect, tolerance: f32) -> bool {
     shared_edge_within(a, b, tolerance).is_some()
 }
 
-/// The parts of `span` that none of `covered` (spans, in any order) covers, in
-/// order.
+/// Accepts unordered covered spans; emits gaps in ascending order.
 pub(crate) fn uncovered<I>(
     span: (f32, f32),
     covered: impl Fn() -> I,
@@ -527,24 +487,16 @@ pub(crate) fn uncovered<I>(
     }
 }
 
-/// New top-left for `outer` inside `work` when less than `min_visible` (or the
-/// whole window, if smaller) of it is inside `work` on either axis; `None` when
-/// it is reachable where it is. Windows larger than `work` keep their top-left
-/// edge inside it.
 pub(crate) fn reachable_position(outer: Rect, work: Rect, min_visible: f32) -> Option<Pos2> {
     (!reachable(outer, work, min_visible)).then(|| fit_inside(outer, work))
 }
 
-/// Whether at least `min_visible` of `outer` (or all of a smaller window) is inside
-/// `work` on both axes.
 pub(crate) fn reachable(outer: Rect, work: Rect, min_visible: f32) -> bool {
     let visible = outer.intersect(work);
     visible.width().max(0.0) + 0.5 >= min_visible.min(outer.width())
         && visible.height().max(0.0) + 0.5 >= min_visible.min(outer.height())
 }
 
-/// Top-left that puts `outer` inside `work`, or its top-left edge when it is
-/// larger.
 pub(crate) fn fit_inside(outer: Rect, work: Rect) -> Pos2 {
     pos2(
         outer
@@ -558,15 +510,12 @@ pub(crate) fn fit_inside(outer: Rect, work: Rect) -> Pos2 {
     )
 }
 
-/// Index of the display whose work area contains `point`, else the nearest one.
 pub(crate) fn display_at(displays: &[Display], point: Pos2) -> Option<usize> {
     nearest_index(displays.len(), |index| displays[index].work, point)
 }
 
-/// The saved frame of `outer` (physical pixels) on `display`: logical points from
-/// the top-left of its work area. An edge resting on a work-area edge (within the
-/// touch tolerance inside, or beyond it by less than the snap distance) is saved
-/// exactly on it, so the window is recognized as attached there.
+/// Returns work-area-relative logical points. Near-attached edges are saved exactly
+/// on the work-area edge so restoration recognizes their attachment.
 pub(crate) fn saved_frame(display: &Display, outer: Rect) -> Rect {
     let size = display.logical_size();
     let inside = TOUCH_TOLERANCE_PX / display.scale;
@@ -592,16 +541,14 @@ pub(crate) fn saved_frame(display: &Display, outer: Rect) -> Rect {
     )
 }
 
-/// A display as saved: its work area size (logical points) and, when known, the
-/// physical origin of that work area and its scale.
+/// `size` is in logical points; `hint` is the physical work-area origin and scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SavedDisplay {
     pub(crate) size: Vec2,
     pub(crate) hint: Option<(Pos2, f32)>,
 }
 
-/// A window as saved: its display (index into the saved displays), frame, group
-/// number and the minimum size of its layout (logical points).
+/// `frame` is work-area-relative logical points; `min` is a logical size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SavedWindow {
     pub(crate) display: usize,
@@ -610,10 +557,9 @@ pub(crate) struct SavedWindow {
     pub(crate) min: Vec2,
 }
 
-/// The current display each saved display goes to. A display the hint identifies
-/// (same work-area origin, size and scale) is used again; otherwise the first
-/// saved display goes to `current` and the others to the remaining displays from
-/// left to right, or to `current` when none is left.
+/// Reuse displays matching their saved origin, size and scale. Only an unrecognized
+/// first saved display takes `current`; later ones take free displays left-to-right,
+/// falling back to `current` when none remain.
 pub(crate) fn match_displays(
     saved: &[SavedDisplay],
     displays: &[Display],
@@ -630,7 +576,6 @@ pub(crate) fn match_displays(
             })
         })
         .collect();
-    // The first saved display takes the current one unless it was recognized.
     if let Some(first) = matched.first_mut() {
         first.get_or_insert(current);
     }
@@ -653,16 +598,11 @@ pub(crate) fn match_displays(
         .collect()
 }
 
-/// Outer frames (physical pixels) of saved windows on the displays `targets`
-/// (one per saved display). Windows of one saved display that touch (within the
-/// touch tolerance of that display), or share a group, form a cluster that is
-/// mapped as a whole, per axis: attached to both work-area edges it stretches
-/// proportionally; attached to one edge it keeps its distance to that edge and
-/// its size; attached to neither it keeps its size and the relative position of
-/// its center. A cluster larger than the target shrinks by one factor on its
-/// unstretched axes (keeping its proportions), but never below a member's
-/// minimum size; then it moves inside (its top-left first). Every edge is rounded
-/// to a physical pixel on its own, so edges that coincided still coincide.
+/// Returns physical outer frames. Within each saved display, touching or grouped windows
+/// map as one cluster. On each axis, attachment to both work-area edges stretches;
+/// one edge preserves size and edge distance; neither preserves size and relative center.
+/// Oversized clusters shrink on unstretched axes, subject to member minima, then fit
+/// top-left first. Shared edges round identically to avoid gaps.
 pub(crate) fn place(
     saved: &[SavedDisplay],
     windows: &[SavedWindow],
@@ -671,7 +611,6 @@ pub(crate) fn place(
     /// A cluster edge this close (logical points) to a work-area edge rests on it;
     /// saved frames put such edges exactly there (`saved_frame`).
     const ATTACHED: f32 = 0.5;
-    // Union-find over the windows.
     let mut parent: Vec<usize> = (0..windows.len()).collect();
     fn root(parent: &mut [usize], mut index: usize) -> usize {
         while parent[index] != index {
@@ -683,7 +622,6 @@ pub(crate) fn place(
     for a in 0..windows.len() {
         for b in a + 1..windows.len() {
             let (wa, wb) = (&windows[a], &windows[b]);
-            // Windows touch at runtime within a few physical pixels.
             let tolerance = saved[wa.display].hint.map_or(ATTACHED, |(_, scale)| {
                 (TOUCH_TOLERANCE_PX / scale).max(ATTACHED)
             });
@@ -696,7 +634,6 @@ pub(crate) fn place(
             }
         }
     }
-    /// x' = scale·x + offset on one axis.
     #[derive(Clone, Copy)]
     struct AxisMap {
         scale: f32,
@@ -744,7 +681,7 @@ pub(crate) fn place(
             [bounds.max.x, bounds.max.y],
             [to.x, to.y],
         );
-        // One shrink factor keeps the proportions of what is not stretched.
+        // One shrink factor preserves proportions across the unstretched axes.
         let fit = (0..2)
             .filter(|axis| !axes[*axis].stretched)
             .map(|axis| to[axis] / (axes[axis].scale * (high[axis] - low[axis])))
@@ -804,7 +741,6 @@ mod tests {
         Rect::from_min_size(pos2(x, y), vec2(w, h))
     }
 
-    /// Displays whose monitor is just their work area.
     fn screens(areas: &[Rect]) -> Vec<Display> {
         areas
             .iter()
@@ -826,19 +762,16 @@ mod tests {
         let other = rect(0.0, 0.0, 400.0, 300.0);
         let moving = rect(410.0, 7.0, 200.0, 100.0);
         assert_eq!(snap(moving, &[other], &[]), vec2(-10.0, -7.0));
-        // Beyond the threshold: no snap.
         let far = rect(450.0, 40.0, 200.0, 100.0);
         assert_eq!(snap(far, &[other], &[]), Vec2::ZERO);
-        // Not overlapping vertically: the other's right edge is not a target.
         let below = rect(410.0, 500.0, 200.0, 100.0);
         assert_eq!(snap(below, &[other], &[]), Vec2::ZERO);
-        // Side by side just beyond the x threshold: nothing to align the tops with.
+        // A 29 px horizontal gap exceeds the 24 px threshold, even with tops only 9 px apart.
         let beside = rect(429.0, 9.0, 200.0, 100.0);
         assert_eq!(snap(beside, &[other], &[]), Vec2::ZERO);
-        // Side by side within it: adjacent x edge and aligned top.
         let beside = rect(415.0, 9.0, 200.0, 100.0);
         assert_eq!(snap(beside, &[other], &[]), vec2(-15.0, -9.0));
-        // The work area of the window's own monitor, not of another one.
+        // Only the member's nearest monitor offers work-area edges.
         let work = rect(-1920.0, 0.0, 1920.0, 1040.0);
         let primary = rect(0.0, 0.0, 1920.0, 1040.0);
         let near_corner = rect(-1910.0, 935.0, 200.0, 100.0);
@@ -859,7 +792,6 @@ mod tests {
             resize_frame(start, corner, vec2(-300.0, -250.0), min),
             rect(100.0, 100.0, 100.0, 50.0)
         );
-        // Past the minimum: it stops there, the fixed edges stay.
         assert_eq!(
             resize_frame(start, corner, vec2(-600.0, -600.0), min),
             rect(100.0, 100.0, 32.0, 32.0)
@@ -898,23 +830,19 @@ mod tests {
             ..Default::default()
         };
         let min = vec2(16.0, 16.0);
-        // Top edge to `above`'s bottom (adjacent), nothing else moves.
         assert_eq!(
             resize(top, frame, min),
             Rect::from_min_max(pos2(100.0, 390.0), pos2(590.0, 600.0))
         );
-        // A corner snaps both of its edges: the right one aligns with `above`'s.
         assert_eq!(
             resize(top_right, frame, min),
             Rect::from_min_max(pos2(100.0, 390.0), pos2(600.0, 600.0))
         );
-        // The right edge alone is not moving: unchanged.
         assert_eq!(resize(top, frame, min).max.x, 590.0);
-        // A snap that would make the frame shorter than its minimum is left out.
         let short = rect(100.0, 395.0, 490.0, 20.0);
         assert_eq!(resize(top, short, vec2(16.0, 30.0)), short);
         assert_eq!(resize(top, short, min).min.y, 390.0);
-        // Work-area edges; the far window is no target.
+        // The right edge is near `far`, but their vertical gap excludes that window.
         let low = rect(100.0, 800.0, 1395.0, 232.0);
         let bottom_right = ResizeSides {
             bottom: true,
@@ -937,11 +865,10 @@ mod tests {
             primary: true,
         }];
         let snap = |moving| snap_group(std::iter::once(moving), &[], &display, 24.0);
-        // Bottom 10 px above the taskbar: onto it.
+        // Bottom 10 px above the taskbar.
         assert_eq!(snap(rect(500.0, 822.0, 400.0, 200.0)), vec2(0.0, 10.0));
-        // Bottom 10 px above the screen's bottom (over the taskbar): onto that.
+        // Bottom 10 px above the screen bottom, overlapping the taskbar.
         assert_eq!(snap(rect(500.0, 870.0, 400.0, 200.0)), vec2(0.0, 10.0));
-        // Resizing the bottom edge: only the taskbar.
         let bottom = ResizeSides {
             bottom: true,
             ..Default::default()
@@ -973,14 +900,12 @@ mod tests {
         let reach = |members: &[Rect], min: f32| {
             keep_reachable(members.iter().map(|member| (*member, min)), &screens(&work))
         };
-        // Inside: no shift.
         assert_eq!(reach(&[rect(100.0, 100.0, 400.0, 300.0)], 32.0), Vec2::ZERO);
-        // 10 px left on the right, 5 px below the bottom: up to 32 px shown.
+        // Only 10 px remain visible on the right and 5 px at the bottom.
         let corner = rect(1910.0, 1035.0, 400.0, 300.0);
         assert_eq!(reach(&[corner], 32.0), vec2(-22.0, -27.0));
         // A member on a 2x monitor keeps twice as many pixels.
         assert_eq!(reach(&[corner], 64.0), vec2(-54.0, -59.0));
-        // A small window shows all of itself.
         assert_eq!(
             reach(&[rect(-30.0, 100.0, 20.0, 20.0)], 32.0),
             vec2(30.0, 0.0)
@@ -991,7 +916,6 @@ mod tests {
             rect(2500.0, 100.0, 400.0, 300.0),
         ];
         assert_eq!(reach(&apart, 32.0), vec2(132.0, 0.0));
-        // Each member's own minimum.
         let pair = [(corner, 32.0), (rect(1500.0, 1035.0, 100.0, 300.0), 64.0)];
         assert_eq!(
             keep_reachable(pair.into_iter(), &screens(&work)),
@@ -1027,7 +951,7 @@ mod tests {
             shared_edge(a, rect(50.0, 0.0, 100.0, 100.0)),
             Some((Edge::Top, 100.0, 150.0))
         );
-        // Two pixels of overlap along the edge are a corner, not an edge.
+        // Two pixels of overlap along the edge are within the corner tolerance.
         assert_eq!(shared_edge(a, rect(300.0, 198.0, 50.0, 50.0)), None);
     }
 
@@ -1049,22 +973,20 @@ mod tests {
     #[test]
     fn windows_off_every_monitor_come_back_but_partly_visible_ones_stay() {
         let work = rect(0.0, 0.0, 1920.0, 1040.0);
-        // Disconnected monitor on the left: entirely outside.
+        // A disconnected monitor to the left leaves this window entirely outside.
         assert_eq!(
             reachable_position(rect(-1500.0, 200.0, 400.0, 300.0), work, 32.0),
             Some(pos2(0.0, 200.0))
         );
-        // Only a sliver on screen.
         assert_eq!(
             reachable_position(rect(1910.0, 1030.0, 400.0, 300.0), work, 32.0),
             Some(pos2(1520.0, 740.0))
         );
-        // Deliberately half off screen: left alone.
+        // Deliberately partly off-screen, but still reachable.
         assert_eq!(
             reachable_position(rect(1700.0, 100.0, 400.0, 300.0), work, 32.0),
             None
         );
-        // Larger than the work area: top-left inside.
         assert_eq!(
             reachable_position(rect(-3000.0, -50.0, 2500.0, 1200.0), work, 32.0),
             Some(pos2(0.0, 0.0))
@@ -1108,7 +1030,7 @@ mod tests {
             place(&saved, &[bottom], &[laptop]),
             vec![rect(0.0, 1512.0, 2880.0, 224.0)]
         );
-        // A second monitor left of the primary one, 125%.
+        // A second monitor left of the primary one, at 125%.
         let left = display(-1920.0, 0.0, 1920.0, 1080.0, 1.25);
         assert_eq!(
             place(&saved, &[bottom], &[left]),
@@ -1129,7 +1051,7 @@ mod tests {
         assert_eq!(placed[0].max.y, placed[2].min.y);
         assert_eq!(placed[0].min.x, placed[2].min.x);
         assert_eq!(placed[1].max.x, placed[2].max.x);
-        // Floating: sizes kept in logical points.
+        // The floating cluster keeps its 598.8-point width, converted at 150%.
         assert!((placed[2].width() - 598.8 * 1.5).abs() <= 1.0, "{placed:?}");
     }
 
@@ -1162,7 +1084,7 @@ mod tests {
             &[display(0.0, 0.0, 1366.0, 728.0, 1.0)],
         );
         assert_eq!(placed, vec![rect(443.0, 244.0, 480.0, 240.0)]);
-        // A window in the right third stays in the right third.
+        // The center stays at the same relative horizontal position on the smaller display.
         let right = window(1400.0, 100.0, 1600.0, 300.0);
         let placed = place(&saved, &[right], &[display(0.0, 0.0, 960.0, 516.0, 1.0)]);
         assert_eq!(placed, vec![rect(650.0, 0.0, 200.0, 200.0)]);
@@ -1210,7 +1132,7 @@ mod tests {
 
     #[test]
     fn windows_touching_within_the_runtime_tolerance_form_one_cluster() {
-        // 1 px apart at 100%: touching for snapping, so moved as one.
+        // A 1 px gap at 100% counts as touching at runtime.
         let saved = [SavedDisplay {
             size: vec2(1920.0, 1040.0),
             hint: Some((Pos2::ZERO, 1.0)),
@@ -1255,7 +1177,6 @@ mod tests {
             saved_frame(&laptop, rect(-9.0, 0.0, 2889.0, 234.0)),
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1440.0, 117.0))
         );
-        // Clearly off the edge: kept as it is.
         assert_eq!(
             saved_frame(&laptop, rect(-100.0, 20.0, 200.0, 100.0)),
             Rect::from_min_max(pos2(-50.0, 10.0), pos2(50.0, 60.0))
@@ -1276,11 +1197,8 @@ mod tests {
             size: left.logical_size(),
             hint: Some((left.work.min, 1.5)),
         };
-        // A built-in preset goes to the current display.
         assert_eq!(match_displays(&[unknown], &displays, 1), vec![1]);
-        // The saved display is still there: back to it, whatever is current.
         assert_eq!(match_displays(&[known_left], &displays, 0), vec![2]);
-        // Others take the free displays from left to right, then the current one.
         assert_eq!(
             match_displays(&[unknown, unknown, unknown, unknown], &displays, 0),
             vec![0, 2, 1, 0]
@@ -1289,8 +1207,7 @@ mod tests {
             match_displays(&[unknown, known_left], &displays, 2),
             vec![2, 2]
         );
-        // Recognized elsewhere, the first saved display leaves the current one
-        // free for the others.
+        // Recognizing the first saved display elsewhere leaves `current` free for the next.
         assert_eq!(
             match_displays(&[known_left, unknown], &displays, 0),
             vec![2, 0]

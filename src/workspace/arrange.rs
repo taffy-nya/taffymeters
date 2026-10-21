@@ -1,5 +1,3 @@
-//! BSP arrangement of instances: splitting, moving and detaching.
-
 use eframe::egui::{Rect, Vec2};
 
 use super::{
@@ -10,7 +8,6 @@ use super::{
 };
 
 impl Workspace {
-    /// Whether `incoming` can be placed on `side` of `target` in its current area.
     fn can_place_beside(&self, target: ModuleInstanceId, side: Side, incoming_min: Vec2) -> bool {
         let Some(window_id) = self.window_of(target) else {
             return false;
@@ -26,15 +23,12 @@ impl Workspace {
         )
     }
 
-    /// Whether a copy of `instance` fits on `side`. Placeholders of types this
-    /// build lacks cannot be copied.
     pub(crate) fn can_split(&self, instance: ModuleInstanceId, side: Side) -> bool {
         self.window_of(instance)
             .and_then(|window_id| self.leaf_rect(window_id, instance))
             .is_some_and(|rect| self.can_split_in(instance, side, rect.size()))
     }
 
-    /// `can_split` for a leaf already laid out at `area`.
     pub(crate) fn can_split_in(&self, instance: ModuleInstanceId, side: Side, area: Vec2) -> bool {
         let min = self.module_min_size(instance);
         self.modules
@@ -43,7 +37,6 @@ impl Workspace {
             && fits(area, side.axis(), min, min)
     }
 
-    /// A target in a locked window is never valid: it takes no clicks.
     pub(crate) fn move_target_valid(&self, source: ModuleInstanceId, target: MoveTarget) -> bool {
         if !self.modules.contains_key(&source) || self.window_of(source).is_none() {
             return false;
@@ -64,9 +57,7 @@ impl Workspace {
         }
     }
 
-    /// Where `source` would land beside `target` in `window_id` laid out in `rect`:
-    /// the layout after the move (the source leaves this window first if it is
-    /// here; the chain re-equalizes), not just half of the target.
+    /// Preview the post-move layout: remove the source if already here, then re-equalize.
     pub(crate) fn move_landing(
         &self,
         source: ModuleInstanceId,
@@ -89,8 +80,7 @@ impl Workspace {
             .find_map(|(leaf, leaf_rect)| (leaf == source).then_some(leaf_rect))
     }
 
-    /// Copy an instance next to itself: same type, `DataSpec` (with bindings),
-    /// style, view settings and colors; new subscription and fresh private state.
+    /// Copies get a fresh subscription and private state, but retain explicit data bindings.
     pub(super) fn split_module(
         &mut self,
         instance_id: ModuleInstanceId,
@@ -112,8 +102,7 @@ impl Workspace {
             .checked_add(1)
             .ok_or(WorkspaceError::IdExhausted)?;
         let new = self.create_instance(config.type_id, config.data.as_ref())?;
-        // A copy that lost settings is not a copy: nothing is committed. A style this
-        // build lacks stays the kept, unavailable style of the original.
+        // An unavailable style can be preserved; lost settings must abort the copy.
         if let Err(reason) = self.apply_config(new, &config) {
             self.modules.remove(&new);
             return Err(WorkspaceError::CopyIncomplete(reason));
@@ -197,7 +186,6 @@ impl Workspace {
         let min_size = self.module_min_size(instance_id);
         let window_id = WindowId(Self::allocate(&mut self.next_window_id)?);
         let mut window = WindowState::new(Layout::default(), size, always_on_top);
-        // The window will hold this module: its minimum, not an empty window's.
         window.initial_min_size = min_size;
         window.initial_position = position;
         window.pixels_per_point = ppp;
@@ -210,8 +198,7 @@ impl Workspace {
         Ok(ActionOutcome::WindowCreated(window_id))
     }
 
-    /// Called on the first frame of a pending window: move the instance from its
-    /// source layout, or drop the empty window when the source became invalid.
+    /// Call on the destination's first frame; the source layout retains the instance until then.
     pub(super) fn commit_detach(&mut self, window_id: WindowId) {
         let Some(pending) = self
             .windows
@@ -273,7 +260,6 @@ impl Workspace {
             MoveTarget::Beside { .. } => Some(SplitId(Self::allocate(&mut self.next_split_id)?)),
             MoveTarget::EmptyWindow(_) => None,
         };
-        // All preconditions hold; the two tree updates below cannot fail.
         let source = self
             .windows
             .get_mut(&source_id)

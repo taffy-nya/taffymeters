@@ -1,8 +1,4 @@
-//! The settings window: one native, decorated window next to the Workspace windows
-//! (it does not shrink with them). Right-clicking a Module opens it on that
-//! instance; while it is open, a left click selects another one. Tabs hold
-//! everything the instance, its window, the workspace and the theme offer; every
-//! change goes through `WorkspaceAction`.
+//! Every settings change goes through `WorkspaceAction`.
 
 use std::time::Duration;
 
@@ -25,10 +21,9 @@ mod widgets;
 mod window_tab;
 mod workspace_tab;
 
-/// Logical size the settings window opens with.
+// Logical points.
 const SETTINGS_SIZE: Vec2 = vec2(420.0, 600.0);
 const SETTINGS_MIN_SIZE: Vec2 = vec2(280.0, 220.0);
-/// Physical gap between the source window and the settings window.
 const SETTINGS_GAP_PX: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -52,28 +47,21 @@ impl Tab {
     }
 }
 
-/// What the Workspace windows mark for the open tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Highlight {
-    /// The Window tab: the window it edits, and whether its Group button is
-    /// hovered.
     Window {
         window: WindowId,
         group_hovered: bool,
     },
-    /// The Module tab: the instance it edits.
     Module(ModuleInstanceId),
 }
 
-/// Probe-visible controls of the settings window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SettingsItem {
     Tab(Tab),
-    /// The Module type picker; its entries are `ModuleType`.
     TypePicker,
     ModuleType(&'static str),
     Style(&'static str),
-    /// The instance's channel (analysis Channel node or display channel).
     Channel(ChannelSelection),
     FftWindow {
         node: NodeRef,
@@ -94,16 +82,12 @@ pub(crate) enum SettingsItem {
     },
     ViewNumber(&'static str),
     ViewToggle(&'static str),
-    /// Back to the inherited color (shown while the scope sets its own).
     ResetColor {
         scope: ColorScope,
         role: ColorRole,
     },
-    /// Every color this scope sets back to the inherited one.
     ResetColors(ColorScope),
-    /// The instance's analysis parameters back to its type's defaults.
     ResetAnalysis,
-    /// The instance's view settings of one section back to their defaults.
     ResetSection(&'static str),
     Swatch {
         scope: ColorScope,
@@ -123,20 +107,17 @@ pub(crate) enum SettingsItem {
     NewWindow,
     CloseWindow,
     AddModule(&'static str),
-    /// Name for a new preset.
     PresetName,
     SavePresetAs,
-    /// Save over the user preset the session was loaded from.
     SavePreset,
-    /// Built-in preset by index in the listed order.
+    /// Index in built-in declaration order.
     BuiltinPreset(u16),
-    /// User preset by index in the sorted list.
+    /// Index in the sorted user preset list.
     SavedPreset(u16),
     DeletePreset(u16),
     ConfirmDelete,
     CancelDelete,
     Pause,
-    /// A notice by index in the listed order.
     Notice(u16),
     CopyNotices,
     ClearNotices,
@@ -147,8 +128,7 @@ pub(crate) enum SettingsItem {
     TypeStyle(&'static str),
 }
 
-/// Quick colors offered next to the full picker: Catppuccin accents of the
-/// chrome's tone (Mocha on dark, Latte on light), in the same order.
+// Catppuccin accents: Mocha on dark, Latte on light; matching order in both palettes.
 pub(crate) fn swatches(dark: bool) -> &'static [Color; 8] {
     if dark {
         &MOCHA_SWATCHES
@@ -181,22 +161,17 @@ const LATTE_SWATCHES: [Color; 8] = [
 
 pub(crate) struct SettingsWindow {
     tab: Tab,
-    /// The instance the Module tab edits.
     instance: Option<ModuleInstanceId>,
     /// The window the Window tab edits when no instance is targeted.
     window: Option<WindowId>,
     type_style: Option<&'static str>,
     name: String,
-    /// The user preset whose deletion waits for confirmation.
     confirm_delete: Option<String>,
-    /// The notices were copied; Copy reads "Copied" until the pointer leaves it.
+    /// Copy reads "Copied" until the pointer leaves it.
     notices_copied: bool,
-    /// A text field (a name, a typed number) had keyboard focus at the end of the
-    /// last pass: Escape belongs to it. egui drops the focus on Escape before the
-    /// next pass runs, so the pass that sees Escape cannot ask egui itself.
+    /// egui clears focus on Escape before our UI pass; retain the previous pass's text focus
+    /// so canceling an edit does not also close the settings window.
     text_focus: bool,
-    /// What the Workspace windows mark for this window's open tab as of the last
-    /// pass (see `window_tab_target` and `module_tab_target`).
     highlight: Option<Highlight>,
     /// The instance and window the pages showed in the last pass.
     shown: (Option<ModuleInstanceId>, Option<WindowId>),
@@ -241,19 +216,16 @@ impl SettingsWindow {
         }
     }
 
-    /// A replaced instance keeps the Module tab on its successor.
     pub(super) fn follow_replacement(&mut self, old: ModuleInstanceId, new: ModuleInstanceId) {
         if self.instance == Some(old) {
             self.instance = Some(new);
         }
     }
 
-    /// The window the settings were opened from.
     pub(super) fn window(&self) -> Option<WindowId> {
         self.window
     }
 
-    /// A preset replaced the workspace: nothing is targeted.
     pub(super) fn forget_targets(&mut self) {
         self.instance = None;
         self.window = None;
@@ -265,7 +237,6 @@ impl SettingsWindow {
 }
 
 impl Workspace {
-    /// Viewport of the open settings window.
     pub(crate) fn settings_viewport_id(&self) -> Option<egui::ViewportId> {
         let settings = self.settings.as_ref()?;
         Some(egui::ViewportId::from_hash_of((
@@ -274,7 +245,6 @@ impl Workspace {
         )))
     }
 
-    /// Builder of the open settings window.
     pub(crate) fn settings_builder(&self) -> Option<egui::ViewportBuilder> {
         let settings = self.settings.as_ref()?;
         let mut builder = egui::ViewportBuilder::default()
@@ -303,7 +273,6 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// Show the settings window on `instance` (or on `window_id` without one).
     pub(super) fn open_settings(
         &mut self,
         window_id: WindowId,
@@ -337,7 +306,6 @@ impl Workspace {
         Ok(())
     }
 
-    /// Point an open settings window at `window_id`'s Window tab (it keeps focus).
     pub(super) fn retarget_settings(&mut self, window_id: WindowId) {
         if let Some(settings) = &mut self.settings {
             settings.instance = None;
@@ -347,11 +315,6 @@ impl Workspace {
         }
     }
 
-    /// Point the open settings window at what a left click selected, without
-    /// focusing it. An instance (with its window): the Module and Window tabs
-    /// show it at once, the Workspace and Theme tabs once one of those is chosen.
-    /// An empty window (`instance` `None`): only the Window tab takes it; the
-    /// Module tab has nothing to show for it.
     pub(super) fn select_in_settings(
         &mut self,
         window_id: WindowId,
@@ -370,7 +333,6 @@ impl Workspace {
         Ok(())
     }
 
-    /// Instance and window the tabs edit, when they still exist.
     pub(super) fn settings_targets_now(&self) -> (Option<ModuleInstanceId>, Option<WindowId>) {
         let Some(settings) = &self.settings else {
             return (None, None);
@@ -384,8 +346,6 @@ impl Workspace {
         (instance, window)
     }
 
-    /// While the Window tab is open: the window it edits, and whether its Group
-    /// button is hovered. The Workspace windows outline what these affect.
     pub(super) fn window_tab_target(&self) -> Option<(WindowId, bool)> {
         match self.settings.as_ref()?.highlight? {
             Highlight::Window {
@@ -396,8 +356,6 @@ impl Workspace {
         }
     }
 
-    /// While the Module tab is open: the instance it edits, which its window
-    /// outlines.
     pub(super) fn module_tab_target(&self) -> Option<ModuleInstanceId> {
         match self.settings.as_ref()?.highlight? {
             Highlight::Module(instance) => Some(instance),
@@ -405,14 +363,11 @@ impl Workspace {
         }
     }
 
-    /// One UI pass of the settings window inside its own viewport.
     pub(crate) fn settings_ui(&mut self, ui: &mut egui::Ui, display_time: Duration) {
-        // Actions taken here (e.g. detach) are timed on the app clock, which this
-        // pass keeps moving even when every Workspace window is minimized.
+        // Keep action deadlines moving even when every Workspace window is minimized.
         self.tick(display_time);
         let ctx = ui.ctx().clone();
         super::window::apply_chrome_style(&ctx, &self.chrome);
-        // Targets are resolved while the settings state is still in place.
         let (instance, window) = self.settings_targets_now();
         let Some(mut settings) = self.settings.take() else {
             return;
@@ -425,9 +380,7 @@ impl Workspace {
             settings.pass_token += 1;
             settings.targets.clear();
         }
-        // A value still being typed belongs to what the page showed: when another
-        // module or window is selected, the draft is dropped, not applied to the
-        // same row of the new page.
+        // Discard drafts on retargeting so they cannot apply to the new page's controls.
         if settings.shown != (instance, window) {
             settings.shown = (instance, window);
             if let Some(id) = ctx.memory(egui::Memory::focused) {
@@ -435,9 +388,7 @@ impl Workspace {
                 ctx.memory_mut(|memory| memory.surrender_focus(id));
             }
         }
-        // First placement: a window opened beside a source near the screen edge
-        // moves fully into that monitor's work area, title bar and close button
-        // included (windows larger than the work area keep their top-left inside).
+        // Include native decorations when keeping the title bar and close button reachable.
         if !settings.placed
             && let Some(outer) = ctx.input(|input| input.viewport().outer_rect)
         {
@@ -468,8 +419,8 @@ impl Workspace {
             spacing.item_spacing = vec2(6.0, 8.0);
             spacing.button_padding = vec2(8.0, 3.0);
             spacing.interact_size.y = 22.0;
+            // Equal-width tabs when possible; preserve readable text at the minimum width.
             ui.horizontal(|ui| {
-                // Equal tabs when they fit; at the minimum width each keeps its text.
                 let gap = 4.0;
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.spacing_mut().button_padding.x = 4.0;

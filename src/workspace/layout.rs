@@ -1,6 +1,4 @@
-//! Binary space partition of one window. Leaves reference Module instances by ID;
-//! the Module objects themselves are owned by the Workspace, so moving a leaf never
-//! touches the object or its analysis subscriptions.
+//! Geometry is in window-local logical points; leaves only reference instance IDs.
 
 use std::{error::Error, fmt};
 
@@ -8,20 +6,15 @@ use eframe::egui::{Pos2, Rect, Vec2, pos2};
 
 use super::ModuleInstanceId;
 
-/// Grid step for divider positions, in logical points.
 pub(crate) const GRID_STEP_POINTS: f32 = 16.0;
-/// Half width of the overlay divider hit zone, in logical points.
 pub(crate) const DIVIDER_HALF_WIDTH_POINTS: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct SplitId(pub(crate) u64);
 
-/// How the two children of a split are arranged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Axis {
-    /// `first` on the left, `second` on the right; the divider is a vertical line.
     LeftRight,
-    /// `first` above, `second` below; the divider is a horizontal line.
     TopBottom,
 }
 
@@ -47,7 +40,6 @@ impl Axis {
         }
     }
 
-    /// Coordinate of `point` along this axis.
     pub(crate) fn coordinate(self, point: Pos2) -> f32 {
         match self {
             Self::LeftRight => point.x,
@@ -76,7 +68,6 @@ impl Axis {
     }
 }
 
-/// Where a leaf is inserted relative to a target leaf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Side {
     Left,
@@ -144,7 +135,6 @@ impl Error for LayoutError {}
 pub(crate) struct DividerGeometry {
     pub(crate) id: SplitId,
     pub(crate) axis: Axis,
-    /// Area divided by the split.
     pub(crate) parent: Rect,
     /// Absolute coordinate of the divider along `axis`.
     pub(crate) position: f32,
@@ -167,9 +157,8 @@ impl DividerGeometry {
         }
     }
 
-    /// Ratio for a divider dragged to `pointer` (absolute coordinate along the axis).
-    /// The legal interval always wins; the grid only chooses inside it, and the
-    /// interval's ends are snap points too so either side can reach its minimum.
+    /// `pointer` is absolute along `axis`. Stay inside the legal interval even off-grid;
+    /// its endpoints are snap candidates so either child can reach its minimum.
     pub(crate) fn ratio_for_pointer(&self, pointer: f32, grid: bool) -> f32 {
         let start = self.axis.start(self.parent);
         let span = self.axis.extent(self.parent.size());
@@ -223,7 +212,6 @@ impl LayoutGeometry {
     }
 }
 
-/// Whether an area can host two subtrees side by side along `axis`.
 pub(crate) fn fits(area: Vec2, axis: Axis, first: Vec2, second: Vec2) -> bool {
     let need = axis.combine(first, second);
     area.x + 0.5 >= need.x && area.y + 0.5 >= need.y
@@ -242,7 +230,6 @@ impl Layout {
         }
     }
 
-    /// A layout with the given tree (restored from a saved workspace).
     pub(crate) fn from_root(root: Option<Node>) -> Self {
         Self { root }
     }
@@ -292,8 +279,7 @@ impl Layout {
         Ok(())
     }
 
-    /// Put `new` next to `target`. The surrounding chain is re-equalized unless the
-    /// user adjusted it. `split_id` must be unused.
+    /// `split_id` must be unused. Re-equalize the same-axis chain unless manually adjusted.
     pub(crate) fn insert_beside(
         &mut self,
         target: ModuleInstanceId,
@@ -323,7 +309,6 @@ impl Layout {
         Ok(())
     }
 
-    /// Remove a leaf; its sibling subtree takes the parent's place.
     pub(crate) fn remove_leaf(&mut self, target: ModuleInstanceId) -> Result<(), LayoutError> {
         let root = self.root.take().ok_or(LayoutError::MissingLeaf(target))?;
         match remove_from(root, target) {
@@ -371,8 +356,6 @@ impl Layout {
         Ok(())
     }
 
-    /// Double-click reset: clear the manual mark of the whole same-axis chain that
-    /// contains `id` and distribute it evenly again.
     pub(crate) fn reset_chain(&mut self, id: SplitId) -> Result<(), LayoutError> {
         let top = self
             .root
@@ -386,7 +369,6 @@ impl Layout {
         Ok(())
     }
 
-    /// Re-distribute every same-axis chain no user has adjusted.
     fn equalize(&mut self) {
         if let Some(root) = self.root.take() {
             self.root = Some(equalize_node(root));
@@ -474,7 +456,6 @@ fn find_split_mut(node: &mut Node, id: SplitId) -> Option<&mut Split> {
     }
 }
 
-/// ID of the topmost split of the same-axis chain containing split `id`.
 fn chain_top_id(
     node: &Node,
     id: SplitId,
@@ -509,7 +490,7 @@ fn clear_manual(split: &mut Split, axis: Axis) {
 
 enum Removal {
     NotFound(Node),
-    /// The target is gone; `None` when the target was the whole subtree.
+    /// `None` means the removed leaf was the whole subtree.
     Removed(Option<Node>),
 }
 
@@ -576,7 +557,7 @@ fn equalize_node(node: Node) -> Node {
         Node::Split(split) => split.axis,
     };
     if chain_is_manual(&node, axis) {
-        // Keep the user's proportions; still normalize nested chains of the other axis.
+        // Preserve manual proportions while still normalizing nested chains of the other axis.
         let Node::Split(split) = node else {
             unreachable!("checked above")
         };
@@ -777,23 +758,19 @@ mod tests {
         let geometry = layout.geometry(rect, &min);
         let divider = *geometry.divider(SplitId(1)).unwrap();
         assert_eq!(divider.legal, Some((130.0, 190.0)));
-        // Far left: clamped to the first child's minimum; the interval's end is a snap
-        // point, nearer than the first grid point inside (anchored at x=10: 138).
+        // At x=10, the first and last legal grid points are 138 and 186, not 130 and 190.
         let ratio = divider.ratio_for_pointer(-500.0, true);
         assert!((ratio * 300.0 + 10.0 - 130.0).abs() < 0.01, "{ratio}");
-        // Far right: the end 190 lies off the grid (last grid point 186) and still wins.
         let ratio = divider.ratio_for_pointer(1000.0, true);
         assert!((ratio * 300.0 + 10.0 - 190.0).abs() < 0.01, "{ratio}");
-        // Near an end but nearer a grid point: the grid point.
         let ratio = divider.ratio_for_pointer(135.0, true);
         assert!((ratio * 300.0 + 10.0 - 138.0).abs() < 0.01, "{ratio}");
-        // Alt: free but still legal.
         let ratio = divider.ratio_for_pointer(-500.0, false);
         assert!((ratio * 300.0 + 10.0 - 130.0).abs() < 0.01);
         let ratio = divider.ratio_for_pointer(150.0, true);
         assert!((ratio * 300.0 + 10.0 - 154.0).abs() < 0.01);
 
-        // Too small for both minimums: proportional squeeze, no legal interval.
+        // Too small for both minima: squeeze proportionally instead of offering a legal interval.
         let tiny = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 50.0));
         let geometry = layout.geometry(tiny, &min);
         assert_eq!(geometry.dividers[0].legal, None);

@@ -1,6 +1,3 @@
-//! The Workspace tab: loading, saving and deleting presets, the source status,
-//! notices and quitting. The session itself saves on exit.
-
 use eframe::egui::{self, Align, Layout, RichText};
 
 use super::{
@@ -72,7 +69,6 @@ impl Workspace {
                     continue;
                 }
                 ui.horizontal(|ui| {
-                    // The name fills the row like the built-in ones; Delete on the right.
                     const DELETE_WIDTH: f32 = 74.0;
                     let size = egui::vec2(
                         (ui.available_width() - DELETE_WIDTH).max(40.0),
@@ -114,7 +110,7 @@ impl Workspace {
             record(controls, SettingsItem::PresetName, &response);
             let name = settings.name.trim().to_owned();
             let valid = valid_name(&name);
-            // Windows names files case-insensitively.
+            // Preset names must not collide on Windows' case-insensitive filesystem.
             let exists = saved.iter().any(|saved| same_name(saved, &name));
             let builtin = builtin_presets().any(|builtin| same_name(builtin, &name));
             if !name.is_empty() && !valid {
@@ -152,8 +148,6 @@ impl Workspace {
             ) {
                 actions.push(WorkspaceAction::TogglePause);
             }
-            // Where the input usually peaks: every Module draws it at the same
-            // height, so one setting adapts all views to the input's loudness.
             let default = crate::module::DEFAULT_REFERENCE_DBFS;
             if let Some(dbfs) = number_row(
                 ui,
@@ -190,7 +184,7 @@ impl Workspace {
                     ) {
                         actions.push(WorkspaceAction::ClearNotices);
                     }
-                    // Last in the row: "Copied" is wider and moves nothing.
+                    // Keep this last: the wider "Copied" label must not move other controls.
                     let label = if settings.notices_copied {
                         "Copied"
                     } else {

@@ -1,5 +1,3 @@
-//! The Theme tab: preset, text size, global colors and Module type styles.
-
 use eframe::egui;
 
 use super::{
@@ -48,7 +46,6 @@ impl Workspace {
                 },
                 controls,
             ) {
-                // The preset's own size follows the preset again.
                 let size = differs(size, preset_size).then_some(size);
                 actions.push(WorkspaceAction::SetTextSize { size });
             }
@@ -86,7 +83,6 @@ impl Workspace {
             style.is_some_and(|style| !style.is_empty()),
             controls,
             |ui, controls| {
-                // Types that draw with no theme color (Empty) have nothing to style.
                 row(ui, "Type", |ui| {
                     for (type_id, label) in self.registry.module_types() {
                         if self.registry.color_roles(type_id).is_empty() {
@@ -126,7 +122,6 @@ impl Workspace {
     }
 }
 
-/// Return every role of `roles` in `scope` to its inherited color.
 pub(super) fn clear_colors(
     scope: ColorScope,
     roles: impl Iterator<Item = ColorRole>,

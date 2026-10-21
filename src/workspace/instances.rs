@@ -1,5 +1,3 @@
-//! Module instance lifecycle and per-instance analysis and view parameters.
-
 use super::{
     ActionOutcome, ModuleEntry, ModuleInstanceId, Preserved, WindowId, Workspace, WorkspaceError,
     layout::LayoutError,
@@ -13,7 +11,6 @@ use crate::{
 };
 
 impl Workspace {
-    /// Create a default instance through the factory.
     pub(super) fn create_module(
         &mut self,
         type_id: &str,
@@ -21,8 +18,6 @@ impl Workspace {
         self.create_instance(type_id, None)
     }
 
-    /// Create through the factory, with the saved analysis `data` when given; the
-    /// ID is consumed only on success.
     pub(super) fn create_instance(
         &mut self,
         type_id: &str,
@@ -165,8 +160,6 @@ impl Workspace {
         node: NodeRef,
         spec: NodeSpec,
     ) -> Result<ActionOutcome, WorkspaceError> {
-        // Each instance owns its analysis: an edit changes only this instance.
-        // The dataflow keeps sharing whatever stays identical.
         let controller = self.controller(instance_id)?;
         let same_kind = controller.with_spec(|applied| {
             applied.node(node).is_some_and(|current| {
@@ -222,7 +215,6 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// The analysis controller of a placed instance.
     fn controller(
         &self,
         instance_id: ModuleInstanceId,
@@ -235,9 +227,7 @@ impl Workspace {
             .ok_or(WorkspaceError::Unsupported("analysis settings"))
     }
 
-    /// View settings whose range follows the analysis (a visible span bounded by
-    /// the History length) are brought back into range after an analysis edit, so
-    /// the instance, its saved form and its copies agree.
+    /// Clamp analysis-dependent ranges after edits so live, saved and copied views agree.
     fn reconcile_views(&mut self) {
         for entry in self.modules.values_mut() {
             for setting in entry.module.view_settings() {

@@ -1,19 +1,6 @@
-//! Win32 side of window moves. Each Workspace window's native window is found by
-//! its unique title and subclassed; the subclass procedure runs the
-//! [`WindowTracker`] on the UI thread, inside the messages that move windows:
-//!
-//! - a body drag (`begin_move`) moves the dragged window and its group with
-//!   every `WM_MOUSEMOVE`, all in one `DeferWindowPos` batch, snapped unless Alt
-//!   is held; the button's release ends it and Escape puts them back;
-//! - any other pure move of a grouped window (another program, the OS) moves the
-//!   rest of its group in the same message;
-//! - `place` moves windows for the Workspace (restore, rescue) without the group
-//!   following;
-//! - an edge resize (the OS sizing loop that `BeginResize` starts) snaps the edges
-//!   it moves in `WM_SIZING`, unless Alt is held.
-//!
-//! The tracker lock is never held while windows move: moving one sends its
-//! `WM_WINDOWPOSCHANGED` (and the followers') into this procedure again.
+//! UI-thread subclass sharing `WindowTracker` with simulated desktops; geometry is physical pixels.
+//! Never hold the tracker lock while moving windows: synchronous
+//! `WM_WINDOWPOSCHANGED` messages re-enter the subclass for every moved window.
 
 use std::sync::{
     LazyLock, Mutex, MutexGuard, PoisonError,
@@ -53,9 +40,7 @@ use super::{
     moving::{MoveRequest, WindowTracker},
 };
 
-/// Identifies this module's subclass on a window.
 const SUBCLASS_ID: usize = 0x7461_6666;
-/// Button flags in a mouse message's `wParam`.
 const MK_LBUTTON: WPARAM = 0x0001;
 const MK_RBUTTON: WPARAM = 0x0002;
 const MK_MBUTTON: WPARAM = 0x0010;
@@ -63,31 +48,26 @@ const MK_MBUTTON: WPARAM = 0x0010;
 #[derive(Default)]
 struct Native {
     tracker: WindowTracker,
-    /// Native window of each tracked Workspace window (`HWND` as an address).
+    /// HWND addresses; only the UI thread may use them as handles.
     handles: Vec<(WindowId, isize)>,
-    /// This module is moving windows: their changes are its own.
+    /// Marks synchronous placement feedback so it cannot trigger group following again.
     applying: bool,
     /// Alt was pressed during a move: its release must not open the window menu.
     swallow_keymenu: bool,
     /// Escape canceled a move: its release belongs to that too.
     swallow_escape_up: bool,
-    /// What an edge resize in progress snaps to.
     sizing: Option<Sizing>,
-    /// Reused for every batch of moves.
     moves: Vec<(WindowId, Pos2)>,
     batch: Vec<(isize, i32, i32)>,
 }
 
-/// An edge resize in progress (the OS sizing loop), from its start.
 struct Sizing {
-    /// Frame and pointer when the loop started.
+    /// Frame and pointer captured together at the start of the OS sizing loop.
     start: Rect,
     cursor: Pos2,
     others: Vec<Rect>,
     displays: Vec<Display>,
-    /// Physical pixels at the window's scale.
     threshold: f32,
-    /// The smallest frame the window may have (its layout's).
     min: Vec2,
 }
 
@@ -106,7 +86,6 @@ fn native() -> MutexGuard<'static, Native> {
     NATIVE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Find and subclass the native window of `window` (titled `Taffymeters #N`).
 pub(super) fn attach(window: WindowId) -> bool {
     if native().handle(window).is_some() {
         return true;
@@ -182,7 +161,6 @@ pub(super) fn monitor_info(monitor: HMONITOR) -> Option<MONITORINFO> {
     (unsafe { GetMonitorInfoW(monitor, &mut info) } != 0).then_some(info)
 }
 
-/// Scale of a Win32 DPI value relative to 100%.
 pub(super) fn dpi_scale(dpi: u32) -> f32 {
     dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32
 }
@@ -200,7 +178,7 @@ fn cursor() -> Pos2 {
     pos2(point.x as f32, point.y as f32)
 }
 
-/// The pointer (screen, physical) when the message being handled was sent.
+/// Physical desktop position at message time, not the pointer's current position.
 fn message_cursor() -> Pos2 {
     // SAFETY: no preconditions.
     let position = unsafe { GetMessagePos() };
@@ -274,14 +252,11 @@ pub(super) fn begin_move(request: &MoveRequest, displays: Vec<Display>) -> bool 
     true
 }
 
-/// Identifies the Alt+Esc hotkey registered while a body drag is in progress.
 const ALT_ESCAPE_HOTKEY: i32 = 0x7466;
-/// The window the Alt+Esc hotkey is registered for (`HWND` as an address).
 static ALT_ESCAPE_TARGET: AtomicIsize = AtomicIsize::new(0);
 
-/// With Alt held (snapping off), Escape never reaches the window: Alt+Esc is a
-/// system shortcut (send the window to the back). While a drag is in progress the
-/// dragged window registers it as its own hotkey, so Escape still cancels.
+/// Intercept Alt+Esc during drags: otherwise Windows sends the window to the back
+/// instead of delivering Escape to cancel the move.
 fn grab_alt_escape(leader: isize) {
     release_alt_escape();
     // SAFETY: a window of this thread; WM_HOTKEY is posted to it.
@@ -306,13 +281,11 @@ fn release_alt_escape() {
     }
 }
 
-/// The button was released (or the pointer captured elsewhere): the members stay.
 fn end_move() {
     native().tracker.end();
     release_alt_escape();
 }
 
-/// Escape: the members go back to where the drag started.
 fn cancel_move() {
     {
         let mut native = native();
@@ -339,7 +312,6 @@ pub(super) fn place(moves: &[(WindowId, Pos2)]) -> bool {
     true
 }
 
-/// Move the session's members to where the pointer at `cursor` puts them.
 fn drive(cursor: Pos2) {
     let free = alt_down();
     {
@@ -349,11 +321,9 @@ fn drive(cursor: Pos2) {
         tracker.motion(cursor, free, moves);
     }
     apply();
-    // Every member has landed (and changed scale, if it did): re-anchor now.
     native().tracker.settle(cursor);
 }
 
-/// Move the windows in `Native::moves` in one batch, without holding the lock.
 fn apply() {
     let mut batch = {
         let mut native = native();
@@ -391,8 +361,6 @@ fn apply() {
     native.batch = std::mem::take(&mut batch);
 }
 
-/// Snap targets for an edge resize of `window`: the other Workspace windows that
-/// are neither minimized nor maximized, the work areas, and the window's minimum.
 fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
     let handles: Vec<isize> = native()
         .handles
@@ -421,9 +389,8 @@ fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
     }
 }
 
-/// The window's minimum frame as winit reports it (`ptMinTrackSize`: the layout's
-/// minimum); `WM_GETMINMAXINFO` with a zeroed MINMAXINFO leaves out the system's
-/// own default.
+/// A zeroed `WM_GETMINMAXINFO` query obtains winit's layout minimum without
+/// inheriting the system's captioned-window minimum.
 fn min_track_size(hwnd: HWND) -> (i32, i32) {
     let mut info = MINMAXINFO::default();
     // SAFETY: WM_GETMINMAXINFO fills the MINMAXINFO it points to.
@@ -438,7 +405,6 @@ fn min_track_size(hwnd: HWND) -> (i32, i32) {
     (info.ptMinTrackSize.x.max(0), info.ptMinTrackSize.y.max(0))
 }
 
-/// The edges a `WM_SIZING` side moves.
 fn sizing_sides(side: u32) -> ResizeSides {
     ResizeSides {
         left: matches!(side, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT),
@@ -460,13 +426,9 @@ unsafe extern "system" fn subclass(
     let leading = || native().tracker.leader() == Some(window);
     match message {
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
-            // egui ignores a press until it knows where the pointer is, which it
-            // learns from winit's moves; after the pointer left the window, winit
-            // reports a move again only to a position other than the last one it
-            // saw there. After a body drag the window moved with the pointer, so a
-            // later press (a left drag or a right click for the settings) can land
-            // exactly where the last release was and be lost. Report the pointer
-            // one pixel off and then where it is.
+            // After a body drag, a press can reuse the last client position. winit
+            // suppresses that move, leaving egui without a pointer position after
+            // PointerGone; send a one-pixel detour before forwarding the press.
             let x = (lparam & 0xFFFF) as u16;
             let off = (lparam & !0xFFFF) | x.wrapping_add(1) as isize;
             let pressed = match message {
@@ -500,12 +462,10 @@ unsafe extern "system" fn subclass(
             }
             return 0;
         }
-        // Escape without Alt (with Alt it is the hotkey above).
         WM_KEYDOWN | WM_SYSKEYDOWN if wparam == usize::from(VK_ESCAPE) && leading() => {
             cancel_move();
             return 0;
         }
-        // The character and the release of the Escape that canceled a move.
         WM_CHAR | WM_SYSCHAR if wparam == 0x1B && native().swallow_escape_up => return 0,
         WM_KEYUP | WM_SYSKEYUP if wparam == usize::from(VK_ESCAPE) => {
             let mut native = native();
@@ -558,12 +518,9 @@ unsafe extern "system" fn subclass(
         }
         WM_EXITSIZEMOVE => native().sizing = None,
         WM_SIZING => {
-            // The OS proposes the frame for the pointer, but never smaller than its
-            // minimum for captioned windows (winit's windows have a caption style,
-            // only not drawn: 262×71 px at 200%), whatever the window's own minimum.
-            // The frame is computed from the pointer instead, kept at least the
-            // window's own minimum, and snapped unless Alt is held; an edge stays on
-            // a target until the pointer is past it.
+            // Windows clamps its proposal to the captioned-window floor (262×71 px
+            // at 200%), even though winit hides the caption. Recompute from the
+            // pointer to honor the layout's smaller minimum.
             let free = alt_down();
             let mut native = native();
             if free {
@@ -603,7 +560,6 @@ unsafe extern "system" fn subclass(
                 native.tracker.forget(window);
                 native.handles.retain(|(id, _)| *id != window);
             }
-            // Forgetting a member ends the move.
             if !native().tracker.moving() {
                 release_alt_escape();
             }

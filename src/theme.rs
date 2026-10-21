@@ -1,7 +1,5 @@
-//! Theme: named color roles, a base text size and the UI tone. Colors resolve as
-//! global preset → workspace edits of the global roles → Module type style →
-//! instance overrides. Instances never copy the whole theme; they keep only their
-//! explicit overrides, and the Workspace hands each one its resolved [`Palette`].
+//! Colors resolve as global preset → workspace edits → Module type style → instance
+//! overrides. Instances keep only explicit overrides; the Workspace supplies resolved palettes.
 
 use std::collections::BTreeMap;
 
@@ -11,27 +9,17 @@ use crate::render::Color;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ColorRole {
-    /// Window and plot background.
     Background,
-    /// Panels drawn on the background (meter troughs).
     Surface,
-    /// Layout dividers.
     Divider,
-    /// Selection, hover and group highlights.
     Accent,
-    /// Readouts.
     Text,
-    /// Secondary text, including a Module's notice that it cannot show its
-    /// content; no Module type declares it, so it is set globally only.
+    /// Also used for unavailable content; set globally, never declared by a Module type.
     Muted,
-    /// Reference lines (zero line, axes).
     Guide,
-    /// Main data trace.
     Primary,
-    /// Secondary trace: the peak (Spectrum's peak curve or marks, Level Meter's
-    /// peak hold).
+    /// Peak trace or marker (Spectrum curves or marks, Level Meter hold).
     Secondary,
-    /// Intensity ramp: low, middle and high levels (bars, heat map, meters).
     Low,
     Mid,
     High,
@@ -70,7 +58,6 @@ impl ColorRole {
         }
     }
 
-    /// Saved form of the role.
     pub fn id(self) -> &'static str {
         match self {
             Self::Background => "background",
@@ -110,13 +97,12 @@ impl<'de> Deserialize<'de> for ColorRole {
     }
 }
 
-/// Explicit color choices of one scope (global edits, a type style or an instance).
 pub type RoleOverrides = BTreeMap<ColorRole, Color>;
 
-/// A fully resolved set of colors; copied into each Module instance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     colors: [Color; ColorRole::ALL.len()],
+    /// Logical points.
     pub text_size: f32,
     pub dark: bool,
 }
@@ -132,7 +118,7 @@ impl Palette {
         }
     }
 
-    /// Intensity ramp for `value` in [0, 1]: Low below 0.45, Mid below 0.8, High.
+    /// Expects an intensity in [0, 1].
     pub fn level(&self, value: f32) -> Color {
         if value < 0.45 {
             self.color(ColorRole::Low)
@@ -143,8 +129,7 @@ impl Palette {
         }
     }
 
-    /// Continuous heat map: transparent → Low → Mid → High, opacity rising with
-    /// `value` in [0, 1].
+    /// Input intensity in [0, 1]; values outside that range are clamped.
     pub fn heat(&self, value: f32) -> Color {
         let value = value.clamp(0.0, 1.0);
         let scaled = value * 3.0;
@@ -253,8 +238,6 @@ impl ThemePreset {
     }
 }
 
-/// The theme part of a workspace: which preset, the workspace's edits of the
-/// global roles, the base text size and the per-Module-type styles.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThemeSettings {
     #[serde(default = "default_theme_preset")]
@@ -271,7 +254,6 @@ fn default_theme_preset() -> String {
     ThemePreset::Dark.id().to_owned()
 }
 
-/// Smallest and largest base text size the theme accepts.
 pub const TEXT_SIZE_RANGE: (f32, f32) = (8.0, 24.0);
 
 impl ThemeSettings {
@@ -282,12 +264,10 @@ impl ThemeSettings {
         }
     }
 
-    /// The preset in use; unknown presets (a newer build's) fall back to Dark.
     pub fn preset(&self) -> ThemePreset {
         ThemePreset::from_id(&self.preset).unwrap_or(ThemePreset::Dark)
     }
 
-    /// Global roles: preset plus the workspace's edits.
     pub fn global_palette(&self) -> Palette {
         let mut palette = self.preset().palette();
         palette.apply(&self.colors);
@@ -297,7 +277,6 @@ impl ThemeSettings {
         palette
     }
 
-    /// Colors of one instance of `type_id` with its explicit `overrides`.
     pub fn resolve(&self, type_id: &str, overrides: &RoleOverrides) -> Palette {
         let mut palette = self.global_palette();
         if let Some(style) = self.type_styles.get(type_id) {
@@ -379,7 +358,6 @@ mod tests {
                     .sum()
             };
 
-            // The halfway value lands halfway between the two ramp colors.
             let halfway = palette.heat(0.5);
             for ((got, from), to) in channels(halfway).into_iter().zip(low_rgb).zip(mid_rgb) {
                 let middle = (i32::from(from) + i32::from(to)) / 2;
@@ -397,7 +375,6 @@ mod tests {
                 "opacity must rise with the value: {alphas:?}"
             );
 
-            // Moving up the segment moves monotonically from Low toward Mid.
             let steps = [0.36, 0.42, 0.5, 0.58, 0.64];
             let from_low: Vec<u32> = steps
                 .iter()
@@ -417,7 +394,7 @@ mod tests {
             );
             assert!(from_low[0] < from_low[4] && to_mid[0] > to_mid[4]);
 
-            // The end of the segment is Mid itself (rounding tolerance of one step).
+            // Allow one rounding step per RGB channel.
             let end = palette.heat(2.0 / 3.0);
             assert!(
                 distance(end, mid_rgb) <= 3,

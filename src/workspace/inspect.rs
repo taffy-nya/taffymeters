@@ -1,5 +1,3 @@
-//! Read-only observation of the workspace for automation and tests.
-
 use std::collections::HashMap;
 
 use eframe::egui::{Pos2, Rect, Vec2};
@@ -20,14 +18,13 @@ pub(crate) struct ObservedModule {
     pub(crate) window_id: Option<WindowId>,
     pub(crate) channel: Option<ChannelSelection>,
     pub(crate) active_style: Option<&'static str>,
-    /// The applied analysis spec.
     pub(crate) data: Option<crate::dataflow::DataSpec>,
     pub(crate) view: Vec<(&'static str, SettingValue)>,
     pub(crate) colors: RoleOverrides,
     pub(crate) palette: Palette,
     /// Saved type of an instance that could not be restored.
     pub(crate) missing: Option<String>,
-    /// Address of the Module object; unchanged while the same object is kept.
+    /// Module object address, used to detect replacement rather than reconfiguration.
     pub(crate) object: usize,
 }
 
@@ -43,6 +40,7 @@ pub(crate) struct ObservedSplit {
 pub(crate) struct ObservedWindow {
     pub(crate) id: WindowId,
     pub(crate) leaves: Vec<ModuleInstanceId>,
+    /// Window-local logical points.
     pub(crate) leaf_rects: Vec<(ModuleInstanceId, Rect)>,
     pub(crate) splits: Vec<ObservedSplit>,
     pub(crate) always_on_top: bool,
@@ -50,14 +48,14 @@ pub(crate) struct ObservedWindow {
     pub(crate) group: Option<u64>,
     pub(crate) opened: bool,
     pub(crate) pending_detach: Option<ModuleInstanceId>,
+    /// Logical points.
     pub(crate) min_size: Vec2,
     pub(crate) divider_drag: Option<SplitId>,
     /// Outer frame, physical pixels.
     pub(crate) outer: Option<Rect>,
     /// Lines the last pass drew along the frame.
     pub(crate) edges: Vec<super::window::DrawnEdge>,
-    /// The module the last pass outlined (settings target or the module being
-    /// moved) and the logical rect of the outline.
+    /// Last pass's outlined module and window-local logical rect.
     pub(crate) module_outline: Option<(ModuleInstanceId, Rect)>,
 }
 
@@ -66,12 +64,10 @@ pub(crate) struct WorkspaceObservation {
     pub(crate) windows: Vec<ObservedWindow>,
     pub(crate) modules: Vec<ObservedModule>,
     pub(crate) move_source: Option<ModuleInstanceId>,
-    /// What the open settings window edits: the instance and the window.
     pub(crate) settings_target: Option<(Option<ModuleInstanceId>, Option<WindowId>)>,
     pub(crate) source_status: SourceStatus,
     pub(crate) control_error: Option<String>,
     pub(crate) modules_created: u64,
-    /// The preset the session comes from.
     pub(crate) preset: Option<crate::persistence::PresetRef>,
     pub(crate) notices: Vec<String>,
     pub(crate) theme: ThemeSettings,

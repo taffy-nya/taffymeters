@@ -1,7 +1,5 @@
-//! Workspace: owns the application's Module instances, the windows and each
-//! window's BSP layout. Layout trees only reference instances by ID, so every
-//! layout operation (split, move, detach, merge) leaves the Module objects and
-//! their analysis subscriptions untouched; only closing an instance drops it.
+//! Layouts reference instances by ID; rearranging leaves preserves Module objects
+//! and their analysis subscriptions.
 
 mod arrange;
 mod desktop;
@@ -57,15 +55,12 @@ use window::WindowUiState;
 #[cfg(feature = "automation")]
 pub(crate) use window::{ControlKey, ControlTarget, EdgeLine, ResizeEdge};
 
-/// Initial logical size of the first window.
+/// Logical points.
 pub(crate) const INITIAL_WINDOW_SIZE: Vec2 = vec2(900.0, 420.0);
-/// Minimum logical size of a window without any Module.
+/// Logical points.
 pub(crate) const EMPTY_WINDOW_MIN_SIZE: Vec2 = vec2(140.0, 48.0);
-/// Logical offset of a detached window from its source window.
 const DETACH_OFFSET_POINTS: f32 = 32.0;
-/// Display time a detached window may take to show its first frame.
 pub(crate) const DETACH_TIMEOUT: Duration = Duration::from_secs(5);
-/// Display time the status badge shows an operation error or a new notice.
 pub(crate) const MESSAGE_LIFETIME: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -74,7 +69,6 @@ pub(crate) struct ModuleInstanceId(pub(crate) u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct WindowId(pub(crate) u64);
 
-/// The window created with the process.
 pub(crate) const FIRST_WINDOW: WindowId = WindowId(1);
 
 impl WindowId {
@@ -93,31 +87,23 @@ pub(crate) enum MoveTarget {
     EmptyWindow(WindowId),
 }
 
-/// Whose colors a theme edit changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ColorScope {
-    /// The workspace's global roles.
     Global,
-    /// The style of every instance of a Module type.
     Type(&'static str),
-    /// One instance's explicit overrides.
     Instance(ModuleInstanceId),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum WorkspaceAction {
-    /// Create a default instance as the only leaf of an empty window.
     AddModule {
         window_id: WindowId,
         type_id: &'static str,
     },
-    /// Copy the instance next to `instance_id`: same type, configuration, analysis
-    /// spec and bindings, with a new subscription and fresh private state.
     SplitModule {
         instance_id: ModuleInstanceId,
         side: Side,
     },
-    /// Create a default instance of `type_id` in the leaf and close the old one.
     ReplaceModule {
         instance_id: ModuleInstanceId,
         type_id: &'static str,
@@ -125,13 +111,9 @@ pub(crate) enum WorkspaceAction {
     CloseModule {
         instance_id: ModuleInstanceId,
     },
-    /// Point the open settings window at the instance (a left click on it). See
-    /// `Workspace::select_in_settings`.
     SelectModule {
         instance_id: ModuleInstanceId,
     },
-    /// Point the open settings window's Window tab at an empty window (a left
-    /// click on it).
     SelectWindow {
         window_id: WindowId,
     },
@@ -169,8 +151,6 @@ pub(crate) enum WorkspaceAction {
         instance_id: ModuleInstanceId,
         target: MoveTarget,
     },
-    /// Open an empty window the size of `window_id`, offset like a detached one,
-    /// and point the open settings window at it.
     NewWindow {
         window_id: WindowId,
     },
@@ -181,8 +161,6 @@ pub(crate) enum WorkspaceAction {
         window_id: WindowId,
         enabled: bool,
     },
-    /// Lock a window (settings "Lock"): it takes right clicks only, cannot be
-    /// resized or maximized, and body drags move neither it nor its group.
     SetLocked {
         window_id: WindowId,
         enabled: bool,
@@ -196,20 +174,17 @@ pub(crate) enum WorkspaceAction {
     LeaveGroup {
         window_id: WindowId,
     },
-    /// Set the parameters of one node of the instance's analysis. Nodes in the
-    /// shared group of an explicit binding change for every member.
+    /// Explicitly bound nodes change for every member of the binding.
     EditNode {
         instance_id: ModuleInstanceId,
         node: NodeRef,
         spec: NodeSpec,
     },
-    /// History length of one output.
     SetKeep {
         instance_id: ModuleInstanceId,
         output: OutputId,
         seconds: f32,
     },
-    /// Show the settings window on an instance, or on a window without one.
     OpenSettings {
         window_id: WindowId,
         instance_id: Option<ModuleInstanceId>,
@@ -220,7 +195,6 @@ pub(crate) enum WorkspaceAction {
         key: &'static str,
         value: SettingValue,
     },
-    /// Set (`Some`) or remove (`None`) an explicit color.
     SetColor {
         scope: ColorScope,
         role: ColorRole,
@@ -233,25 +207,21 @@ pub(crate) enum WorkspaceAction {
     SetTextSize {
         size: Option<f32>,
     },
-    /// Display reference level in dBFS; `None` follows the default.
+    /// `None` follows the default.
     SetReferenceLevel {
         dbfs: Option<f32>,
     },
-    /// Replace the whole workspace with a preset.
     LoadPreset {
         preset: PresetRef,
     },
-    /// Save the workspace as a new user preset; the session then comes from it.
     SavePresetAs {
         name: String,
     },
-    /// Save the workspace over the user preset the session comes from.
     SavePreset,
     DeletePreset {
         name: String,
     },
     ClearNotices,
-    /// Save the session and close every window (the application exits).
     Quit,
 }
 
@@ -275,13 +245,10 @@ pub(crate) enum WorkspaceError {
     Control(ControlError),
     LiveAudio(LiveAudioError),
     Persist(PersistError),
-    /// The workspace has no directory to save to.
     NoStore,
     PresetExists(String),
     NoSuchPreset(String),
-    /// The session does not come from a user preset to save over.
     NoSavedPreset,
-    /// A copy could not take over every setting of the original.
     CopyIncomplete(String),
 }
 
@@ -352,11 +319,9 @@ struct ModuleEntry {
     type_id: &'static str,
     label: &'static str,
     module: Box<dyn Module>,
-    /// Visibility last reported to the instance (new instances start visible).
+    /// Last reported visibility, not visibility of the current pass.
     visible: bool,
-    /// The instance's explicit colors; everything else follows the theme.
     colors: RoleOverrides,
-    /// Resolved colors handed to the Module when it draws.
     palette: Palette,
     /// Saved configuration of an instance this build could not restore; written
     /// back unchanged.
@@ -365,7 +330,6 @@ struct ModuleEntry {
     preserved_style: Option<String>,
 }
 
-/// A saved instance this build could not restore and why.
 struct Preserved {
     file: ModuleFile,
     reason: String,
@@ -381,32 +345,29 @@ struct PendingDetach {
 pub(crate) struct WindowState {
     layout: Layout,
     always_on_top: bool,
-    /// Locked ("Lock" in the settings): the window takes right clicks only, cannot
-    /// be resized natively, and body drags move neither it nor its group.
     locked: bool,
     maximized: bool,
-    /// Logical content size from the last UI pass (initially the requested size).
+    /// Content size from the last UI pass, in logical points.
     content_size: Vec2,
     pixels_per_point: f32,
+    /// Desktop logical points, converted from pixels with the creation-time scale.
     initial_position: Option<Pos2>,
+    /// Logical points.
     initial_size: Vec2,
-    /// Minimum inner size at creation (the layout's, later kept by `MinInnerSize`).
+    /// Logical points; a populated layout can have a smaller minimum than an empty window.
     initial_min_size: Vec2,
     /// Builder inputs stay fixed after creation; later changes are commands, so egui
     /// never sees a changed builder and recreates the native window.
     initial_always_on_top: bool,
-    /// Native resizability at creation: off for a restored locked window.
     initial_resizable: bool,
     pending_detach: Option<PendingDetach>,
     opened: bool,
     /// Outer frame observed from the native window, physical pixels.
     outer: Option<Rect>,
-    /// The desktop tracks the native window: moves go through it (`DesktopProbe`).
     tracked: bool,
     group: Option<u64>,
     commands: Vec<ViewportCommand>,
     ui: WindowUiState,
-    /// The native window is minimized: its instances are not drawn.
     minimized: bool,
     /// Saved desktop position (physical pixels) to verify once the window shows:
     /// the builder converts logical points with a scale that may differ.
@@ -441,8 +402,7 @@ impl WindowState {
         }
     }
 
-    /// Where a window opened from this one goes: down-right of its outer frame by
-    /// the detach offset, in logical points.
+    /// Returns desktop logical points at this window's scale.
     fn offset_position(&self) -> Option<Pos2> {
         let ppp = self.pixels_per_point;
         self.outer.map(|outer| {
@@ -472,7 +432,6 @@ impl WindowState {
     }
 }
 
-/// Window list entry for the native adapter.
 #[derive(Clone, Debug)]
 pub(crate) struct WindowSummary {
     pub(crate) id: WindowId,
@@ -490,37 +449,24 @@ pub(crate) struct Workspace {
     next_split_id: u64,
     next_group_id: u64,
     modules_created: u64,
-    /// The last operation's error and when it occurred; the badge drops it after
-    /// `MESSAGE_LIFETIME`.
     control_error: Option<(String, Duration)>,
     /// Shared repaint clock of animating windows (real time).
     frame_clock: Option<std::time::Instant>,
-    /// The preset the session was loaded from, if it still has one.
     preset: Option<PresetRef>,
     store: Option<WorkspaceStore>,
     /// The session file could not be read; saving must not replace it.
     protected: bool,
-    /// Monitors, pointer state and native window moves; owned so restoring and
-    /// saving can place windows.
     desktop: Arc<dyn DesktopProbe + Send + Sync>,
-    /// Groups last told to the desktop (`DesktopProbe::set_groups`).
     published_groups: Vec<(WindowId, u64)>,
     theme: ThemeSettings,
-    /// Colors of the window chrome (global roles).
     chrome: Palette,
     input: InputConfig,
-    /// Display reference level this workspace sets (`None`: the default).
     reference_dbfs: Option<f32>,
-    /// Restore and save problems, listed in the settings until cleared.
     notices: Vec<String>,
-    /// The status badge shows the notices until this display time (a new notice
-    /// extends it by `MESSAGE_LIFETIME`).
     notices_shown_until: Duration,
     /// File number of each binding of this workspace (restored or saved).
     binding_numbers: HashMap<SharedAnalysisId, u64>,
-    /// The settings window, while open.
     settings: Option<SettingsWindow>,
-    /// Openings of the settings window so far.
     settings_openings: u64,
     /// Latest display time of any pass (see `tick`).
     display_time: Duration,
@@ -572,8 +518,6 @@ impl Workspace {
         })
     }
 
-    /// A workspace with one window holding one default Spectrum, not saved, on the
-    /// native desktop (automation only; the product opens its session).
     #[cfg(feature = "automation")]
     pub(crate) fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
         let mut workspace = Self::empty(live, Arc::new(NativeDesktop))?;
@@ -584,8 +528,6 @@ impl Workspace {
         Ok(workspace)
     }
 
-    /// Replace the desktop the workspace places its windows on (simulated
-    /// desktops of the automation harness).
     #[cfg(feature = "automation")]
     pub(crate) fn set_desktop(&mut self, desktop: Arc<dyn DesktopProbe + Send + Sync>) {
         self.desktop = desktop;
@@ -622,7 +564,6 @@ impl Workspace {
         self.windows.contains_key(&id)
     }
 
-    /// Tell each instance whether its window can be seen, when that changed.
     fn sync_visibility(&mut self) {
         for window in self.windows.values() {
             for leaf in window.layout.leaves() {
@@ -646,7 +587,6 @@ impl Workspace {
         Ok(id)
     }
 
-    /// Re-resolve every instance's colors after a theme or override change.
     fn refresh_palettes(&mut self) {
         self.chrome = self.theme.global_palette();
         for entry in self.modules.values_mut() {
@@ -662,8 +602,7 @@ impl Workspace {
     }
 
     fn set_control_error(&mut self, message: String) {
-        // Error texts follow Rust's lowercase convention; on screen they start a
-        // sentence.
+        // Error Display text is lowercase; the badge presents it as a sentence.
         let mut chars = message.chars();
         let message = chars.next().map_or_else(String::new, |first| {
             first.to_uppercase().chain(chars).collect()
@@ -671,7 +610,6 @@ impl Workspace {
         self.control_error = Some((message, self.display_time));
     }
 
-    /// The notices the status badge reports now.
     fn badge_notices(&self) -> &[String] {
         if self.display_time < self.notices_shown_until {
             &self.notices
@@ -680,7 +618,6 @@ impl Workspace {
         }
     }
 
-    /// Display time until the badge next drops a message, if it shows one.
     pub(crate) fn badge_change_in(&self) -> Option<Duration> {
         let error_until = self
             .control_error
@@ -951,7 +888,6 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// The reference level every Module draws against (see `ModuleFrame`).
     pub(crate) fn reference_dbfs(&self) -> f32 {
         let (min, max) = crate::module::REFERENCE_DBFS_RANGE;
         self.reference_dbfs

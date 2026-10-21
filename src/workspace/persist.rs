@@ -1,7 +1,5 @@
-//! The session, presets and how windows land on the desktop. Only logical
-//! configuration crosses the file boundary; restoring creates new instances
-//! through the factories, which build their subscriptions from the saved
-//! `DataSpec`.
+//! Only logical configuration crosses the file boundary; factories recreate instances
+//! and subscriptions from saved `DataSpec`s.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -33,11 +31,8 @@ use crate::{
     theme::{ColorRole, RoleOverrides},
 };
 
-/// Type of the stand-in for an instance this build cannot restore.
 pub(crate) const MISSING_MODULE_ID: &str = "taffymeters.missing";
 
-/// The configuration of one instance, typed: what a copy takes over and what a
-/// restore applies after the factory created the instance.
 pub(super) struct ModuleConfig {
     pub(super) type_id: &'static str,
     pub(super) data: Option<DataSpec>,
@@ -66,8 +61,6 @@ impl ModuleConfig {
     }
 }
 
-/// Stand-in leaf for a saved instance whose type is not installed or whose
-/// configuration this build cannot use. It shows why and saves the original.
 struct MissingModule {
     message: String,
 }
@@ -94,9 +87,7 @@ fn file_axis(axis: SplitAxis) -> Axis {
 }
 
 impl Workspace {
-    /// The last session in `store`, or the built-in Default preset when there is
-    /// none. An unreadable session file is reported and protected: the process runs
-    /// on the Default preset and never saves over it.
+    /// Unreadable sessions fall back to Default without allowing saves over the original.
     pub(crate) fn open(
         live: LiveAudio,
         store: WorkspaceStore,
@@ -133,7 +124,6 @@ impl Workspace {
         Ok(workspace)
     }
 
-    /// The built-in Default preset, recorded as the session's origin.
     fn default_preset(&self) -> Result<WorkspaceFile, WorkspaceError> {
         let preset = PresetRef::Builtin(DEFAULT_PRESET.to_owned());
         let mut file = self.preset_file(&preset)?;
@@ -141,7 +131,6 @@ impl Workspace {
         Ok(file)
     }
 
-    /// Give a store to a workspace built in memory (automation scenarios).
     #[cfg(feature = "automation")]
     pub(crate) fn with_store(mut self, store: WorkspaceStore) -> Self {
         self.store = Some(store);
@@ -152,7 +141,6 @@ impl Workspace {
         self.preset.as_ref()
     }
 
-    /// Saved preset names (empty without a store).
     pub(crate) fn saved_presets(&self) -> Vec<String> {
         self.store
             .as_ref()
@@ -164,7 +152,6 @@ impl Workspace {
         self.store.is_some() && !self.protected
     }
 
-    /// The monitors windows are placed on (a stand-in when none is reported).
     fn displays(&self) -> Vec<Display> {
         let displays = self.desktop.displays();
         if displays.is_empty() {
@@ -181,8 +168,7 @@ impl Workspace {
             .unwrap_or(0)
     }
 
-    /// Physical outer frame of a window: where it is, else where it will open,
-    /// else centered on `fallback`.
+    /// Physical desktop pixels.
     fn outer_frame(window: &WindowState, fallback: &Display) -> Rect {
         window.outer.unwrap_or_else(|| {
             let ppp = window.pixels_per_point;
@@ -196,10 +182,8 @@ impl Workspace {
         })
     }
 
-    /// Apply style, view settings and colors to a new instance. An unavailable
-    /// style is tolerated (default style, the saved ID is kept) and returned as a
-    /// warning; a view setting the instance cannot take makes the configuration
-    /// unusable (`Err`), so the caller keeps the original instead.
+    /// Unavailable styles retain their IDs and warn; unusable view settings fail so
+    /// callers can preserve the original configuration.
     pub(super) fn apply_config(
         &mut self,
         id: ModuleInstanceId,
@@ -244,8 +228,7 @@ impl Workspace {
         Ok(warnings)
     }
 
-    /// Save the session; problems become notices. Runs on exit, on Quit and before
-    /// the last window closes. Without windows there is nothing worth saving.
+    /// Called on exit, Quit and before the last window closes.
     pub(crate) fn autosave(&mut self) {
         if !self.can_save() || self.windows.is_empty() {
             return;
@@ -270,8 +253,6 @@ impl Workspace {
         }
     }
 
-    /// Replace everything with `preset`, placed on the display of the window the
-    /// settings were opened from (or of the first window).
     pub(super) fn load_preset(
         &mut self,
         preset: PresetRef,
@@ -299,7 +280,6 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// The workspace as a preset file (no session origin).
     fn preset_contents(&mut self) -> WorkspaceFile {
         let mut file = self.saved_file();
         file.preset = None;
@@ -311,7 +291,7 @@ impl Workspace {
         if !valid_name(&name) {
             return Err(PersistError::InvalidName(name).into());
         }
-        // Windows names files case-insensitively.
+        // Preset names must not collide on Windows' case-insensitive filesystem.
         if builtin_presets().any(|builtin| same_name(builtin, &name))
             || store
                 .list_presets()
@@ -346,7 +326,6 @@ impl Workspace {
         Ok(ActionOutcome::Applied)
     }
 
-    /// Drop every window and instance (and with them their subscriptions).
     fn clear(&mut self) {
         self.windows.clear();
         self.modules.clear();
@@ -358,8 +337,6 @@ impl Workspace {
         }
     }
 
-    /// Build windows and instances from a file, placing its displays on
-    /// `displays` (the first saved one on `current` unless it is recognized).
     fn restore(
         &mut self,
         file: WorkspaceFile,
@@ -406,8 +383,7 @@ impl Workspace {
                 None => None,
             };
             let layout = Layout::from_root(root);
-            // A populated window may be smaller than an empty one: its minimum is
-            // its layout's.
+            // A populated layout can be smaller than an empty window's minimum.
             let min_size = layout
                 .min_size(&|id| self.module_min_size(id))
                 .unwrap_or(EMPTY_WINDOW_MIN_SIZE);
@@ -435,7 +411,6 @@ impl Workspace {
             let scale = targets[window_file.display].scale;
             self.restore_window(window_file, layout, min_size, outer, scale, &mut groups)?;
         }
-        // A group needs two windows.
         let mut members: HashMap<u64, usize> = HashMap::new();
         for group in self.windows.values().filter_map(|window| window.group) {
             *members.entry(group).or_default() += 1;
@@ -453,8 +428,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// One window with its restored `layout` at `outer` (physical pixels) on a
-    /// display of `scale`.
+    /// `outer` is in physical desktop pixels; `scale` is pixels per logical point.
     fn restore_window(
         &mut self,
         file: &WindowFile,
@@ -525,8 +499,6 @@ impl Workspace {
         })
     }
 
-    /// One saved instance; a stand-in keeps the configuration when it cannot be
-    /// used. Only ID exhaustion fails the restore.
     fn restore_module(
         &mut self,
         file: &ModuleFile,
@@ -634,20 +606,14 @@ impl Workspace {
         Ok(id)
     }
 
-    /// How a saved instance's type is named to the user: its display name when
-    /// this build has the type (its saved configuration is what it cannot use),
-    /// else the saved type ID.
     pub(super) fn saved_type_name<'a>(&self, type_id: &'a str) -> &'a str {
         self.registry
             .module_type(type_id)
             .map_or(type_id, |(_, label)| label)
     }
 
-    /// The saved form of the whole workspace.
     pub(super) fn saved_file(&mut self) -> WorkspaceFile {
-        // Bindings keep the numbers they were restored with; new ones take numbers
-        // no live binding or preserved configuration uses. Numbers of bindings no
-        // instance uses any more are free again.
+        // Preserve restored binding numbers and avoid collisions with raw, unrestorable configs.
         let live: HashSet<SharedAnalysisId> = self
             .modules
             .values()
@@ -673,7 +639,6 @@ impl Workspace {
         let mut groups: BTreeMap<u64, u32> = BTreeMap::new();
         let displays = self.displays();
         let fallback = displays[Self::primary(&displays)];
-        // Displays in the order windows first use them.
         let mut on: Vec<usize> = Vec::new();
         let windows = self
             .windows
