@@ -53,8 +53,7 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(SpectrumModuleFactory)
 }
 
-/// The Spectrum's data: a shared raw FFT feeding the tilted, displayed curve, and
-/// the peak curve held from that displayed curve (so Tilt moves both alike).
+/// Hold peaks after Tilt so both curves respond to Tilt changes alike.
 struct SpectrumData {
     spec: DataSpec,
     channel: NodeRef,
@@ -89,9 +88,7 @@ fn spectrum_data() -> SpectrumData {
     }
 }
 
-/// The cursor readout; the curve, bars or cells are the style's.
 const OWN_COLOR_ROLES: &[ColorRole] = &[ColorRole::Text];
-/// Every role a Spectrum can draw with across its styles.
 const TYPE_COLOR_ROLES: &[ColorRole] = &[
     ColorRole::Primary,
     ColorRole::Secondary,
@@ -101,15 +98,12 @@ const TYPE_COLOR_ROLES: &[ColorRole] = &[
     ColorRole::Text,
 ];
 
-/// Highest frequency shown (the zoom gesture and the setting share these bounds;
-/// the source's Nyquist frequency caps it when drawing), the bottom edge relative
-/// to the workspace reference level, and the shown dB range above it.
+/// Upper frequency bounds in Hz; drawing also caps the range at the source's Nyquist frequency.
 const MAX_FREQUENCY_RANGE: (f32, f32) = (80.0, 96_000.0);
+/// Bottom edge in dB relative to the workspace reference level, not absolute dBFS.
 const BOTTOM_DB_RANGE: (f32, f32) = (-150.0, -30.0);
 const DB_RANGE: (f32, f32) = (30.0, 150.0);
-/// What a new Spectrum shows: up to 20 kHz, the 90 dB below the reference. A sine
-/// at the reference touches the top; tilted music, whose loudest bins sit about
-/// 20 dB below its sample peak, tops out near the height the linear views reach.
+/// Tilted music bins sit about 20 dB below the sample peak, keeping peaks near linear-view heights.
 const DEFAULT_MAX_FREQUENCY_HZ: f32 = 20_000.0;
 const DEFAULT_RANGE_DB: f32 = 90.0;
 const DEFAULT_BOTTOM_DB: f32 = -DEFAULT_RANGE_DB;
@@ -193,7 +187,6 @@ struct SpectrumModule {
     snapshot: Snapshot,
     style: Box<dyn SpectrumStyle>,
     style_id: &'static str,
-    /// The style's roles and the readout's.
     color_roles: Vec<ColorRole>,
     /// Shown frequencies, and levels relative to the workspace reference level.
     view: SpectrumCoordinates,
@@ -203,9 +196,6 @@ struct SpectrumModule {
 }
 
 impl SpectrumModule {
-    /// The wheel scales the shown dB range about the bottom edge: the curve grows
-    /// or shrinks upward from it, louder parts leaving through the top. Pinch or
-    /// Ctrl+wheel zooms the frequency axis.
     fn update_range(
         coordinates: &mut SpectrumCoordinates,
         frame: &ModuleFrame<'_>,
@@ -354,7 +344,6 @@ impl Module for SpectrumModule {
             MAX_FREQUENCY_KEY => {
                 self.view.max_frequency_hz = number_setting(key, value, MAX_FREQUENCY_RANGE)?;
             }
-            // Moving the bottom keeps the range: the whole view shifts.
             BOTTOM_DB_KEY => {
                 self.view.min_dbfs = number_setting(key, value, BOTTOM_DB_RANGE)?;
                 self.view.max_dbfs = self.view.min_dbfs + range;
@@ -372,15 +361,12 @@ impl Module for SpectrumModule {
     fn draw(&mut self, mut frame: ModuleFrame<'_>) -> ModuleResponse {
         self.reader.read(&mut self.snapshot);
         let Some(main) = self.snapshot.get(self.main) else {
-            // No audio yet.
             return ModuleResponse::default();
         };
         let Some(spectrum) = main.spectrum() else {
             return ModuleResponse::default();
         };
-        // One read sees the outputs of a block together, so main and peak share a
-        // hop except right after a change, when either may still be the previous one.
-        // A hidden peak curve keeps running so it is current when shown again.
+        // Outputs share a hop except just after an edit; hidden peaks keep running to stay current.
         let peak = self
             .snapshot
             .get(self.peak)
@@ -463,7 +449,6 @@ mod tests {
         }
     }
 
-    /// The module's main curve once it reached `frontier` under `revision`.
     fn main_at(module: &SpectrumModule, revision: u64, frontier: u64) -> Arc<Frame> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -489,7 +474,7 @@ mod tests {
 
     #[test]
     fn pixel_style_generates_cells_instead_of_recoloring_the_curve() {
-        // Quiet below bin 100 (2.34 kHz), a flat -50 dBFS from there up.
+        // Bin 100 is 2.34375 kHz; the step there makes the first lit band unambiguous.
         let bins: Vec<f32> = (0..=1024)
             .map(|index| if index < 100 { -100.0 } else { -50.0 })
             .collect();
@@ -556,8 +541,7 @@ mod tests {
             }
         }
 
-        // Bins below 100 are quiet: a column (cells sit on a pitch one point wider
-        // than the cell) is loud only when it reaches bin 100, its loudest bin.
+        // Account for the one-point cell gap when locating the first band containing bin 100.
         let boundary_x = coordinates.x_for_frequency(100.0 * plot.fft.bin_hz, rect);
         let pitch = cell_width + 1.0;
         for cell in &target.rects {
@@ -568,7 +552,6 @@ mod tests {
             );
         }
 
-        // Loud columns start right at the boundary and run to the right edge.
         let mut columns: std::collections::BTreeMap<u32, Vec<ColoredRect>> = Default::default();
         for cell in &target.rects {
             columns
@@ -590,7 +573,6 @@ mod tests {
             "last loud column"
         );
 
-        // Every loud column is a stack from the bottom up to the -50 dBFS level.
         let level_y = coordinates.y_for_dbfs(-50.0, rect);
         let expected_count = columns.values().next().unwrap().len();
         for (key, cells) in &columns {
@@ -609,7 +591,6 @@ mod tests {
         }
     }
 
-    /// Rectangles `style` draws for `plot` in an 800 × 400 plot spanning −100…0 dBFS.
     fn style_rects(style: &mut dyn SpectrumStyle, plot: &SpectrumPlot<'_>) -> Vec<ColoredRect> {
         let mut target = RecordingTarget::default();
         style.draw(
@@ -680,7 +661,7 @@ mod tests {
             );
             for mark in marks {
                 assert!(bands.contains(&mark.rect.min.x.to_bits()), "{style_id}");
-                // Bars put the mark's top on the peak; Pixel lights the cell holding it.
+                // Bars align the mark's top to the peak; Pixel can quantize it one cell upward.
                 assert!(
                     mark.rect.min.y <= peak_y && peak_y - mark.rect.min.y < 7.0,
                     "{style_id}: mark at y {} for a peak at {peak_y}",
@@ -717,8 +698,7 @@ mod tests {
 
     #[test]
     fn curve_reaches_both_edges_even_when_the_first_bin_lies_inside_the_range() {
-        // 256-point FFT at 48 kHz: bins every 187.5 Hz, the first above 20 Hz is far
-        // into the plot. Levels rise linearly with frequency.
+        // A 256-point FFT at 48 kHz leaves the first positive bin far inside the 20 Hz plot edge.
         let bin_hz = 187.5;
         let bins: Vec<f32> = (0..=128).map(|index| -100.0 + index as f32 * 0.5).collect();
         let plot = SpectrumPlot {
@@ -762,7 +742,6 @@ mod tests {
         let (first, last) = (points[0], *points.last().unwrap());
         assert_eq!(first.x, rect.min.x, "the curve starts at the left edge");
         assert_eq!(last.x, rect.max.x, "the curve ends at the right edge");
-        // The edge levels are interpolated between the neighboring bins.
         let level = |frequency: f32| -100.0 + frequency / bin_hz * 0.5;
         assert!((first.y - coordinates.y_for_dbfs(level(20.0), rect)).abs() < 0.01);
         assert!((last.y - coordinates.y_for_dbfs(level(20_000.0), rect)).abs() < 0.01);
@@ -789,11 +768,9 @@ mod tests {
         assert!((range - DEFAULT_RANGE_DB * (-0.2_f32).exp()).abs() < 0.01);
         let after = coordinates.y_for_dbfs(-30.0, plot);
         assert!(after < before, "scrolling up makes the curve taller");
-        // Linear about the bottom: heights above it scale by one factor.
         let height = |y: f32| plot.max.y - y;
         assert!((height(after) / height(before) - DEFAULT_RANGE_DB / range).abs() < 0.001);
 
-        // Away from the plot the wheel does nothing.
         let frame = frame_at(&mut target, &palette, None, 200.0);
         let unchanged = coordinates;
         SpectrumModule::update_range(&mut coordinates, &frame, plot, 24_000.0);
@@ -837,8 +814,7 @@ mod tests {
             assert!(Instant::now() < deadline, "no peak result");
             std::thread::yield_now();
         };
-        // 3 kHz is bin 128 of the 2048-point FFT. A steady tone holds the peak at
-        // the displayed (tilted, +14 dB there) level, not at the raw level.
+        // At 3 kHz (bin 128), Tilt adds about 14 dB; holding the raw FFT would miss that gain.
         let main_db = main.spectrum().unwrap().bins_dbfs[128];
         let peak_db = peak.spectrum().unwrap().bins_dbfs[128];
         assert!(
@@ -918,7 +894,6 @@ mod tests {
         wait_for_subscriptions(&fixture.services.dataflow, 0);
         let stopped = fixture.services.dataflow.metrics();
         assert_eq!((stopped.nodes, stopped.rings), (0, 0));
-        // A result taken earlier stays readable; the closed reader sees nothing new.
         assert_eq!(first_result.processed_through_frame, 4_096);
         assert!(old_reader.latest(OutputId::from_index(0)).is_none());
     }

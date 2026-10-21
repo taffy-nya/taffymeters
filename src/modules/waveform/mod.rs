@@ -19,12 +19,9 @@ use crate::modules::pcm_view::{
     subscribe_pcm, wheel_scale,
 };
 
-/// Visible span a new Waveform shows.
 const DEFAULT_VISIBLE_SECONDS: f32 = 4.0;
 
-/// Source time the Waveform keeps by default; it shows up to its History.
 const WAVEFORM_HISTORY_SECONDS: f32 = 10.0;
-/// Shortest Waveform span.
 const WAVEFORM_MIN_SECONDS: f32 = 0.25;
 
 pub const WAVEFORM_MODULE_ID: &str = "taffymeters.waveform";
@@ -94,19 +91,13 @@ struct WaveformModule {
     y_scale: f32,
     flow: Flow,
     envelope: WaveformEnvelope,
-    /// One column per envelope bin, each rasterized once (the newest again while
-    /// it fills).
+    /// Completed bins are rasterized once; the filling bin can change on each publication.
     picture: ColumnRing,
-    /// What the pixels were rasterized for; any change redraws them from the
-    /// envelope.
     picture_key: Option<PictureKey>,
-    /// Pixels of one column, reused while rasterizing.
     column: Vec<Color>,
-    /// Source time of the picture, running on while the source is silent.
     clock: ViewClock,
 }
 
-/// Inputs of the picture besides the envelope.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PictureKey {
     columns: usize,
@@ -127,8 +118,7 @@ impl WaveformModule {
     }
 }
 
-/// Display sampling cache: min/max per fixed-size bin of absolute source frames, so
-/// each draw only folds in samples published since the previous draw.
+/// Cache absolute source-frame bins so draws only fold in newly published samples.
 #[derive(Default)]
 struct WaveformEnvelope {
     key: Option<(
@@ -137,7 +127,7 @@ struct WaveformEnvelope {
         crate::audio::SourceId,
         crate::audio::Generation,
     )>,
-    /// Exclusive end of the source frames already folded in.
+    /// Exclusive source-frame frontier already folded in.
     through: u64,
     /// `(bin, min, max)`, bins ascending; bins without samples are absent (gaps).
     bins: std::collections::VecDeque<(u64, f32, f32)>,
@@ -207,14 +197,10 @@ impl Module for WaveformModule {
         let Ok(channel) = self.channel.resolve(descriptor) else {
             return ModuleResponse::default();
         };
-        // One column per point along the time axis, the bar across it (positive
-        // up, or right when the picture moves vertically).
         let (along, across) = self.flow.extents(frame.rect);
         let columns = along.floor().max(1.0) as u64;
         let span_frames = ((self.seconds * descriptor.sample_rate_hz as f32) as u64).max(1);
         let frames_per_bin = (span_frames / columns).max(1);
-        // A silent loopback delivers nothing: "now" runs on with the display clock
-        // so the picture keeps moving until its content has scrolled out.
         let paused = self.source.source_status().state == SourceState::Paused;
         let now_end = self.clock.update(
             newest,
@@ -240,7 +226,6 @@ impl Module for WaveformModule {
         let last_bin = newest.saturating_sub(1) / frames_per_bin;
         let first_bin = (last_bin + 1).saturating_sub(columns);
         let channels = descriptor.channel_count as usize;
-        // First bin that received samples in this draw.
         let mut changed_from = None;
         for chunk in self.history.iter().filter_map(|entry| entry.frame.pcm()) {
             let chunk_end = chunk.start_frame.saturating_add(chunk.frame_count as u64);
@@ -278,7 +263,6 @@ impl Module for WaveformModule {
         {
             envelope.bins.pop_front();
         }
-        // The Scale setting is relative to the workspace reference level.
         let gain = self.y_scale * reference_gain(frame.reference_dbfs);
         let picture_key = PictureKey {
             columns: columns as usize,
@@ -303,8 +287,7 @@ impl Module for WaveformModule {
                     maximum * gain,
                     frame.palette,
                 );
-                // Bins without samples (gaps) stay blank. Silence shown moves the
-                // bins on by whole columns.
+                // Quantize inserted silence to whole columns so settled bins do not shimmer.
                 let shift = self.clock.position(bin * frames_per_bin) - bin * frames_per_bin;
                 self.picture
                     .write(bin + shift / frames_per_bin, &self.column, false);
@@ -324,9 +307,8 @@ impl Module for WaveformModule {
     }
 }
 
-/// One Waveform column: the bar from `maximum` down to `minimum` (scaled samples,
-/// ±1 at the edges), at least one row tall, edge rows by their coverage so the
-/// smooth filtering shows no steps.
+/// Scaled samples ±1 map to the edges; the bar spans at least one row before clipping.
+/// Partial row coverage avoids steps under bilinear filtering.
 fn rasterize_column(
     pixels: &mut Vec<Color>,
     rows: usize,
@@ -364,14 +346,12 @@ mod tests {
             .unwrap()
     }
 
-    /// A saved spec with the Waveform's shape and a History of `seconds`.
     fn history_of(seconds: f32) -> DataSpec {
         let mut spec = DataSpec::new();
         spec.output(SOURCE, Keep::Seconds(seconds));
         spec
     }
 
-    /// `(min, max, value)` of the visible-time setting.
     fn visible_time(module: &dyn Module) -> (f32, f32, f32) {
         let setting = module
             .view_settings()
@@ -390,8 +370,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Picture row of the top of a bar of constant sample `level` (the test frames'
-    /// full-scale reference draws 1.0 at `REFERENCE_HEIGHT` of the half height).
     fn level_row(level: f32) -> usize {
         let half = TEST_RECT.height() * 0.5;
         (half - level * crate::module::REFERENCE_HEIGHT * half).round() as usize
@@ -440,7 +418,6 @@ mod tests {
             "never beyond the History"
         );
 
-        // A History shorter than the usual shortest span is the only span there is.
         let tiny_history = history_of(0.1);
         let mut tiny = waveform(&fixture, Some(&tiny_history));
         let (min, max, _) = visible_time(tiny.as_ref());
@@ -455,13 +432,10 @@ mod tests {
     fn history_shorter_than_the_visible_span_enters_at_the_right_edge() {
         let mut fixture = PcmFixture::new(2);
         let mut module = waveform(&fixture, None);
-        // Screen position (0 = left edge) of picture column `x`.
         let screen =
             |image: &RecordedImage, x: usize| (x + image.width - image.first_column) % image.width;
 
-        // 1/30 s of a constant 0.5 in the default 4 s window right after start: a
-        // thin sliver at the right edge (where the newest audio enters), not
-        // stretched across the Module nor growing from the left edge.
+        // A single block occupies only 1/30 s of the default 4 s window.
         fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
         let first = drawn(module.as_mut(), 0);
         assert_eq!(first.rect, TEST_RECT);
@@ -483,9 +457,7 @@ mod tests {
             assert_eq!((bar.1, bar.2), (level_row(0.5), level_row(0.5)));
         }
 
-        // The next 1/30 s (constant -0.5) extends the picture to the right without
-        // touching what was already drawn. The block boundary falls inside a bar,
-        // so that bar holds both levels and is drawn again; nothing else is.
+        // The block boundary falls inside one bin, so only that existing column must be redrawn.
         fixture.feed(&repeat_frame(&[-0.5, -0.5], BLOCK_FRAMES));
         let second = drawn(module.as_mut(), 50);
         let second_bars = bars(&second);
@@ -517,7 +489,6 @@ mod tests {
         let last = second_bars.last().unwrap();
         assert_eq!((last.1, last.2), (level_row(-0.5), level_row(-0.5)));
 
-        // Nothing new: nothing is drawn again.
         assert!(drawn(module.as_mut(), 66).changed.is_empty());
     }
 
@@ -527,14 +498,13 @@ mod tests {
         let mut module = waveform(&fixture, None);
         fixture.feed(&repeat_frame(&[0.5, -0.5], BLOCK_FRAMES));
 
-        // Mono mix of +0.5 / -0.5 is silence: a flat line at the center.
         let silent = bars(&drawn(module.as_mut(), 0));
         assert_eq!(silent.len(), 4);
         for bar in &silent {
             assert_eq!((bar.1, bar.2), (level_row(0.0), level_row(0.0)));
         }
 
-        // No new audio arrived: the bars must still be rebuilt for the new channel.
+        // Do not feed new audio: the channel edit must also rebuild existing History.
         for (channel, level) in [
             (ChannelSelection::Left, 0.5),
             (ChannelSelection::Right, -0.5),
@@ -567,8 +537,7 @@ mod tests {
             (TEST_RECT.height() as usize, TEST_RECT.width() as usize),
             "one column per point of height, a row per point of width"
         );
-        // 1/30 s in 4 s over 200 columns: two columns, each a bar at +0.5 of the
-        // half width from the middle.
+        // 1/30 s in a 4 s window over 200 columns occupies two columns.
         let half = TEST_RECT.width() * 0.5;
         let row = (half - 0.5 * crate::module::REFERENCE_HEIGHT * half).round() as usize;
         let shown = bars(&picture);
@@ -604,19 +573,16 @@ mod tests {
         assert_eq!(screen(&start, newest), start.width - 1);
         assert!(wake.is_some_and(|wake| wake <= crate::plotting::SILENCE_GRACE));
 
-        // Nothing arrives for a second: the picture moves on by the time past the
-        // grace (4 s over 400 columns: 100 columns a second), still animating.
+        // 0.85 s past the grace at 100 columns/s should shift the picture by 85 columns.
         let (moved, wake) = at(module.as_mut(), 1_000);
         let shift = start.width - 1 - screen(&moved, newest);
         assert!((84..=86).contains(&shift), "moved {shift} columns");
         assert_eq!(wake, Some(crate::module::FRAME_INTERVAL));
 
-        // Once everything has scrolled out the picture is empty and stays still.
         let (gone, wake) = at(module.as_mut(), 5_000);
         assert!(bars(&gone).is_empty());
         assert_eq!(wake, None);
 
-        // Audio again: it enters at the right edge, after the silence shown.
         fixture.feed(&repeat_frame(&[-0.5, -0.5], BLOCK_FRAMES));
         let (back, _) = at(module.as_mut(), 5_050);
         let shown = bars(&back);

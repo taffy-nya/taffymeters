@@ -18,7 +18,6 @@ const SHOW_GUIDES_KEY: &str = "show_guides";
 
 pub const STEREOMETER_MODULE_ID: &str = "taffymeters.stereometer";
 
-/// The points and the axes.
 const COLOR_ROLES: &[ColorRole] = &[ColorRole::Primary, ColorRole::Guide];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
@@ -147,8 +146,8 @@ impl Module for StereometerModule {
         let dot = frame.palette.color(ColorRole::Primary);
         let dot = dot.with_alpha((f32::from(dot.alpha) * 180.0 / 255.0) as u8);
         self.circles.clear();
-        // Mid up, side across, each the mean of the two channels: mono-like content
-        // peaking at the reference reaches the guide radius. Scale is relative.
+        // Positive mid points up, positive side right; at unit scale a reference-level mono peak
+        // reaches the guide because both channel combinations are averaged.
         let half = frame.rect.width().min(frame.rect.height()) * 0.5;
         let gain = 0.5 * half * self.scale * reference_gain(frame.reference_dbfs);
         if let Some(chunk) = snapshot.pcm() {
@@ -231,7 +230,6 @@ mod tests {
         let center = TEST_RECT.center();
         let mut target = RecordingTarget::default();
 
-        // L = R: pure mid signal, straight up from the center for positive samples.
         fixture.feed(&repeat_frame(&[0.5, 0.5], BLOCK_FRAMES));
         draw(module.as_mut(), &mut target, Duration::ZERO);
         assert!(!target.circles.is_empty());
@@ -246,7 +244,6 @@ mod tests {
             );
         }
 
-        // L = -R: pure side signal, to the right of the center when L is positive.
         fixture.feed(&repeat_frame(&[0.5, -0.5], BLOCK_FRAMES));
         target.clear();
         draw(module.as_mut(), &mut target, Duration::from_millis(50));

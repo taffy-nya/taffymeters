@@ -28,7 +28,6 @@ struct BarSpectrumStyle {
     bars: Vec<ColoredRect>,
 }
 
-/// Height of the peak mark above each bar, in points.
 const PEAK_MARK_HEIGHT: f32 = 2.0;
 
 impl SpectrumStyle for BarSpectrumStyle {
@@ -60,7 +59,6 @@ impl SpectrumStyle for BarSpectrumStyle {
                     color: context.palette.color(ColorRole::Primary),
                 });
             }
-            // The peak of the same band: a short mark whose top edge is the level.
             if let Some(peak) = context
                 .snapshot
                 .peak_dbfs

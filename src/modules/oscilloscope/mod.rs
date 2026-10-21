@@ -33,9 +33,7 @@ const STYLE_OPTIONS: &[StyleOption] = &[StyleOption {
     label: "Line",
 }];
 
-/// The center line; the trace is the style's.
 const OWN_COLOR_ROLES: &[ColorRole] = &[ColorRole::Guide];
-/// Every role an Oscilloscope can draw with across its styles.
 const TYPE_COLOR_ROLES: &[ColorRole] = &[ColorRole::Primary, ColorRole::Guide];
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
@@ -93,7 +91,6 @@ struct OscilloscopeModule {
     show_guide: bool,
     style: Box<dyn OscilloscopeStyle>,
     style_id: &'static str,
-    /// The style's roles and the center line's.
     color_roles: Vec<ColorRole>,
 }
 
@@ -174,7 +171,6 @@ impl Module for OscilloscopeModule {
                 frame: &snapshot,
                 channel: self.channel,
                 rect: frame.rect,
-                // The Scale setting is relative to the workspace reference level.
                 y_scale: self.y_scale * reference_gain(frame.reference_dbfs),
                 monotonic_time: frame.monotonic_time,
                 palette: frame.palette,
@@ -220,13 +216,10 @@ mod tests {
             .unwrap()
     }
 
-    /// Height of `level` in the test frames, whose full-scale reference draws 1.0
-    /// at `REFERENCE_HEIGHT` of the half height.
     fn level_y(level: f32) -> f32 {
         TEST_RECT.center().y - level * crate::module::REFERENCE_HEIGHT * TEST_RECT.height() * 0.5
     }
 
-    /// The single trace drawn sits at `level` (the center line is hidden by default).
     fn assert_trace_at(target: &RecordingTarget, level: f32) {
         assert_eq!(target.non_empty_polylines(), 1);
         let expected_y = level_y(level);
@@ -248,7 +241,7 @@ mod tests {
 
         let mut target = RecordingTarget::default();
         draw(module.as_mut(), &mut target, Duration::ZERO);
-        // Mono mix of 0.2 and -0.1.
+        // The default mono average is (0.2 - 0.1) / 2.
         assert_trace_at(&target, 0.05);
 
         module.set_channel(ChannelSelection::Left).unwrap();
@@ -274,8 +267,7 @@ mod tests {
         assert_trace_at(&target, 0.05);
     }
 
-    /// The trace of one 1600-frame mono chunk, silent except for `spikes`;
-    /// `TEST_RECT` is 400 wide, so four frames share a column.
+    /// Four frames share a display column, so single-sample spikes exercise reduction.
     fn trace_of(spikes: &[(usize, f32)]) -> Vec<Point> {
         let mut fixture = PcmFixture::new(1);
         let mut module = scope(&fixture);
@@ -313,7 +305,7 @@ mod tests {
         assert!(points.windows(2).all(|pair| pair[0].x < pair[1].x));
         assert_eq!(points.first().unwrap().x, TEST_RECT.min.x);
         assert!((points.last().unwrap().x - TEST_RECT.max.x).abs() < 0.001);
-        // At most two points per column besides the two ends.
+        // Two extrema per column, plus the chunk's two endpoint samples.
         assert!(points.len() <= 2 * TEST_RECT.width() as usize + 2);
     }
 }

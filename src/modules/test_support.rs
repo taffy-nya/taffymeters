@@ -1,7 +1,3 @@
-//! Test-only helpers shared by the built-in Module tests: a render target that
-//! records what was drawn, and a live source → dataflow pipeline that is fed
-//! deterministically (every write waits for the worker's processed frontier).
-
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -18,14 +14,13 @@ use crate::{
     theme::Palette,
 };
 
-/// Area every helper draw uses; deliberately not at the origin.
+/// An offset origin catches accidental absolute-coordinate assumptions.
 pub(crate) const TEST_RECT: Rect = Rect {
     min: Point { x: 10.0, y: 20.0 },
     max: Point { x: 410.0, y: 220.0 },
 };
 
-/// Frames per written block. It equals the time-result publication interval at
-/// 48 kHz (1/30 s), so each block yields exactly one PCM result.
+/// Matches the 48 kHz publication interval (1/30 s), yielding one PCM result per block.
 pub(crate) const BLOCK_FRAMES: usize = 1_600;
 
 pub(crate) struct RecordedPolyline {
@@ -37,20 +32,17 @@ pub(crate) struct RecordedText {
     pub text: String,
 }
 
-/// One `scrolling_image` call: where, from which column, and what it uploaded.
 pub(crate) struct RecordedImage {
     pub rect: Rect,
     pub first_column: usize,
     pub flow: Flow,
     pub width: usize,
     pub height: usize,
-    /// Columns the image marked changed since it was last drawn.
     pub changed: Vec<usize>,
     /// Column-major copy of the pixels, top first.
     pub columns: Vec<Vec<crate::render::Color>>,
 }
 
-/// Keeps every draw call it receives.
 #[derive(Default)]
 pub(crate) struct RecordingTarget {
     pub polylines: Vec<RecordedPolyline>,
@@ -65,7 +57,6 @@ impl RecordingTarget {
         *self = Self::default();
     }
 
-    /// Polylines that actually have points to stroke.
     pub(crate) fn non_empty_polylines(&self) -> usize {
         self.polylines
             .iter()
@@ -119,8 +110,7 @@ impl RenderTarget for RecordingTarget {
     }
 }
 
-/// A 48 kHz source with `channels` channels feeding a live dataflow worker.
-/// Declare it before the Modules created from it so they drop first.
+/// Declare before its Modules so their subscriptions drop before the worker.
 pub(crate) struct PcmFixture {
     capture: CaptureEndpoint,
     _dataflow: Dataflow,
@@ -160,8 +150,7 @@ impl PcmFixture {
         }
     }
 
-    /// Write interleaved samples in blocks of at most `BLOCK_FRAMES`, waiting for
-    /// the worker to process (and publish) each block before the next one.
+    /// Wait for publication after each block so test draws do not race the worker.
     pub(crate) fn feed(&mut self, interleaved: &[f32]) {
         assert_eq!(interleaved.len() % self.channels, 0, "whole frames only");
         for piece in interleaved.chunks(self.channels * BLOCK_FRAMES) {
@@ -180,7 +169,6 @@ impl PcmFixture {
     }
 }
 
-/// `frames` frames made of `frame` repeated (interleaved).
 pub(crate) fn repeat_frame(frame: &[f32], frames: usize) -> Vec<f32> {
     frame
         .iter()
@@ -190,7 +178,6 @@ pub(crate) fn repeat_frame(frame: &[f32], frames: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Draw `module` once into `target` at `monotonic_time` with the default palette.
 pub(crate) fn draw(
     module: &mut dyn Module,
     target: &mut RecordingTarget,
@@ -203,7 +190,7 @@ pub(crate) fn draw(
         scroll_delta_y: 0.0,
         zoom_delta: 1.0,
         palette: &Palette::default(),
-        // Full scale: a sample of 1.0 reaches `REFERENCE_HEIGHT` of the half height.
+        // Full-scale reference: 1.0 reaches REFERENCE_HEIGHT of a signed view's half-height.
         reference_dbfs: 0.0,
         renderer: target,
     })

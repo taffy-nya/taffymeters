@@ -5,8 +5,6 @@ use crate::{
     theme::{ColorRole, Palette},
 };
 
-/// One Spectrum result: the main curve and, when available, the peak curve of the
-/// same analysis hop.
 #[derive(Clone, Copy, Debug)]
 pub struct SpectrumPlot<'a> {
     pub fft: FftMetadata,
@@ -24,7 +22,7 @@ pub struct SpectrumStyleContext<'a> {
 
 pub trait SpectrumStyle: Send {
     fn draw(&mut self, context: SpectrumStyleContext<'_>, renderer: &mut dyn RenderTarget);
-    /// Theme roles the style draws with.
+    /// Report every theme role this style draws with for the instance's color overrides.
     fn color_roles(&self) -> &'static [ColorRole];
 }
 

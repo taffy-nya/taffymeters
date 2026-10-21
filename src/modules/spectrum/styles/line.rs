@@ -80,11 +80,8 @@ fn spectrum_points(
     output: &mut Vec<Point>,
     bins: &[f32],
 ) {
-    // Display sampling: on the log axis many high bins share one point-wide column;
-    // keep only the loudest bin of each column so peaks survive and the path stays
-    // proportional to the drawn width instead of the FFT size. The ends are the
-    // levels interpolated at the range bounds, so the curve reaches both edges even
-    // when the first bin lies well inside the range (small FFTs).
+    // Per-column maxima preserve narrow peaks while bounding path size by display width.
+    // Interpolated edge points reach the bounds even when a small FFT's first bin is far inside.
     output.clear();
     let bin_hz = snapshot.fft.bin_hz;
     let mut column: Option<(i32, Point)> = None;

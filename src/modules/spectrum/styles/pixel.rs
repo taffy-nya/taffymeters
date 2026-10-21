@@ -48,13 +48,11 @@ impl SpectrumStyle for PixelSpectrumStyle {
                 .peak_dbfs
                 .and_then(|peak| spectrum_dbfs_between(peak, bin_hz, low_hz, high_hz))
                 .map(top_of);
-            // A cell is lit by a level whose top lies above the cell's bottom edge.
             let lit = |top: Option<f32>, y: f32| top.is_some_and(|top| y + cell > top);
             let mut y = rect.max.y - cell;
             while lit(top, y) || lit(peak_top, y) {
                 let last = y < rect.min.y + cell;
-                // The highest cell the peak lights shows the peak instead of the level;
-                // cells between the level and that peak stay dark.
+                // Only the highest peak cell is lit; leave the gap above the level dark.
                 let color = if lit(peak_top, y) && (last || !lit(peak_top, y - cell)) {
                     Some(context.palette.color(ColorRole::Secondary))
                 } else if lit(top, y) {

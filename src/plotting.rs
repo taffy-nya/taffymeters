@@ -50,8 +50,7 @@ impl SpectrumCoordinates {
         self.min_dbfs + fraction * (self.max_dbfs - self.min_dbfs)
     }
 
-    /// Bins strictly inside the shown frequency range; the curve's edge points come
-    /// from `spectrum_dbfs_at` at the range bounds.
+    /// Bounds are excluded because callers interpolate the curve's edge points separately.
     pub fn interior_bin_range(self, bin_hz: f32, bin_count: usize) -> std::ops::Range<usize> {
         if bin_hz <= 0.0 || bin_count == 0 {
             return 0..0;
@@ -62,8 +61,6 @@ impl SpectrumCoordinates {
     }
 }
 
-/// A binned spectrum's level at `frequency_hz`, interpolated linearly in frequency
-/// between the two nearest bins; `None` outside the bins.
 pub fn spectrum_dbfs_at(bins: &[f32], bin_hz: f32, frequency_hz: f32) -> Option<f32> {
     if bin_hz <= 0.0 || frequency_hz.is_nan() || frequency_hz < 0.0 {
         return None;
@@ -72,16 +69,14 @@ pub fn spectrum_dbfs_at(bins: &[f32], bin_hz: f32, frequency_hz: f32) -> Option<
     let index = position.floor() as usize;
     let low = *bins.get(index)?;
     let Some(&high) = bins.get(index + 1) else {
-        // Exactly on the last bin.
         return (position == index as f32).then_some(low);
     };
     let t = position - index as f32;
     Some(low + (high - low) * t)
 }
 
-/// A binned spectrum's level over `[low_hz, high_hz]` (one display column): the
-/// loudest bin inside it, so narrow peaks survive; a column between two bins takes
-/// the level interpolated at its log-axis center.
+/// Take the loudest bin in inclusive `[low_hz, high_hz]` so narrow peaks survive.
+/// Between bins, interpolate at the log-axis center.
 pub fn spectrum_dbfs_between(bins: &[f32], bin_hz: f32, low_hz: f32, high_hz: f32) -> Option<f32> {
     if bin_hz <= 0.0 || low_hz.is_nan() || high_hz.is_nan() || low_hz < 0.0 || high_hz < low_hz {
         return None;
@@ -96,15 +91,8 @@ pub fn spectrum_dbfs_between(bins: &[f32], bin_hz: f32, low_hz: f32, high_hz: f3
     spectrum_dbfs_at(bins, bin_hz, (low_hz * high_hz).sqrt())
 }
 
-/// A picture that scrolls in source time, shared by the time views (Waveform,
-/// Spectrogram): absolute column numbers (source frame / frames per column) map
-/// onto a ring of image columns. A column is computed once, when its data
-/// arrives (the newest one again while it fills), and only changed columns are
-/// uploaded; drawing never recomputes or moves earlier pixels, so nothing
-/// shimmers. The picture moves in `Flow`'s direction with the newest column at
-/// the edge opposite, from the first column on: right after start, when only a
-/// few columns exist, the rest of the picture is empty rather than the columns
-/// growing from the far edge.
+/// Absolute source-time columns map to fixed image slots, avoiding resampling shimmer.
+/// Unwritten slots stay transparent, with the newest column at the edge opposite the flow.
 #[derive(Default)]
 pub struct ColumnRing {
     image: Image,
@@ -112,7 +100,6 @@ pub struct ColumnRing {
 }
 
 impl ColumnRing {
-    /// Start over with `columns` × `rows` transparent pixels.
     pub fn reset(&mut self, columns: usize, rows: usize) {
         self.image.resize(columns.max(1), rows.max(1));
         self.newest = None;
@@ -126,14 +113,12 @@ impl ColumnRing {
         self.image.height()
     }
 
-    /// Newest absolute column written since the last reset.
     pub fn newest(&self) -> Option<u64> {
         self.newest
     }
 
-    /// Write absolute `column` (top row first). Columns skipped since the newest
-    /// one written are cleared, or take these pixels too with `fill_skipped` (one
-    /// result covering several columns' time).
+    /// `pixels` are top-first. `fill_skipped` repeats a result covering several columns' time;
+    /// otherwise skipped columns are cleared.
     pub fn write(&mut self, column: u64, pixels: &[Color], fill_skipped: bool) {
         let columns = self.image.width() as u64;
         // A column older than the picture holds would overwrite a newer one.
@@ -162,9 +147,7 @@ impl ColumnRing {
         self.newest = Some(self.newest.map_or(column, |newest| newest.max(column)));
     }
 
-    /// Move the newest edge on to absolute `column` without data (the source is
-    /// silent): the columns passed are cleared, so earlier content keeps scrolling
-    /// away.
+    /// Clear passed columns when silence advances source time without new data.
     pub fn advance(&mut self, column: u64) {
         let Some(newest) = self.newest.filter(|&newest| column > newest) else {
             return;
@@ -179,13 +162,10 @@ impl ColumnRing {
         self.newest = Some(column);
     }
 
-    /// Draw over `rect`, smoothly filtered, moving toward `flow`.
     pub fn draw(&mut self, renderer: &mut dyn RenderTarget, clip: Rect, rect: Rect, flow: Flow) {
         let Some(newest) = self.newest else {
             return;
         };
-        // The oldest edge shows the slot after the newest; slots not yet written
-        // are transparent.
         let columns = self.image.width() as u64;
         renderer.scrolling_image(
             clip,
@@ -197,24 +177,16 @@ impl ColumnRing {
     }
 }
 
-/// How long the source may deliver nothing before a time view treats it as
-/// silent and keeps moving (results normally arrive every 10–35 ms).
+/// Results normally arrive every 10–35 ms; allow jitter before treating the source as silent.
 pub const SILENCE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// Source time of a time view that keeps moving while the source delivers
-/// nothing: a system loopback sends no samples at all while nothing plays, so the
-/// source frontier stops. After `SILENCE_GRACE` the view's "now" runs on with the
-/// display clock; when samples arrive again, the silence shown stays as a gap and
-/// later frames are placed after it. Positions are source frames plus the silence
-/// inserted before them.
+/// Loopback sends no samples during silence, so source frames alone cannot keep a view moving.
+/// After `SILENCE_GRACE`, insert display-clock silence; later source frames follow those gaps.
 #[derive(Default)]
 pub struct ViewClock {
-    /// Newest source frontier seen, and when (display time; moved on by the time
-    /// the source is paused, so a pause does not count as silence).
+    /// Source frontier and display time last seen; pauses advance the time to exclude held time.
     newest: Option<(u64, std::time::Duration)>,
-    /// Display time of the previous update.
     last_update: std::time::Duration,
-    /// The source was paused at the previous update.
     paused: bool,
     /// Frames of silence shown after `newest`.
     pending: u64,
@@ -223,8 +195,7 @@ pub struct ViewClock {
 }
 
 impl ViewClock {
-    /// Take the source's newest `frontier` at display time `now`; returns the
-    /// view's current end position (exclusive).
+    /// Returns the exclusive end in source frames plus inserted silence.
     pub fn update(
         &mut self,
         frontier: u64,
@@ -242,7 +213,6 @@ impl ViewClock {
             }
             Some((seen, at)) if frontier == seen => {
                 if paused {
-                    // Frozen: the time since the previous update does not count.
                     let held = now.saturating_sub(self.last_update);
                     self.newest = Some((seen, at + held));
                 } else {
@@ -250,7 +220,6 @@ impl ViewClock {
                     self.pending = (silent.as_secs_f64() * f64::from(sample_rate)) as u64;
                 }
             }
-            // First data, or a source that started over.
             _ => {
                 *self = Self {
                     newest: Some((frontier, now)),
@@ -263,10 +232,9 @@ impl ViewClock {
         self.frontier_position(frontier) + self.pending
     }
 
-    /// When the view must be drawn again without new data: once the grace runs
-    /// out, then every frame while the silence pushes the newest data (ending at
-    /// position `data_end`) out of a picture `span` positions long; then never,
-    /// until data arrives. A paused source holds the picture still.
+    /// Schedule grace expiry, then repaint each frame until silence pushes data out of `span`
+    /// positions (source frames plus inserted silence).
+    /// A paused source holds the picture still.
     pub fn repaint_after(
         &self,
         now: std::time::Duration,
@@ -285,12 +253,11 @@ impl ViewClock {
         (end.saturating_sub(data_end) < span).then_some(crate::module::FRAME_INTERVAL)
     }
 
-    /// Position of source frame `frame`.
     pub fn position(&self, frame: u64) -> u64 {
         frame + self.offset(|gap| frame >= gap)
     }
 
-    /// Position of a result frontier (the end of the frames it covers).
+    /// Unlike a frame at a gap boundary, an exclusive frontier there precedes the gap.
     pub fn frontier_position(&self, frontier: u64) -> u64 {
         frontier + self.offset(|gap| frontier > gap)
     }
@@ -338,8 +305,7 @@ mod tests {
             target.images.pop().unwrap()
         };
 
-        // Right after start, absolute columns 1 and 2 only: the newest is at the
-        // right edge already (the left edge shows the slot after it, still empty).
+        // Start before the ring fills to catch content incorrectly anchored at the oldest edge.
         ring.write(1, &color(1), true);
         ring.write(2, &color(2), true);
         let started = drawn(&mut ring);
@@ -348,29 +314,26 @@ mod tests {
         assert_eq!(started.columns[3], [Color::rgba(0, 0, 0, 0); 2]);
         assert_eq!(started.columns[0], [Color::rgba(0, 0, 0, 0); 2]);
 
-        // Column 5 after 2: 3 and 4 take 5's pixels (one result covering their
-        // time); the oldest shown is 2 (slot 2) at the left edge.
+        // One result spans three columns, crossing the ring boundary.
         ring.write(5, &color(5), true);
         let full = drawn(&mut ring);
         assert_eq!(full.first_column, 2);
-        assert_eq!(full.columns[3], color(5)); // 3
-        assert_eq!(full.columns[0], color(5)); // 4
-        assert_eq!(full.columns[1], color(5)); // 5
+        assert_eq!(full.columns[3], color(5));
+        assert_eq!(full.columns[0], color(5));
+        assert_eq!(full.columns[1], color(5));
         assert_eq!(full.columns[2], color(2));
 
-        // A gap: the skipped columns are cleared, and only the written ones upload.
         ring.write(8, &color(8), false);
         let gapped = drawn(&mut ring);
         assert_eq!(gapped.first_column, 1);
-        assert_eq!(gapped.columns[2], [Color::rgba(0, 0, 0, 0); 2]); // 6
-        assert_eq!(gapped.columns[3], [Color::rgba(0, 0, 0, 0); 2]); // 7
+        assert_eq!(gapped.columns[2], [Color::rgba(0, 0, 0, 0); 2]);
+        assert_eq!(gapped.columns[3], [Color::rgba(0, 0, 0, 0); 2]);
         assert_eq!(gapped.columns[0], color(8));
         assert_eq!(gapped.columns[1], color(5));
         let mut changed = gapped.changed.clone();
         changed.sort_unstable();
         assert_eq!(changed, vec![0, 2, 3]);
 
-        // Drawing again uploads nothing and moves nothing.
         let again = drawn(&mut ring);
         assert!(again.changed.is_empty());
         assert_eq!(again.first_column, 1);
@@ -397,7 +360,6 @@ mod tests {
             assert!((coordinates.dbfs_at_y(y, rect) - dbfs).abs() < 0.000_1);
         }
 
-        // Low frequencies sit at the left edge, high ones at the right, on a log scale.
         assert_eq!(coordinates.x_for_frequency(20.0, rect), rect.min.x);
         assert_eq!(coordinates.x_for_frequency(20_000.0, rect), rect.max.x);
         let (x_100, x_1k, x_10k) = (
@@ -409,11 +371,9 @@ mod tests {
         let geometric_mean = (20.0_f32 * 20_000.0).sqrt();
         let middle = coordinates.x_for_frequency(geometric_mean, rect);
         assert!((middle - rect.center().x).abs() < 0.01, "log axis midpoint");
-        // Out-of-range frequencies are pinned to the edges.
         assert_eq!(coordinates.x_for_frequency(1.0, rect), rect.min.x);
         assert_eq!(coordinates.x_for_frequency(96_000.0, rect), rect.max.x);
 
-        // Quiet levels sit at the bottom (larger y), loud ones at the top.
         assert_eq!(coordinates.y_for_dbfs(-120.0, rect), rect.max.y);
         assert_eq!(coordinates.y_for_dbfs(6.0, rect), rect.min.y);
         assert!(

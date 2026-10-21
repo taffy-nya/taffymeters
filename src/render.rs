@@ -1,3 +1,4 @@
+/// Geometry uses logical points, with x rightward and y downward.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: f32,
@@ -10,7 +11,6 @@ pub struct Rect {
     pub max: Point,
 }
 
-/// Width and height in logical points.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Size {
     pub width: f32,
@@ -54,6 +54,7 @@ impl Rect {
     }
 }
 
+/// RGBA channels are unpremultiplied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color {
     pub red: u8,
@@ -87,7 +88,6 @@ impl Color {
 }
 
 impl Color {
-    /// `self` moved toward `other` by `t` in [0, 1], per channel.
     pub fn lerp(self, other: Self, t: f32) -> Self {
         let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t) as u8;
         Self {
@@ -98,7 +98,6 @@ impl Color {
         }
     }
 
-    /// `#rrggbb`, or `#rrggbbaa` when not opaque.
     pub fn to_hex(self) -> String {
         if self.alpha == 255 {
             format!("#{:02x}{:02x}{:02x}", self.red, self.green, self.blue)
@@ -164,19 +163,15 @@ pub struct Circle {
     pub color: Color,
 }
 
-/// An RGBA image a Module keeps and updates in place, stored column by column (views
-/// that scroll in time write one column per result). A render target uploads only
-/// the columns marked changed since it last drew the image; one it has not seen
-/// (first draw, another window) gets the whole image.
+/// Render targets upload only changed columns, or the whole image on first sight or resize.
 pub struct Image {
     id: u64,
     width: usize,
     height: usize,
-    /// Column-major: column `x` is `pixels[x * height..(x + 1) * height]`, top first.
+    /// Column-major, top-first.
     pixels: Vec<Color>,
     /// Bumped by `resize`: a target holding another revision uploads everything.
     revision: u64,
-    /// Columns changed since the last upload, each once (`marked` flags them).
     dirty: Vec<usize>,
     marked: Vec<bool>,
 }
@@ -195,7 +190,6 @@ impl Image {
         }
     }
 
-    /// Process-unique identity, for render targets that cache uploaded images.
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -212,8 +206,6 @@ impl Image {
         self.height
     }
 
-    /// Set the size and clear every pixel to transparent; the next draw uploads
-    /// the whole image.
     pub fn resize(&mut self, width: usize, height: usize) {
         self.width = width;
         self.height = height;
@@ -225,7 +217,7 @@ impl Image {
         self.marked.resize(width, false);
     }
 
-    /// Column `x` (top first) to rewrite; it is uploaded on the next draw.
+    /// Borrowing a column for mutation marks it for upload on the next draw.
     pub fn column_mut(&mut self, x: usize) -> &mut [Color] {
         if !self.marked[x] {
             self.marked[x] = true;
@@ -238,12 +230,10 @@ impl Image {
         &self.pixels[x * self.height..(x + 1) * self.height]
     }
 
-    /// Columns changed since the last upload.
     pub fn changed_columns(&self) -> &[usize] {
         &self.dirty
     }
 
-    /// A target uploaded the image: nothing is pending any more.
     pub fn mark_uploaded(&mut self) {
         for &x in &self.dirty {
             self.marked[x] = false;
@@ -258,20 +248,14 @@ impl Default for Image {
     }
 }
 
-/// Direction a time-scrolling picture moves: new content enters on the opposite
-/// edge. An `Image` stores time along its columns and the cross axis along each
-/// column (index 0 first); horizontal flows show index 0 at the top, vertical ones
-/// turn the picture a quarter clockwise, index 0 on the right.
+/// New content enters opposite the motion. Horizontal flows show index 0 within each column
+/// at the top; vertical flows rotate the picture clockwise, placing index 0 on the right.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Flow {
-    /// Newest at the right edge.
     #[default]
     Left,
-    /// Newest at the left edge.
     Right,
-    /// Newest at the bottom edge.
     Up,
-    /// Newest at the top edge.
     Down,
 }
 
@@ -321,9 +305,8 @@ pub trait RenderTarget {
     fn fill_rects(&mut self, clip: Rect, rects: &[ColoredRect]);
     fn circles(&mut self, clip: Rect, circles: &[Circle]);
     fn text(&mut self, clip: Rect, position: Point, text: &str, style: TextStyle);
-    /// `image` stretched over `rect` with smooth (bilinear) filtering, read as a
-    /// ring of time columns: the oldest edge (the one `flow` moves toward) shows
-    /// column `first_column`, the newest edge the column before it.
+    /// Use bilinear filtering. The oldest edge shows `first_column`, the newest the column before
+    /// it, wrapping at the image width. Upload changes, then call `Image::mark_uploaded`.
     fn scrolling_image(
         &mut self,
         clip: Rect,
@@ -369,8 +352,7 @@ impl RenderTarget for EguiRenderTarget<'_> {
         if rects.is_empty() {
             return;
         }
-        // One untessellated mesh for the whole batch: axis-aligned fills need no
-        // feathering, and per-rect shapes made dense bar/heat-map views CPU bound.
+        // Axis-aligned fills need no feathering; one mesh keeps dense views from becoming CPU bound.
         let mut mesh = eframe::egui::Mesh::default();
         mesh.reserve_vertices(rects.len() * 4);
         mesh.reserve_triangles(rects.len() * 2);
@@ -423,16 +405,13 @@ impl RenderTarget for EguiRenderTarget<'_> {
         let ctx = self.painter.ctx().clone();
         let pass = ctx.cumulative_pass_nr();
         let cache_id = Id::new("taffymeters.images");
-        // Shared per context; the map itself is not copied per draw.
         let cache = ctx.data_mut(|data| {
             Arc::clone(data.get_temp_mut_or_default::<Arc<Mutex<ImageCache>>>(cache_id))
         });
         let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
-        // Textures of images no longer drawn (closed Modules) are released.
         cache
             .entries
             .retain(|_, entry| pass.saturating_sub(entry.last_pass) < IMAGE_IDLE_PASSES);
-        // Repeat wraps the ring horizontally; linear filtering smooths both axes.
         let options = TextureOptions::LINEAR_REPEAT;
         let entry = match cache.entries.get_mut(&image.id()) {
             Some(entry) if entry.revision == image.revision() => {
@@ -476,8 +455,7 @@ impl RenderTarget for EguiRenderTarget<'_> {
         entry.last_pass = pass;
         let texture = entry.texture.id();
         image.mark_uploaded();
-        // Sample texel centers at the edges: the oldest edge shows `first_column`,
-        // the newest the column before it, the first and last rows unblended.
+        // Sample texel centers so the ring seam and outer rows do not blend with their neighbors.
         let (w, h) = (width as f32, height as f32);
         let u0 = (first_column % width) as f32 / w + 0.5 / w;
         let (u1, v0, v1) = (u0 + 1.0 - 1.0 / w, 0.5 / h, 1.0 - 0.5 / h);
@@ -512,7 +490,6 @@ impl RenderTarget for EguiRenderTarget<'_> {
 /// Passes an uploaded image may go undrawn before its texture is released.
 const IMAGE_IDLE_PASSES: u64 = 600;
 
-/// Textures of the `Image`s drawn in one egui context, by image id.
 #[derive(Default)]
 struct ImageCache {
     entries: std::collections::HashMap<u64, CachedImage>,
@@ -541,23 +518,18 @@ mod tests {
 
     #[test]
     fn each_flow_puts_the_newest_column_on_the_edge_opposite_its_motion() {
-        // Corners: top-left, top-right, bottom-left, bottom-right; (time, cross).
         let edge = |flow: Flow, corners: [usize; 2]| {
             let all = flow.corners();
             corners.map(|corner| all[corner])
         };
         let (newest, oldest) = (1.0, 0.0);
-        // Left: newest on the right, index 0 at the top.
         assert!(edge(Flow::Left, [1, 3]).iter().all(|c| c.0 == newest));
         assert!(edge(Flow::Left, [0, 2]).iter().all(|c| c.0 == oldest));
         assert!(edge(Flow::Left, [0, 1]).iter().all(|c| c.1 == 0.0));
-        // Right: newest on the left, index 0 still at the top.
         assert!(edge(Flow::Right, [0, 2]).iter().all(|c| c.0 == newest));
         assert!(edge(Flow::Right, [0, 1]).iter().all(|c| c.1 == 0.0));
-        // Up: newest at the bottom; turned clockwise, index 0 on the right.
         assert!(edge(Flow::Up, [2, 3]).iter().all(|c| c.0 == newest));
         assert!(edge(Flow::Up, [1, 3]).iter().all(|c| c.1 == 0.0));
-        // Down: newest at the top, index 0 on the right.
         assert!(edge(Flow::Down, [0, 1]).iter().all(|c| c.0 == newest));
         assert!(edge(Flow::Down, [1, 3]).iter().all(|c| c.1 == 0.0));
         for flow in Flow::ALL {

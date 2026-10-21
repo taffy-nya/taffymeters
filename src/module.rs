@@ -21,13 +21,12 @@ pub struct ModuleFrame<'a> {
     pub rect: Rect,
     pub monotonic_time: Duration,
     pub pointer: Option<Point>,
+    /// Scroll distance in logical points.
     pub scroll_delta_y: f32,
+    /// Multiplicative zoom factor; 1.0 means no zoom.
     pub zoom_delta: f32,
-    /// Colors resolved for this instance (theme, type style, instance overrides).
     pub palette: &'a Palette,
-    /// The workspace's reference level: where the user's signal usually peaks.
-    /// Views place it at `REFERENCE_HEIGHT`, so every Module fills a similar
-    /// height whatever the input's loudness. Display only: readouts stay dBFS.
+    /// Display gain only: readouts remain in dBFS regardless of the workspace reference.
     pub reference_dbfs: f32,
     pub renderer: &'a mut dyn RenderTarget,
 }
@@ -36,27 +35,20 @@ pub struct ModuleFrame<'a> {
 /// at the user's usual listening volume (music peaks: p50 −20, p90 −15, p99 −12.7,
 /// max −11 dBFS over 60 s), so everyday peaks stay within the views.
 pub const DEFAULT_REFERENCE_DBFS: f32 = -12.0;
-/// Range of the reference level the settings offer.
 pub const REFERENCE_DBFS_RANGE: (f32, f32) = (-60.0, 0.0);
-/// Fraction of a linear view's height (of the half height for signed views) at
-/// which a sample at the reference level is drawn. dB views (Spectrum,
-/// Spectrogram) put the reference at their top instead: a tilted spectrum's
-/// loudest bins sit well below the sample peak.
+/// Fraction of a linear view's height (half-height for signed views) reached by the reference.
+/// dB views put it at the top because tilted bins sit below the sample peak.
 pub const REFERENCE_HEIGHT: f32 = 0.9;
-/// Wheel zoom of every view per scroll point: the zoomed quantity scales by
-/// `exp(k · dy)`, the pace of the previous implementation's `1 + 0.001 · dy`.
+/// Wheel zoom scales the view quantity by `exp(k · dy)`.
 pub const WHEEL_ZOOM_PER_POINT: f32 = 0.001;
-/// Smallest wheel scroll (points) and pinch zoom change a view reacts to.
 pub const MIN_SCROLL_POINTS: f32 = 0.01;
 pub const MIN_ZOOM_CHANGE: f32 = 0.001;
 
-/// Linear view gain: a sample at the reference level reaches `REFERENCE_HEIGHT`
-/// of the (half) height.
 pub fn reference_gain(reference_dbfs: f32) -> f32 {
     REFERENCE_HEIGHT / 10.0_f32.powf(reference_dbfs / 20.0)
 }
 
-/// Repaint interval an animating Module requests: the default 60 fps display rate.
+/// Animating views target 60 fps.
 pub const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,17 +62,14 @@ pub struct StyleOption {
     pub label: &'static str,
 }
 
-/// Default minimum width and height of a Module, in logical points (one divider grid
-/// step).
+/// One divider grid step, in logical points.
 pub const MIN_EXTENT: f32 = 16.0;
 
 pub trait Module: Send {
     fn draw(&mut self, frame: ModuleFrame<'_>) -> ModuleResponse;
 
-    /// Smallest area, in logical points, the Module accepts. The Workspace never
-    /// shrinks a layout leaf below it unless the window itself is forced smaller. The
-    /// default (`MIN_EXTENT` square) only keeps a leaf reachable; content simply
-    /// scales down.
+    /// The Workspace respects this logical-point size unless the window is forced smaller.
+    /// The default only keeps the leaf reachable; content must scale down to fit.
     fn min_size(&self) -> Size {
         Size {
             width: MIN_EXTENT,
@@ -113,26 +102,22 @@ pub trait Module: Send {
     /// continuous analysis and History must keep running.
     fn set_visible(&mut self, _visible: bool) {}
 
-    /// Control of the instance's analysis subscription, when it reads audio data.
-    /// Settings, copying and persistence read and edit its `DataSpec` through it.
+    /// Settings, copying and persistence access the instance's analysis through this controller.
     fn data(&self) -> Option<&DataController> {
         None
     }
 
-    /// Name of an output of the instance's `DataSpec` in its settings.
+    /// Settings use this label for an output of the instance's `DataSpec`.
     fn output_label(&self, _output: OutputId) -> Option<&'static str> {
         None
     }
 
-    /// Theme roles the instance draws with now (its own parts and its active
-    /// style's); its color overrides offer these. A subset of its type's
-    /// `ModuleFactory::color_roles`.
+    /// Must be a subset of `ModuleFactory::color_roles` covering the active style and own parts.
     fn color_roles(&self) -> &[ColorRole] {
         &[]
     }
 
-    /// View parameters (ranges, scales, display channel): shown in the settings
-    /// and saved besides the `DataSpec`.
+    /// The Workspace shows these in settings and saves them separately from the `DataSpec`.
     fn view_settings(&self) -> Vec<ViewSetting> {
         Vec::new()
     }
@@ -146,9 +131,8 @@ pub trait ModuleFactory: Send + Sync {
     fn type_id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
 
-    /// Create an instance with its default analysis, or with the saved `data`
-    /// (a copy or a restored workspace). `data` must have the shape of the default
-    /// `DataSpec`; its parameters, durations and bindings are used as they are.
+    /// Accept saved data only if it matches the default graph's shape; preserve its parameters,
+    /// durations and bindings. Without saved data, use the default analysis.
     fn create(
         &self,
         services: &ModuleServices,
@@ -156,21 +140,17 @@ pub trait ModuleFactory: Send + Sync {
         data: Option<&DataSpec>,
     ) -> Result<Box<dyn Module>, RegistryError>;
 
-    /// The analysis a new instance starts with, for resetting its parameters in
-    /// the settings. `None` when the type has nothing adjustable to reset.
+    /// Settings use this to reset analysis parameters; return `None` if nothing is adjustable.
     fn default_data(&self) -> Option<DataSpec> {
         None
     }
 
-    /// Theme roles any instance of the type can draw with, whatever its style: the
-    /// colors a Module type style offers.
+    /// Must cover every role any instance can draw with, across all of its styles.
     fn color_roles(&self) -> &'static [ColorRole] {
         &[]
     }
 }
 
-/// What a styled instance lists for its color overrides: its style's roles, then
-/// its own not already listed.
 pub fn styled_color_roles(style: &[ColorRole], own: &[ColorRole]) -> Vec<ColorRole> {
     let mut roles = style.to_vec();
     for role in own {
@@ -181,9 +161,6 @@ pub fn styled_color_roles(style: &[ColorRole], own: &[ColorRole]) -> Vec<ColorRo
     roles
 }
 
-/// A Module that cannot show its content (an instance this build cannot restore,
-/// an input it cannot display) says why in the leaf's top-left corner, in the
-/// theme's Muted color.
 pub fn draw_notice(frame: &mut ModuleFrame<'_>, message: &str) {
     frame.renderer.text(
         frame.rect,
@@ -199,7 +176,6 @@ pub fn draw_notice(frame: &mut ModuleFrame<'_>, message: &str) {
     );
 }
 
-/// The spec an instance subscribes with: `saved` when it has the default's shape.
 pub fn spec_from_saved(
     default: DataSpec,
     saved: Option<&DataSpec>,
@@ -211,7 +187,6 @@ pub fn spec_from_saved(
     }
 }
 
-/// A view setting value as a number inside `range`.
 pub fn number_setting(
     key: &str,
     value: &SettingValue,
@@ -223,15 +198,12 @@ pub fn number_setting(
         .ok_or_else(|| ModuleError::InvalidSetting(key.to_owned()))
 }
 
-/// A view setting value as on/off.
 pub fn flag_setting(key: &str, value: &SettingValue) -> Result<bool, ModuleError> {
     value
         .flag()
         .ok_or_else(|| ModuleError::InvalidSetting(key.to_owned()))
 }
 
-/// An optional overlay of a Module (peak curve, guide lines, readout): hidden on a
-/// new instance, listed under "Overlays".
 pub fn overlay_setting(key: &'static str, label: &'static str, shown: bool) -> ViewSetting {
     ViewSetting {
         key,
@@ -243,7 +215,6 @@ pub fn overlay_setting(key: &'static str, label: &'static str, shown: bool) -> V
     }
 }
 
-/// Choices of a time view's `flow` setting: the direction the picture moves.
 const FLOW_CHOICES: &[Choice] = &[
     Choice {
         id: Flow::Left.id(),
@@ -265,8 +236,6 @@ const FLOW_CHOICES: &[Choice] = &[
 
 pub const FLOW_KEY: &str = "flow";
 
-/// The direction a time-scrolling view (Waveform, Spectrogram) moves; new
-/// instances move left, newest at the right edge.
 pub fn flow_setting(flow: Flow) -> ViewSetting {
     ViewSetting {
         key: FLOW_KEY,
@@ -280,7 +249,6 @@ pub fn flow_setting(flow: Flow) -> ViewSetting {
 
 pub const VISIBLE_SECONDS_KEY: &str = "visible_seconds";
 
-/// The visible span of a time-scrolling view, inside `range`.
 pub fn visible_seconds_setting(value: f32, range: (f32, f32), default: f32) -> ViewSetting {
     ViewSetting {
         key: VISIBLE_SECONDS_KEY,
@@ -297,9 +265,8 @@ pub fn visible_seconds_setting(value: f32, range: (f32, f32), default: f32) -> V
     }
 }
 
-/// Shortest and longest visible span of a time-scrolling view reading `output`:
-/// never more than the output's History, even a History shorter than `min_seconds`.
-/// `default_history_seconds` stands in when the output keeps no History.
+/// The visible span must fit the output's History, even when shorter than `min_seconds`.
+/// Use `default_history_seconds` when the output keeps no History.
 pub fn visible_range(
     controller: &DataController,
     output: OutputId,
@@ -316,7 +283,6 @@ pub fn visible_range(
     (min_seconds.min(history), history)
 }
 
-/// A view setting value as a flow direction.
 pub fn flow_value(key: &str, value: &SettingValue) -> Result<Flow, ModuleError> {
     match value {
         SettingValue::Choice(id) => Flow::from_id(id),
@@ -330,7 +296,6 @@ pub enum ModuleError {
     UnsupportedChannel,
     InvalidChannel(ChannelError),
     Control(ControlError),
-    /// Saved analysis whose graph differs from what this Module type reads.
     IncompatibleData,
     UnknownSetting(String),
     InvalidSetting(String),
@@ -370,7 +335,6 @@ mod tests {
     use super::*;
     use crate::dataflow::{FftConfig, Keep, NodeSpec, SOURCE, SharedAnalysisId};
 
-    /// Source → Channel → Fft, with the Fft output kept as the latest result.
     fn default_spec() -> DataSpec {
         let mut spec = DataSpec::new();
         let channel = spec.add(SOURCE, NodeSpec::Channel(ChannelSelection::Left));

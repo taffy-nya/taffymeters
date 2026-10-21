@@ -1,6 +1,3 @@
-//! Loudness Meter: one bar of the programme's 400 ms K-weighted momentary
-//! loudness (BS.1770), on the absolute LUFS scale shared with the Level Meter.
-
 use crate::{
     dataflow::{DataController, DataSpec, DataSubscription, Keep, NodeSpec, OutputId, SOURCE},
     extensions::{Registry, RegistryError},
@@ -17,12 +14,11 @@ use super::{Zones, bar_track, push_bar};
 
 pub const LOUDNESS_METER_MODULE_ID: &str = "taffymeters.loudness_meter";
 
-/// The colors the meters had at 70% and 85% of the −60…+3 scale.
+/// Zone thresholds at 70% and 85% of the −60…+3 LUFS scale.
 const LOUDNESS_ZONES: Zones = Zones {
     mid_from: -15.9,
     high_above: -6.45,
 };
-/// The trough and the zone colors.
 const COLOR_ROLES: &[ColorRole] = &[
     ColorRole::Surface,
     ColorRole::Low,

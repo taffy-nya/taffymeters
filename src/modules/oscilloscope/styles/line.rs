@@ -45,7 +45,7 @@ impl OscilloscopeStyle for LineOscilloscopeStyle {
                 color: context.palette.color(ColorRole::Primary),
             },
         );
-        // Redrawn when new PCM is published; nothing changes with display time.
+        // New PCM publication drives redraws; display time alone does not change the trace.
         ModuleResponse::default()
     }
 

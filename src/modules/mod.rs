@@ -41,8 +41,6 @@ mod tests {
     use super::*;
     use crate::{modules::test_support::PcmFixture, theme::ColorRole};
 
-    /// A type style offers exactly the roles some instance of the type, in one of
-    /// its styles, lets the user override: none it never draws with, none missing.
     #[test]
     fn type_color_roles_are_those_of_its_instances_across_styles() {
         let fixture = PcmFixture::new(2);

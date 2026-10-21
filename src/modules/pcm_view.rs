@@ -1,5 +1,3 @@
-//! Pieces shared by the built-in Modules that show source PCM (Oscilloscope, Waveform, Stereometer).
-
 use crate::{
     dataflow::{ChannelSelection, DataSpec, DataSubscription, Keep, OutputId, SOURCE},
     module::{
@@ -9,14 +7,12 @@ use crate::{
     settings::{SettingKind, SettingValue, ViewSetting, unit},
 };
 
-/// The source PCM output kept as `keep`: the whole analysis of these Modules.
 pub(super) fn pcm_spec(keep: Keep) -> (DataSpec, OutputId) {
     let mut spec = DataSpec::new();
     let output = spec.output(SOURCE, keep);
     (spec, output)
 }
 
-/// A subscription to the merged source PCM (or the saved equivalent).
 pub(super) fn subscribe_pcm(
     services: &ModuleServices,
     keep: Keep,
@@ -27,13 +23,11 @@ pub(super) fn subscribe_pcm(
     Ok((services.dataflow.subscribe(spec)?, output))
 }
 
-/// Scale of every PCM view, relative to the workspace reference level: 1× in the
-/// middle of a ±20 dB (logarithmic) range.
+/// Display gain relative to the workspace reference, with a symmetric ±20 dB range.
 pub(super) const SCALE_RANGE: (f32, f32) = (0.1, 10.0);
 pub(super) const SCALE_KEY: &str = "scale";
 pub(super) const CHANNEL_KEY: &str = "channel";
 
-/// Every PCM view starts at unit scale.
 pub(super) fn scale_setting(value: f32) -> ViewSetting {
     ViewSetting {
         key: SCALE_KEY,
@@ -50,7 +44,6 @@ pub(super) fn scale_setting(value: f32) -> ViewSetting {
     }
 }
 
-/// `scale` after the wheel turned over the view (unchanged elsewhere).
 pub(super) fn wheel_scale(scale: f32, frame: &ModuleFrame<'_>) -> f32 {
     if frame
         .pointer
@@ -64,7 +57,6 @@ pub(super) fn wheel_scale(scale: f32, frame: &ModuleFrame<'_>) -> f32 {
     }
 }
 
-/// Every PCM view starts with the mono average.
 pub(super) fn channel_setting(channel: ChannelSelection) -> ViewSetting {
     ViewSetting {
         key: CHANNEL_KEY,

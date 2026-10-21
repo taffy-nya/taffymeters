@@ -12,10 +12,7 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_oscilloscope_style(line::LineOscilloscopeStyleFactory)
 }
 
-/// The latest PCM chunk as a trace across `rect`. While the samples fit the
-/// width every one is a point; beyond that each column keeps its minimum and
-/// maximum, in time order and at their own sample positions, so peaks narrower
-/// than a column still show. The trace spans the chunk's first to last sample.
+/// Preserve narrow peaks with per-column extrema in sample order, avoiding a false zigzag.
 fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<Point>) {
     output.clear();
     let Some(chunk) = context.frame.pcm() else {
@@ -37,8 +34,7 @@ fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<P
         x: rect.min.x + index as f32 * x_per_frame,
         y: center_y - sample.clamp(-1.0, 1.0) * y_per_unit,
     };
-    // The selected channel (or the mono mix) per frame, before any reduction:
-    // extremes of a mix are those of the mixed signal.
+    // Mix before reduction: channel extrema do not determine the mixed signal's extrema.
     let mut samples = chunk
         .interleaved
         .chunks_exact(channels)
@@ -59,8 +55,7 @@ fn build_latest_trace(context: &OscilloscopeStyleContext<'_>, output: &mut Vec<P
     };
     let mut final_sample = (0, 0.0);
     for column in 0..columns {
-        // Column `c` covers frames [c·frames/columns, (c+1)·frames/columns): at
-        // least one, since there are more frames than columns.
+        // More frames than columns guarantees at least one sample per column.
         let end = (column + 1) * frames / columns;
         let Some(first) = samples.next() else {
             break;

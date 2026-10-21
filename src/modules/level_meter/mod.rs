@@ -1,8 +1,5 @@
-//! Level Meter (per channel sample peak) and Loudness Meter (programme momentary
-//! loudness). Both draw vertical bars on the same absolute −60…+3 scale. The Level
-//! Meter's bar is each publication interval's sample peak as is; its peak hold is
-//! computed by the dataflow in source time, so the Modules only draw the latest
-//! results.
+//! Level and Loudness meters share an absolute dBFS/LUFS scale.
+//! Peak hold runs in dataflow source time; drawing only consumes published results.
 
 mod loudness;
 
@@ -33,8 +30,6 @@ const METER_TOP: f32 = 3.0;
 const BAR_GAP: f32 = 5.0;
 const BAR_INSET: f32 = 8.0;
 const MAX_BARS: usize = 8;
-/// The trough and the zone colors; the peak hold mark is Secondary, like
-/// Spectrum's peak curve.
 const COLOR_ROLES: &[ColorRole] = &[
     ColorRole::Surface,
     ColorRole::Low,
@@ -44,14 +39,11 @@ const COLOR_ROLES: &[ColorRole] = &[
 ];
 const PEAK_MARKER_HEIGHT: f32 = 2.0;
 
-/// Level Meter colors: Low below −6 dBFS, Mid from −6 to 0 dBFS, High above full
-/// scale.
 const SAMPLE_PEAK_ZONES: Zones = Zones {
     mid_from: -6.0,
     high_above: 0.0,
 };
 
-/// The peak hold marker.
 const HELD_PEAK: PeakConfig = PeakConfig {
     hold_ms: 2_000.0,
     fall_db_per_second_squared: 30.0,
@@ -62,12 +54,10 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register_module(loudness::LoudnessMeterFactory)
 }
 
-/// `value` on the meter scale, 0 at the bottom and 1 at the top.
 fn normalized(value: f32) -> f32 {
     ((value - METER_BOTTOM) / (METER_TOP - METER_BOTTOM)).clamp(0.0, 1.0)
 }
 
-/// Track of bar `index` of `count` side by side in `rect`.
 fn bar_track(rect: Rect, index: usize, count: usize) -> Rect {
     let width = (rect.width() - BAR_GAP * (count + 1) as f32) / count.max(1) as f32;
     let left = rect.min.x + BAR_GAP + index as f32 * (width + BAR_GAP);
@@ -86,9 +76,7 @@ fn bar_track(rect: Rect, index: usize, count: usize) -> Rect {
 /// Where a meter's color changes, on its own scale (dBFS or LUFS).
 #[derive(Clone, Copy)]
 struct Zones {
-    /// Mid from this level up, inclusive.
     mid_from: f32,
-    /// High strictly above this level.
     high_above: f32,
 }
 
@@ -104,7 +92,6 @@ impl Zones {
     }
 }
 
-/// The track and its fill up to `level`, colored by the zone `level` is in.
 fn push_bar(
     rects: &mut Vec<ColoredRect>,
     palette: &Palette,
@@ -128,8 +115,6 @@ fn push_bar(
     });
 }
 
-/// The Level Meter's data: per channel sample peaks shown as they are by the bar,
-/// and held by a Peak for the marker.
 struct LevelMeterData {
     spec: DataSpec,
     bar: OutputId,
@@ -286,8 +271,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Top edge of every drawn rect after the background tracks: per channel the
-    /// fill, then the marker when shown.
     fn tops(target: &RecordingTarget, palette: &Palette) -> Vec<f32> {
         target
             .rects
@@ -312,8 +295,7 @@ mod tests {
             .unwrap();
         let mut target = RecordingTarget::default();
 
-        // Left at −6 dBFS, right at −12 dBFS: two bars, each up to its own peak
-        // within the first interval, with the markers at the same height.
+        // Magnitudes 0.5 and 0.25 correspond to -6.02 and -12.04 dBFS.
         fixture.feed(&repeat_frame(&[0.5, -0.25], BLOCK_FRAMES));
         draw(meter.as_mut(), &mut target, Duration::ZERO);
         let rose = tops(&target, &palette);
@@ -322,8 +304,7 @@ mod tests {
         assert!((rose[2] - height_of(-12.04)).abs() < 0.5, "{rose:?}");
         assert!((rose[1] - rose[0]).abs() < 0.5 && (rose[3] - rose[2]).abs() < 0.5);
 
-        // One silent interval: the bars drop to the bottom at once while the
-        // markers are still held.
+        // One publication interval is shorter than the peak hold time.
         fixture.feed(&vec![0.0; 2 * BLOCK_FRAMES]);
         target.clear();
         draw(meter.as_mut(), &mut target, Duration::ZERO);
