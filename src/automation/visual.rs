@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     fmt,
     fs::File,
     future::Future,
@@ -43,24 +44,20 @@ pub(crate) enum VisualError {
 }
 
 impl fmt::Display for VisualError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Initialization { stage, message } => {
                 write!(
-                    formatter,
+                    f,
                     "offscreen GPU initialization failed at {stage}: {message}"
                 )
             }
-            Self::Render { message } => write!(formatter, "offscreen rendering failed: {message}"),
+            Self::Render { message } => write!(f, "offscreen rendering failed: {message}"),
             Self::Png { path, message } => {
-                write!(
-                    formatter,
-                    "PNG operation failed for {}: {message}",
-                    path.display()
-                )
+                write!(f, "PNG operation failed for {}: {message}", path.display())
             }
             Self::InvalidDimensions { width, height } => {
-                write!(formatter, "invalid image dimensions {width}x{height}")
+                write!(f, "invalid image dimensions {width}x{height}")
             }
             Self::InvalidRgba {
                 width,
@@ -68,14 +65,14 @@ impl fmt::Display for VisualError {
                 expected_bytes,
                 actual_bytes,
             } => write!(
-                formatter,
+                f,
                 "RGBA8 data for {width}x{height} requires {expected_bytes} bytes, got {actual_bytes}"
             ),
         }
     }
 }
 
-impl std::error::Error for VisualError {}
+impl Error for VisualError {}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RendererFacts {

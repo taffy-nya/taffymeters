@@ -19,12 +19,12 @@ use crate::{
     audio::synthetic::{ManualInputDriver, SyntheticConfig},
     dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId},
     modules::{
-        BAR_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID, OSCILLOSCOPE_MODULE_ID,
-        SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
+        BARS_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID,
+        OSCILLOSCOPE_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
     },
     persistence::{PresetRef, WorkspaceStore},
     settings::{NodeParam, SettingValue},
-    theme::{ColorRole, Preset},
+    theme::{ColorRole, ThemePreset},
     workspace::{
         ActionOutcome, ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId,
         SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction, swatches,
@@ -258,12 +258,13 @@ fn drag_keeps_showing(
 }
 
 fn main_curve_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
-    stroke_colors(output, rect).contains(&rgba(Preset::Dark.palette().color(ColorRole::Primary)))
+    stroke_colors(output, rect)
+        .contains(&rgba(ThemePreset::Dark.palette().color(ColorRole::Primary)))
 }
 
 fn peak_curve_shown(output: &egui::FullOutput, rect: egui::Rect) -> bool {
     // Translucent: compare the color as egui stores it.
-    let peak = Preset::Dark.palette().color(ColorRole::Secondary);
+    let peak = ThemePreset::Dark.palette().color(ColorRole::Secondary);
     let drawn = egui::Color32::from_rgba_unmultiplied(peak.red, peak.green, peak.blue, peak.alpha)
         .to_srgba_unmultiplied();
     stroke_colors(output, rect).contains(&drawn)
@@ -735,8 +736,8 @@ fn s03() -> Result<Value, String> {
             index: 3,
         }],
     )?;
-    let dark = Preset::Dark.palette();
-    let light = Preset::Light.palette();
+    let dark = ThemePreset::Dark.palette();
+    let light = ThemePreset::Light.palette();
     let palette = |h: &Harness, id: ModuleInstanceId| {
         h.ws.observation()
             .module(id)
@@ -771,7 +772,7 @@ fn s03() -> Result<Value, String> {
     let type_scope = ColorScope::Type(SPECTRUM_MODULE_ID);
     h.in_settings(&[
         SettingsItem::Tab(Tab::Theme),
-        SettingsItem::Preset(Preset::Light),
+        SettingsItem::Preset(ThemePreset::Light),
     ])?;
     check(
         palette(&h, a)?.color(ColorRole::Primary) == light.color(ColorRole::Primary)
@@ -977,7 +978,7 @@ fn s04() -> Result<Value, String> {
         },
         WorkspaceAction::SetStyle {
             instance_id: a,
-            style_id: BAR_SPECTRUM_STYLE_ID,
+            style_id: BARS_SPECTRUM_STYLE_ID,
         },
         WorkspaceAction::SetViewSetting {
             instance_id: a,
@@ -1032,7 +1033,7 @@ fn s04() -> Result<Value, String> {
         },
         WorkspaceAction::SetReferenceLevel { dbfs: Some(-24.0) },
         WorkspaceAction::SetThemePreset {
-            preset: Preset::Light,
+            preset: ThemePreset::Light,
         },
         WorkspaceAction::SetColor {
             scope: ColorScope::Type(WAVEFORM_MODULE_ID),

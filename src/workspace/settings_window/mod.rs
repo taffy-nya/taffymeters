@@ -16,7 +16,7 @@ use crate::{
     dataflow::{ChannelSelection, NodeRef, OutputId},
     render::Color,
     settings::NodeParam,
-    theme::{ColorRole, Preset},
+    theme::{ColorRole, ThemePreset},
 };
 
 mod module_tab;
@@ -141,7 +141,7 @@ pub(crate) enum SettingsItem {
     CopyNotices,
     ClearNotices,
     Quit,
-    Preset(Preset),
+    Preset(ThemePreset),
     TextSize,
     ReferenceLevel,
     TypeStyle(&'static str),

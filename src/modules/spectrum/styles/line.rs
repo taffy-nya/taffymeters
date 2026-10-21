@@ -1,4 +1,4 @@
-use super::DEFAULT_SPECTRUM_STYLE_ID;
+use super::LINE_SPECTRUM_STYLE_ID;
 use crate::{
     modules::spectrum::style::{
         SpectrumPlot, SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory,
@@ -12,7 +12,7 @@ pub(super) struct LineSpectrumStyleFactory;
 
 impl SpectrumStyleFactory for LineSpectrumStyleFactory {
     fn style_id(&self) -> &'static str {
-        DEFAULT_SPECTRUM_STYLE_ID
+        LINE_SPECTRUM_STYLE_ID
     }
 
     fn display_name(&self) -> &'static str {

@@ -1,4 +1,4 @@
-use super::BAR_SPECTRUM_STYLE_ID;
+use super::BARS_SPECTRUM_STYLE_ID;
 use crate::{
     modules::spectrum::style::{SpectrumStyle, SpectrumStyleContext, SpectrumStyleFactory},
     plotting::spectrum_dbfs_between,
@@ -10,7 +10,7 @@ pub(super) struct BarSpectrumStyleFactory;
 
 impl SpectrumStyleFactory for BarSpectrumStyleFactory {
     fn style_id(&self) -> &'static str {
-        BAR_SPECTRUM_STYLE_ID
+        BARS_SPECTRUM_STYLE_ID
     }
 
     fn display_name(&self) -> &'static str {

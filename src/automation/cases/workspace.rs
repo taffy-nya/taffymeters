@@ -109,7 +109,7 @@ fn w01() -> Result<Value, String> {
         let module = o.module(id).ok_or("new instance missing")?;
         check(
             module.channel == Some(ChannelSelection::MonoAverage)
-                && module.active_style == Some(crate::modules::DEFAULT_SPECTRUM_STYLE_ID)
+                && module.active_style == Some(crate::modules::LINE_SPECTRUM_STYLE_ID)
                 && module.type_id == crate::modules::SPECTRUM_MODULE_ID,
             "split did not create a default instance of the same type",
         )?;

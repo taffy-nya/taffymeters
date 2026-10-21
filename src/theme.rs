@@ -141,17 +141,17 @@ impl Palette {
 
 impl Default for Palette {
     fn default() -> Self {
-        Preset::Dark.palette()
+        ThemePreset::Dark.palette()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Preset {
+pub enum ThemePreset {
     Dark,
     Light,
 }
 
-impl Preset {
+impl ThemePreset {
     pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
 
     pub fn id(self) -> &'static str {
@@ -223,7 +223,7 @@ impl Preset {
 /// global roles, the base text size and the per-Module-type styles.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThemeSettings {
-    #[serde(default = "default_preset")]
+    #[serde(default = "default_theme_preset")]
     pub preset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_size: Option<f32>,
@@ -233,8 +233,8 @@ pub struct ThemeSettings {
     pub type_styles: BTreeMap<String, RoleOverrides>,
 }
 
-fn default_preset() -> String {
-    Preset::Dark.id().to_owned()
+fn default_theme_preset() -> String {
+    ThemePreset::Dark.id().to_owned()
 }
 
 /// Smallest and largest base text size the theme accepts.
@@ -243,14 +243,14 @@ pub const TEXT_SIZE_RANGE: (f32, f32) = (8.0, 24.0);
 impl ThemeSettings {
     pub fn dark() -> Self {
         Self {
-            preset: default_preset(),
+            preset: default_theme_preset(),
             ..Self::default()
         }
     }
 
     /// The preset in use; unknown presets (a newer build's) fall back to Dark.
-    pub fn preset(&self) -> Preset {
-        Preset::from_id(&self.preset).unwrap_or(Preset::Dark)
+    pub fn preset(&self) -> ThemePreset {
+        ThemePreset::from_id(&self.preset).unwrap_or(ThemePreset::Dark)
     }
 
     /// Global roles: preset plus the workspace's edits.
@@ -293,10 +293,10 @@ mod tests {
         assert_eq!(palette.color(ColorRole::Secondary), green);
         assert_eq!(
             palette.color(ColorRole::Low),
-            Preset::Dark.palette().color(ColorRole::Low)
+            ThemePreset::Dark.palette().color(ColorRole::Low)
         );
 
-        theme.preset = Preset::Light.id().into();
+        theme.preset = ThemePreset::Light.id().into();
         let palette = theme.resolve("spectrum", &overrides);
         assert_eq!(palette.color(ColorRole::Primary), red, "override kept");
         assert_eq!(
@@ -306,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             palette.color(ColorRole::Low),
-            Preset::Light.palette().color(ColorRole::Low),
+            ThemePreset::Light.palette().color(ColorRole::Low),
             "unset role follows the new global theme"
         );
         assert!(!palette.dark);
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn heat_map_passes_through_the_ramp_and_rises_in_opacity() {
-        let palette = Preset::Dark.palette();
+        let palette = ThemePreset::Dark.palette();
         assert_eq!(palette.heat(0.0).alpha, 0);
         let low = palette.heat(1.0 / 3.0);
         assert_eq!((low.red, low.green, low.blue), {
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn heat_map_blends_low_into_mid_between_one_and_two_thirds() {
-        for preset in [Preset::Dark, Preset::Light] {
+        for preset in [ThemePreset::Dark, ThemePreset::Light] {
             let palette = preset.palette();
             let low = palette.color(ColorRole::Low);
             let mid = palette.color(ColorRole::Mid);

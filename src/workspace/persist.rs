@@ -365,7 +365,7 @@ impl Workspace {
         current: usize,
     ) -> Result<(), WorkspaceError> {
         self.theme = file.theme;
-        if crate::theme::Preset::from_id(&self.theme.preset).is_none() {
+        if crate::theme::ThemePreset::from_id(&self.theme.preset).is_none() {
             self.push_notice(format!(
                 "Theme {:?} unavailable; showing Dark",
                 self.theme.preset

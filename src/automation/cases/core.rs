@@ -367,7 +367,7 @@ fn c04() -> Result<Value, String> {
             && ma.channel == Some(ChannelSelection::MonoAverage)
             && mb.channel == Some(ChannelSelection::Right)
             && mb.active_style == Some(crate::modules::PIXEL_SPECTRUM_STYLE_ID)
-            && ma.active_style == Some(crate::modules::DEFAULT_SPECTRUM_STYLE_ID),
+            && ma.active_style == Some(crate::modules::LINE_SPECTRUM_STYLE_ID),
         "instances not independent",
     )?;
     action(&mut ws, WorkspaceAction::CloseModule { instance_id: b })?;

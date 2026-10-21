@@ -119,7 +119,7 @@ fn themed_layout(ws: &mut Workspace) -> Result<(), String> {
     action(
         ws,
         WorkspaceAction::SetThemePreset {
-            preset: crate::theme::Preset::Light,
+            preset: crate::theme::ThemePreset::Light,
         },
     )?;
     action(
@@ -357,7 +357,7 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
         (
             "spectrum-bars",
             SPECTRUM_MODULE_ID,
-            Some(crate::modules::BAR_SPECTRUM_STYLE_ID),
+            Some(crate::modules::BARS_SPECTRUM_STYLE_ID),
         ),
         (
             "spectrum-pixel",

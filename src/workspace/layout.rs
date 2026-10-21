@@ -2,14 +2,16 @@
 //! the Module objects themselves are owned by the Workspace, so moving a leaf never
 //! touches the object or its analysis subscriptions.
 
+use std::{error::Error, fmt};
+
 use eframe::egui::{Pos2, Rect, Vec2, pos2};
 
 use super::ModuleInstanceId;
 
 /// Grid step for divider positions, in logical points.
-pub(crate) const GRID_STEP: f32 = 16.0;
+pub(crate) const GRID_STEP_POINTS: f32 = 16.0;
 /// Half width of the overlay divider hit zone, in logical points.
-pub(crate) const DIVIDER_HALF_WIDTH: f32 = 3.0;
+pub(crate) const DIVIDER_HALF_WIDTH_POINTS: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct SplitId(pub(crate) u64);
@@ -125,8 +127,8 @@ pub(crate) enum LayoutError {
     NotEmpty,
 }
 
-impl std::fmt::Display for LayoutError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingLeaf(id) => write!(f, "module {} is not in this layout", id.0),
             Self::MissingSplit(id) => write!(f, "split {} is not in this layout", id.0),
@@ -135,6 +137,8 @@ impl std::fmt::Display for LayoutError {
         }
     }
 }
+
+impl Error for LayoutError {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DividerGeometry {
@@ -153,12 +157,12 @@ impl DividerGeometry {
     pub(crate) fn hit_rect(&self) -> Rect {
         match self.axis {
             Axis::LeftRight => Rect::from_min_max(
-                pos2(self.position - DIVIDER_HALF_WIDTH, self.parent.min.y),
-                pos2(self.position + DIVIDER_HALF_WIDTH, self.parent.max.y),
+                pos2(self.position - DIVIDER_HALF_WIDTH_POINTS, self.parent.min.y),
+                pos2(self.position + DIVIDER_HALF_WIDTH_POINTS, self.parent.max.y),
             ),
             Axis::TopBottom => Rect::from_min_max(
-                pos2(self.parent.min.x, self.position - DIVIDER_HALF_WIDTH),
-                pos2(self.parent.max.x, self.position + DIVIDER_HALF_WIDTH),
+                pos2(self.parent.min.x, self.position - DIVIDER_HALF_WIDTH_POINTS),
+                pos2(self.parent.max.x, self.position + DIVIDER_HALF_WIDTH_POINTS),
             ),
         }
     }
@@ -178,11 +182,13 @@ impl DividerGeometry {
                 let free = pointer.clamp(low, high);
                 if grid {
                     let mut snapped = if free - low <= high - free { low } else { high };
-                    let first = ((low - start) / GRID_STEP).ceil();
-                    let last = ((high - start) / GRID_STEP).floor();
+                    let first = ((low - start) / GRID_STEP_POINTS).ceil();
+                    let last = ((high - start) / GRID_STEP_POINTS).floor();
                     if first <= last {
-                        let nearest = ((free - start) / GRID_STEP).round().clamp(first, last);
-                        let point = start + nearest * GRID_STEP;
+                        let nearest = ((free - start) / GRID_STEP_POINTS)
+                            .round()
+                            .clamp(first, last);
+                        let point = start + nearest * GRID_STEP_POINTS;
                         if (point - free).abs() <= (snapped - free).abs() {
                             snapped = point;
                         }

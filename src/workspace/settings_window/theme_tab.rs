@@ -7,7 +7,7 @@ use super::{
     widgets::{Number, card, card_with_reset, choice, color_row, differs, number_row, row},
 };
 use crate::{
-    theme::{ColorRole, Preset, RoleOverrides, TEXT_SIZE_RANGE},
+    theme::{ColorRole, RoleOverrides, TEXT_SIZE_RANGE, ThemePreset},
     workspace::{ColorScope, Workspace, WorkspaceAction, window::Controls},
 };
 
@@ -22,7 +22,7 @@ impl Workspace {
         card(ui, "Appearance", |ui| {
             let preset = self.theme.preset();
             row(ui, "Preset", |ui| {
-                for option in Preset::ALL {
+                for option in ThemePreset::ALL {
                     if choice(
                         ui,
                         preset == option,

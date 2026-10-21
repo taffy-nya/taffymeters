@@ -19,6 +19,8 @@ mod window;
 
 use std::{
     collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt,
     sync::Arc,
     time::Duration,
 };
@@ -30,12 +32,13 @@ use crate::{
     audio::{SourceState, SourceStatus},
     dataflow::{ChannelSelection, ControlError, NodeRef, NodeSpec, OutputId, SharedAnalysisId},
     extensions::{Registry, RegistryError},
-    module::{Module, ModuleServices},
+    live::LiveAudioError,
+    module::{Module, ModuleError, ModuleServices},
     modules,
     persistence::{InputConfig, ModuleFile, PersistError, PresetRef, WorkspaceStore},
     render::Color,
     settings::SettingValue,
-    theme::{ColorRole, Palette, Preset, RoleOverrides, ThemeSettings},
+    theme::{ColorRole, Palette, RoleOverrides, ThemePreset, ThemeSettings},
 };
 
 pub(crate) use desktop::{DesktopProbe, NativeDesktop};
@@ -224,7 +227,7 @@ pub(crate) enum WorkspaceAction {
         color: Option<Color>,
     },
     SetThemePreset {
-        preset: Preset,
+        preset: ThemePreset,
     },
     /// `None` follows the preset's size.
     SetTextSize {
@@ -268,9 +271,9 @@ pub(crate) enum WorkspaceError {
     IdExhausted,
     Layout(LayoutError),
     Registry(RegistryError),
-    Module(crate::module::ModuleError),
+    Module(ModuleError),
     Control(ControlError),
-    LiveAudio(crate::live::LiveAudioError),
+    LiveAudio(LiveAudioError),
     Persist(PersistError),
     /// The workspace has no directory to save to.
     NoStore,
@@ -282,20 +285,20 @@ pub(crate) enum WorkspaceError {
     CopyIncomplete(String),
 }
 
-impl std::fmt::Display for WorkspaceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for WorkspaceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StaleInstance(id) => write!(f, "module instance {} is no longer available", id.0),
             Self::StaleWindow(id) => write!(f, "window {} is no longer available", id.0),
             Self::Unsupported(action) => write!(f, "operation is not supported: {action}"),
             Self::InsufficientSpace(action) => write!(f, "not enough space to {action}"),
             Self::IdExhausted => f.write_str("workspace IDs are exhausted"),
-            Self::Layout(error) => std::fmt::Display::fmt(error, f),
-            Self::Registry(error) => std::fmt::Display::fmt(error, f),
-            Self::Module(error) => std::fmt::Display::fmt(error, f),
-            Self::Control(error) => std::fmt::Display::fmt(error, f),
-            Self::LiveAudio(error) => std::fmt::Display::fmt(error, f),
-            Self::Persist(error) => std::fmt::Display::fmt(error, f),
+            Self::Layout(error) => error.fmt(f),
+            Self::Registry(error) => error.fmt(f),
+            Self::Module(error) => error.fmt(f),
+            Self::Control(error) => error.fmt(f),
+            Self::LiveAudio(error) => error.fmt(f),
+            Self::Persist(error) => error.fmt(f),
             Self::NoStore => f.write_str("this workspace has no save location"),
             Self::PresetExists(name) => write!(f, "preset {name:?} already exists"),
             Self::NoSuchPreset(name) => write!(f, "preset {name:?} is not available"),
@@ -307,7 +310,7 @@ impl std::fmt::Display for WorkspaceError {
     }
 }
 
-impl std::error::Error for WorkspaceError {}
+impl Error for WorkspaceError {}
 
 impl From<RegistryError> for WorkspaceError {
     fn from(error: RegistryError) -> Self {
@@ -315,8 +318,8 @@ impl From<RegistryError> for WorkspaceError {
     }
 }
 
-impl From<crate::module::ModuleError> for WorkspaceError {
-    fn from(error: crate::module::ModuleError) -> Self {
+impl From<ModuleError> for WorkspaceError {
+    fn from(error: ModuleError) -> Self {
         Self::Module(error)
     }
 }
@@ -330,6 +333,12 @@ impl From<LayoutError> for WorkspaceError {
 impl From<ControlError> for WorkspaceError {
     fn from(error: ControlError) -> Self {
         Self::Control(error)
+    }
+}
+
+impl From<LiveAudioError> for WorkspaceError {
+    fn from(error: LiveAudioError) -> Self {
+        Self::LiveAudio(error)
     }
 }
 
@@ -870,8 +879,7 @@ impl Workspace {
         self.live
             .as_mut()
             .ok_or(WorkspaceError::Unsupported("pause after shutdown"))?
-            .toggle_pause()
-            .map_err(WorkspaceError::LiveAudio)?;
+            .toggle_pause()?;
         Ok(ActionOutcome::Applied)
     }
 

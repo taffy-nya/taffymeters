@@ -4,8 +4,8 @@ mod pixel;
 
 use crate::extensions::{Registry, RegistryError};
 
-pub const DEFAULT_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.line";
-pub const BAR_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.bars";
+pub const LINE_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.line";
+pub const BARS_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.bars";
 pub const PIXEL_SPECTRUM_STYLE_ID: &str = "taffymeters.spectrum.pixel";
 
 pub(super) fn register(registry: &mut Registry) -> Result<(), RegistryError> {

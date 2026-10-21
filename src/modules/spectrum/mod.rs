@@ -23,17 +23,17 @@ pub mod style;
 mod styles;
 
 use self::style::{SpectrumPlot, SpectrumStyle, SpectrumStyleContext};
-pub use self::styles::{BAR_SPECTRUM_STYLE_ID, DEFAULT_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID};
+pub use self::styles::{BARS_SPECTRUM_STYLE_ID, LINE_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID};
 
 pub const SPECTRUM_MODULE_ID: &str = "taffymeters.spectrum";
 
 const STYLE_OPTIONS: &[StyleOption] = &[
     StyleOption {
-        id: DEFAULT_SPECTRUM_STYLE_ID,
+        id: LINE_SPECTRUM_STYLE_ID,
         label: "Curve",
     },
     StyleOption {
-        id: BAR_SPECTRUM_STYLE_ID,
+        id: BARS_SPECTRUM_STYLE_ID,
         label: "Bars",
     },
     StyleOption {
@@ -123,7 +123,7 @@ impl SpectrumModuleFactory {
             .dataflow
             .subscribe(spec)
             .map_err(ModuleError::from)?;
-        let style = registry.create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)?;
+        let style = registry.create_spectrum_style(LINE_SPECTRUM_STYLE_ID)?;
         Ok(SpectrumModule {
             source: services.source.clone(),
             controller: subscription.controller(),
@@ -135,7 +135,7 @@ impl SpectrumModuleFactory {
             snapshot: Snapshot::default(),
             color_roles: styled_color_roles(style.color_roles(), OWN_COLOR_ROLES),
             style,
-            style_id: DEFAULT_SPECTRUM_STYLE_ID,
+            style_id: LINE_SPECTRUM_STYLE_ID,
             view: SpectrumCoordinates {
                 min_frequency_hz: 20.0,
                 max_frequency_hz: DEFAULT_MAX_FREQUENCY_HZ,
@@ -682,7 +682,7 @@ mod tests {
         let peak_y = PEAK_TEST_COORDINATES.y_for_dbfs(-20.0, PEAK_TEST_RECT);
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
-        for style_id in [BAR_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID] {
+        for style_id in [BARS_SPECTRUM_STYLE_ID, PIXEL_SPECTRUM_STYLE_ID] {
             let mut style = registry.create_spectrum_style(style_id).unwrap();
             let without = style_rects(style.as_mut(), &plot(None));
             assert!(
@@ -770,7 +770,7 @@ mod tests {
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
         let mut curve = registry
-            .create_spectrum_style(DEFAULT_SPECTRUM_STYLE_ID)
+            .create_spectrum_style(LINE_SPECTRUM_STYLE_ID)
             .unwrap();
         let mut target = RecordingTarget::default();
         curve.draw(
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(second.channel(), Some(ChannelSelection::Right));
 
         let before_style_change = fixture.services.dataflow.metrics();
-        second.set_style(BAR_SPECTRUM_STYLE_ID, &registry).unwrap();
+        second.set_style(BARS_SPECTRUM_STYLE_ID, &registry).unwrap();
         assert_eq!(fixture.services.dataflow.metrics(), before_style_change);
 
         let samples: Vec<f32> = (0..4096).flat_map(|_| [0.05_f32, -0.05]).collect();

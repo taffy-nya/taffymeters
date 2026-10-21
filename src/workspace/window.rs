@@ -24,11 +24,11 @@ use crate::{
 
 /// Width of the right / bottom split entries, in logical points; a quarter of the leaf
 /// when that is less.
-pub(crate) const SPLIT_ZONE: f32 = 20.0;
+pub(crate) const SPLIT_ZONE_POINTS: f32 = 20.0;
 /// Thickness of the native resize edges and size of the corner squares; small windows
 /// scale both down so the middle stays content.
-pub(crate) const RESIZE_EDGE: f32 = 6.0;
-pub(crate) const RESIZE_CORNER: f32 = 12.0;
+pub(crate) const RESIZE_EDGE_POINTS: f32 = 6.0;
+pub(crate) const RESIZE_CORNER_POINTS: f32 = 12.0;
 /// Poll interval for state that changes without new audio data or input.
 const STATE_POLL: Duration = Duration::from_millis(250);
 /// How long a left press in a locked window shows the "locked" hint.
@@ -198,8 +198,8 @@ impl ResizeEdge {
     /// corner is at most a quarter of the shorter side, edges half a corner thick.
     fn rect(self, window: Rect) -> Rect {
         let (min, max) = (window.min, window.max);
-        let c = RESIZE_CORNER.min(window.width().min(window.height()) / 4.0);
-        let b = RESIZE_EDGE * c / RESIZE_CORNER;
+        let c = RESIZE_CORNER_POINTS.min(window.width().min(window.height()) / 4.0);
+        let b = RESIZE_EDGE_POINTS * c / RESIZE_CORNER_POINTS;
         match self {
             Self::NorthWest => Rect::from_min_max(min, pos2(min.x + c, min.y + c)),
             Self::NorthEast => Rect::from_min_max(pos2(max.x - c, min.y), pos2(max.x, min.y + c)),
@@ -338,11 +338,14 @@ fn to_render_rect(rect: Rect) -> RenderRect {
 const SPLIT_SIDES: [Side; 2] = [Side::Right, Side::Below];
 
 fn split_zone(rect: Rect, side: Side) -> Rect {
-    let right = SPLIT_ZONE.min(rect.width() / 4.0);
+    let right = SPLIT_ZONE_POINTS.min(rect.width() / 4.0);
     match side {
         Side::Right => Rect::from_min_max(pos2(rect.max.x - right, rect.min.y), rect.max),
         _ => Rect::from_min_max(
-            pos2(rect.min.x, rect.max.y - SPLIT_ZONE.min(rect.height() / 4.0)),
+            pos2(
+                rect.min.x,
+                rect.max.y - SPLIT_ZONE_POINTS.min(rect.height() / 4.0),
+            ),
             pos2(rect.max.x - right, rect.max.y),
         ),
     }

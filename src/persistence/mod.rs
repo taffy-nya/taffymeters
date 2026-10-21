@@ -9,7 +9,7 @@
 //! subscription IDs), readers, results, caches and hover state are never written.
 //! Bindings are renumbered per file.
 
-use std::{collections::BTreeMap, fmt, fs, io, path::PathBuf};
+use std::{collections::BTreeMap, error::Error, fmt, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -199,7 +199,7 @@ impl fmt::Display for PersistError {
     }
 }
 
-impl std::error::Error for PersistError {}
+impl Error for PersistError {}
 
 /// A workspace from the bytes of a file (`label` names it in errors). Besides
 /// the format, the geometry must be usable: at least one window, each on a listed

@@ -25,7 +25,7 @@ use crate::modules::pcm_view::{
 
 pub const OSCILLOSCOPE_MODULE_ID: &str = "taffymeters.oscilloscope";
 
-const OSCILLOSCOPE_STYLES: &[StyleOption] = &[StyleOption {
+const STYLE_OPTIONS: &[StyleOption] = &[StyleOption {
     id: LINE_OSCILLOSCOPE_STYLE_ID,
     label: "Line",
 }];
@@ -181,7 +181,7 @@ impl Module for OscilloscopeModule {
     }
 
     fn style_options(&self) -> &'static [StyleOption] {
-        OSCILLOSCOPE_STYLES
+        STYLE_OPTIONS
     }
 
     fn active_style(&self) -> Option<&'static str> {
@@ -189,7 +189,7 @@ impl Module for OscilloscopeModule {
     }
 
     fn set_style(&mut self, style_id: &str, registry: &Registry) -> Result<(), RegistryError> {
-        let option = OSCILLOSCOPE_STYLES
+        let option = STYLE_OPTIONS
             .iter()
             .find(|option| option.id == style_id)
             .ok_or_else(|| RegistryError::UnknownStyle(style_id.to_owned()))?;
