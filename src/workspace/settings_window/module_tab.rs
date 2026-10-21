@@ -1,6 +1,8 @@
 //! The Module tab: layout actions, type, style and channel, analysis nodes, the
 //! Module's own view sections, colors and closing the instance.
 
+use std::sync::Arc;
+
 use eframe::egui::{self, RichText};
 
 use super::{
@@ -168,7 +170,7 @@ impl Workspace {
         // The channel is one row however the Module implements it (an analysis
         // Channel node or a display choice), matching the 1 / 2 / M shortcuts.
         if let Some(selected) = module.channel() {
-            let descriptor = self.services.source.descriptor().clone();
+            let descriptor = Arc::clone(self.services.source.descriptor());
             row(ui, "Channel", |ui| {
                 let options = channel_options(&descriptor)
                     .chain(std::iter::once((0, ChannelSelection::MonoAverage)));
@@ -394,7 +396,7 @@ impl Workspace {
         for param in NodeParam::of(&entry.spec) {
             match (param, entry.spec) {
                 (NodeParam::Channel, NodeSpec::Channel(current)) => {
-                    let descriptor = self.services.source.descriptor().clone();
+                    let descriptor = Arc::clone(self.services.source.descriptor());
                     row(ui, param.label(), |ui| {
                         let options = channel_options(&descriptor)
                             .chain(std::iter::once((0, ChannelSelection::MonoAverage)));

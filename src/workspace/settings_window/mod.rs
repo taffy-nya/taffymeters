@@ -430,7 +430,7 @@ impl Workspace {
         // same row of the new page.
         if settings.shown != (instance, window) {
             settings.shown = (instance, window);
-            if let Some(id) = ctx.memory(|memory| memory.focused()) {
+            if let Some(id) = ctx.memory(egui::Memory::focused) {
                 ctx.data_mut(|data| data.remove_temp::<String>(id));
                 ctx.memory_mut(|memory| memory.surrender_focus(id));
             }
@@ -510,7 +510,7 @@ impl Workspace {
                 .show(ui, |ui| match settings.tab {
                     Tab::Module => match instance {
                         Some(instance) => {
-                            self.module_tab(ui, instance, &mut controls, &mut actions)
+                            self.module_tab(ui, instance, &mut controls, &mut actions);
                         }
                         None => {
                             ui.label(RichText::new("Click a module to edit it").weak());
@@ -529,7 +529,7 @@ impl Workspace {
                         self.workspace_tab(ui, &mut settings, &mut controls, &mut actions);
                     }
                     Tab::Theme => {
-                        self.theme_tab(ui, &mut settings.type_style, &mut controls, &mut actions)
+                        self.theme_tab(ui, &mut settings.type_style, &mut controls, &mut actions);
                     }
                 });
         });

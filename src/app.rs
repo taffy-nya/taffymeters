@@ -21,7 +21,7 @@ use crate::workspace::{WindowId, Workspace, WorkspaceAction};
 #[cfg(feature = "automation")]
 type SharedTrace = Option<Arc<Mutex<crate::automation::Trace>>>;
 
-pub struct App {
+pub(crate) struct App {
     workspace: Arc<Mutex<Workspace>>,
     started_at: Instant,
     /// A data wake-up is already queued for the next host pass.
@@ -37,7 +37,7 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl App {
-    pub fn new(workspace: Workspace) -> Self {
+    pub(crate) fn new(workspace: Workspace) -> Self {
         Self {
             workspace: Arc::new(Mutex::new(workspace)),
             started_at: Instant::now(),

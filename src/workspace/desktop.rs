@@ -98,9 +98,7 @@ impl DesktopProbe for NativeDesktop {
     fn work_area(&self, point: Pos2) -> Option<Rect> {
         use windows_sys::Win32::{
             Foundation::POINT,
-            Graphics::Gdi::{
-                GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-            },
+            Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint},
         };
         let point = POINT {
             x: point.x.round() as i32,
@@ -111,28 +109,14 @@ impl DesktopProbe for NativeDesktop {
         if monitor.is_null() {
             return None;
         }
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            rcMonitor: unsafe { std::mem::zeroed() },
-            rcWork: unsafe { std::mem::zeroed() },
-            dwFlags: 0,
-        };
-        // SAFETY: `info` is a valid MONITORINFO with cbSize set.
-        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
-            return None;
-        }
-        let work = info.rcWork;
-        Some(Rect::from_min_max(
-            pos2(work.left as f32, work.top as f32),
-            pos2(work.right as f32, work.bottom as f32),
-        ))
+        super::native::monitor_info(monitor).map(|info| super::native::rect(info.rcWork))
     }
 
     fn displays(&self) -> Vec<Display> {
         use windows_sys::{
             Win32::{
                 Foundation::{LPARAM, RECT},
-                Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
+                Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
                 UI::HiDpi::{
                     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
                     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
@@ -173,37 +157,21 @@ impl DesktopProbe for NativeDesktop {
         monitors
             .into_iter()
             .filter_map(|monitor| {
-                let mut info = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    rcMonitor: unsafe { std::mem::zeroed() },
-                    rcWork: unsafe { std::mem::zeroed() },
-                    dwFlags: 0,
-                };
-                // SAFETY: `info` is a valid MONITORINFO with cbSize set.
-                if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
-                    return None;
-                }
-                let (mut dpi_x, mut dpi_y) = (96, 96);
+                let info = super::native::monitor_info(monitor)?;
+                let (mut dpi_x, mut dpi_y) = (0, 0);
                 // SAFETY: valid monitor handle and output pointers.
                 let scale = if unsafe {
                     GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y)
                 } == 0
                 {
-                    dpi_x as f32 / 96.0
+                    super::native::dpi_scale(dpi_x)
                 } else {
                     1.0
                 };
-                let work = info.rcWork;
                 let bounds = info.rcMonitor;
                 Some(Display {
-                    work: Rect::from_min_max(
-                        pos2(work.left as f32, work.top as f32),
-                        pos2(work.right as f32, work.bottom as f32),
-                    ),
-                    bounds: Rect::from_min_max(
-                        pos2(bounds.left as f32, bounds.top as f32),
-                        pos2(bounds.right as f32, bounds.bottom as f32),
-                    ),
+                    work: super::native::rect(info.rcWork),
+                    bounds: super::native::rect(bounds),
                     scale,
                     // The primary monitor holds the desktop origin.
                     primary: bounds.left == 0 && bounds.top == 0,

@@ -283,7 +283,7 @@ pub(super) fn format_value(value: f32, unit: &str) -> String {
         "×" if value.abs() < 10.0 => (value, unit, 2),
         _ => (value, unit, 1),
     };
-    let scale = 10f32.powi(decimals);
+    let scale = 10_f32.powi(decimals);
     let rounded = (value * scale).round() / scale;
     // Values that round to zero print as "0", not "-0".
     let rounded = if rounded == 0.0 { 0.0 } else { rounded };

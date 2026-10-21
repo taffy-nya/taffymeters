@@ -411,6 +411,8 @@ impl RenderTarget for EguiRenderTarget<'_> {
         first_column: usize,
         flow: Flow,
     ) {
+        use std::sync::{Arc, Mutex, PoisonError};
+
         use eframe::egui::{
             Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Vertex, pos2,
         };
@@ -423,12 +425,9 @@ impl RenderTarget for EguiRenderTarget<'_> {
         let cache_id = Id::new("taffymeters.images");
         // Shared per context; the map itself is not copied per draw.
         let cache = ctx.data_mut(|data| {
-            data.get_temp_mut_or_default::<std::sync::Arc<std::sync::Mutex<ImageCache>>>(cache_id)
-                .clone()
+            Arc::clone(data.get_temp_mut_or_default::<Arc<Mutex<ImageCache>>>(cache_id))
         });
-        let mut cache = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
         // Textures of images no longer drawn (closed Modules) are released.
         cache
             .entries

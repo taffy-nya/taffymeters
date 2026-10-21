@@ -17,7 +17,7 @@ pub struct FftConfig {
 /// Largest accepted FFT window: four times the largest the settings offer. Saved
 /// or hand-written configurations beyond it are rejected before anything is
 /// planned or allocated.
-pub const MAX_WINDOW_SIZE: usize = 65_536;
+pub(super) const MAX_WINDOW_SIZE: usize = 65_536;
 
 impl FftConfig {
     pub fn new(

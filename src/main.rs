@@ -3,6 +3,8 @@
     windows_subsystem = "windows"
 )]
 
+use std::sync::Arc;
+
 use eframe::{egui_wgpu, wgpu};
 
 pub mod audio;
@@ -73,12 +75,12 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
-    let descriptor = live.reader().descriptor().clone();
+    let descriptor = Arc::clone(live.reader().descriptor());
     eprintln!(
         "system audio: {} Hz, {} channels, {:?}",
         descriptor.sample_rate_hz, descriptor.channel_count, descriptor.channel_layout
     );
-    let desktop = std::sync::Arc::new(workspace::NativeDesktop);
+    let desktop = Arc::new(workspace::NativeDesktop);
     let workspace = match workspace::Workspace::open(live, store, desktop) {
         Ok(workspace) => workspace,
         Err(error) => {

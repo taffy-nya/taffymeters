@@ -460,7 +460,7 @@ pub(crate) struct WindowSummary {
     pub(crate) builder: egui::ViewportBuilder,
 }
 
-pub struct Workspace {
+pub(crate) struct Workspace {
     modules: HashMap<ModuleInstanceId, ModuleEntry>,
     windows: BTreeMap<WindowId, WindowState>,
     registry: Registry,
@@ -556,7 +556,7 @@ impl Workspace {
     /// A workspace with one window holding one default Spectrum, not saved, on the
     /// native desktop (automation only; the product opens its session).
     #[cfg(feature = "automation")]
-    pub fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
+    pub(crate) fn new(live: LiveAudio, always_on_top: bool) -> Result<Self, WorkspaceError> {
         let mut workspace = Self::empty(live, Arc::new(NativeDesktop))?;
         let first = workspace.create_module(modules::SPECTRUM_MODULE_ID)?;
         let window = WindowState::new(Layout::with_leaf(first), INITIAL_WINDOW_SIZE, always_on_top);

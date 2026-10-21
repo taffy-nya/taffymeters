@@ -8,6 +8,19 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/taffy-nya/taffymeters"
 publish = false
 
+[lints.rust]
+unreachable_pub = "warn"
+
+[lints.clippy]
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+manual_let_else = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unseparated_literal_suffix = "warn"
+
 [features]
 automation = ["dep:image", "dep:sha2", "windows-sys/Win32_System_WindowsProgramming"]
 

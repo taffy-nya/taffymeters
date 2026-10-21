@@ -30,7 +30,7 @@ pub(super) struct Case {
 }
 
 impl Case {
-    pub fn pass(id: &str, observed: Value) -> Self {
+    pub(super) fn pass(id: &str, observed: Value) -> Self {
         Self {
             id: id.into(),
             status: Status::Pass,
@@ -41,7 +41,7 @@ impl Case {
             artifacts: vec![],
         }
     }
-    pub fn fail(id: &str, step: &str, error: impl ToString) -> Self {
+    pub(super) fn fail(id: &str, step: &str, error: impl ToString) -> Self {
         Self {
             id: id.into(),
             status: Status::Fail,
@@ -52,7 +52,7 @@ impl Case {
             artifacts: vec![],
         }
     }
-    pub fn incomplete(id: &str, status: Status, reason: impl ToString) -> Self {
+    pub(super) fn incomplete(id: &str, status: Status, reason: impl ToString) -> Self {
         Self {
             id: id.into(),
             status,
@@ -132,7 +132,7 @@ pub(super) fn new(suite: &str, input: Value) -> Report {
 }
 
 impl Report {
-    pub fn finish(&mut self) {
+    pub(super) fn finish(&mut self) {
         self.status = if self.cases.iter().any(|c| c.status == Status::Fail) {
             Status::Fail
         } else if self.cases.iter().any(|c| c.status == Status::Unavailable) {
@@ -149,14 +149,14 @@ impl Report {
             Status::Pass
         };
     }
-    pub fn exit_code(&self) -> i32 {
+    pub(super) fn exit_code(&self) -> i32 {
         match self.status {
             Status::Pass => 0,
             Status::Fail => 1,
             _ => 3,
         }
     }
-    pub fn save(&self, output: &Path) -> Result<PathBuf, String> {
+    pub(super) fn save(&self, output: &Path) -> Result<PathBuf, String> {
         let path = output.join("report.json");
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;

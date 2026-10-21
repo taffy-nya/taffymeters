@@ -562,7 +562,7 @@ impl ManualInputDriver {
         let dropped_start = start_status.dropped_blocks;
         let invalid_start = start_status.invalid_samples;
         let total_frames = interleaved.len() / channels;
-        let mut frame_offset = 0usize;
+        let mut frame_offset = 0_usize;
         while frame_offset < total_frames {
             if Instant::now() >= deadline {
                 return Err(SyntheticError::Timeout {
@@ -723,7 +723,7 @@ impl ManualInputDriver {
         // thread, so a bare park would cost one OS timer tick (up to ~15.6 ms on
         // Windows) per block. Yield first; one block normally drains in microseconds.
         const YIELD_ROUNDS: u32 = 1024;
-        let mut rounds = 0u32;
+        let mut rounds = 0_u32;
         loop {
             self.ensure_running()?;
             let frontier = self
@@ -950,12 +950,9 @@ fn realtime_worker(
         sample_rate_hz,
     );
     let mut next_frame = 0_u64;
-    let mut state = match control.run.lock() {
-        Ok(state) => state,
-        Err(_) => {
-            telemetry.device_lost(SyntheticError::LockPoisoned.to_string());
-            return;
-        }
+    let Ok(mut state) = control.run.lock() else {
+        telemetry.device_lost(SyntheticError::LockPoisoned.to_string());
+        return;
     };
     loop {
         let wait = match state.state {

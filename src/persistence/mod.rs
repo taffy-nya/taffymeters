@@ -507,7 +507,7 @@ mod tests {
             file.displays[0].hint = Some(DisplayHint {
                 origin_px: [0.0, 0.0],
                 scale: 0.0,
-            })
+            });
         });
         assert_eq!(
             parse("test", &serde_json::to_vec(&file).unwrap()).unwrap(),

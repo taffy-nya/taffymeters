@@ -23,6 +23,7 @@ use std::sync::{
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
     System::Threading::GetCurrentThreadId,
     UI::{
         HiDpi::GetDpiForWindow,
@@ -35,12 +36,13 @@ use windows_sys::Win32::{
             BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, EnumThreadWindows,
             GetCursorPos, GetMessagePos, GetWindowRect, GetWindowTextW, HWND_TOP, IsIconic,
             IsZoomed, MINMAXINFO, SC_KEYMENU, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-            SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, WINDOWPOS, WM_CAPTURECHANGED,
-            WM_CHAR, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN,
-            WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
-            WM_RBUTTONDOWN, WM_SIZING, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_WINDOWPOSCHANGED, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
-            WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+            SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, USER_DEFAULT_SCREEN_DPI,
+            WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+            WM_GETMINMAXINFO, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_RBUTTONDOWN, WM_SIZING, WM_SYSCHAR,
+            WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WINDOWPOSCHANGED, WMSZ_BOTTOM,
+            WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
+            WMSZ_TOPRIGHT,
         },
     },
 };
@@ -164,20 +166,31 @@ fn find_window(window: WindowId) -> Option<HWND> {
     search.found
 }
 
-fn frame_of(hwnd: HWND) -> Option<Rect> {
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
+pub(super) fn rect(rect: RECT) -> Rect {
+    Rect::from_min_max(
+        pos2(rect.left as f32, rect.top as f32),
+        pos2(rect.right as f32, rect.bottom as f32),
+    )
+}
+
+pub(super) fn monitor_info(monitor: HMONITOR) -> Option<MONITORINFO> {
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..MONITORINFO::default()
     };
+    // SAFETY: `info` is a MONITORINFO with `cbSize` set; a bad handle fails the call.
+    (unsafe { GetMonitorInfoW(monitor, &mut info) } != 0).then_some(info)
+}
+
+/// Scale of a Win32 DPI value relative to 100%.
+pub(super) fn dpi_scale(dpi: u32) -> f32 {
+    dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32
+}
+
+fn frame_of(hwnd: HWND) -> Option<Rect> {
+    let mut frame = RECT::default();
     // SAFETY: valid output pointer.
-    (unsafe { GetWindowRect(hwnd, &mut rect) } != 0).then(|| {
-        Rect::from_min_max(
-            pos2(rect.left as f32, rect.top as f32),
-            pos2(rect.right as f32, rect.bottom as f32),
-        )
-    })
+    (unsafe { GetWindowRect(hwnd, &mut frame) } != 0).then(|| rect(frame))
 }
 
 fn cursor() -> Pos2 {
@@ -396,14 +409,14 @@ fn sizing_targets(hwnd: HWND, window: WindowId) -> Sizing {
         .collect();
     let displays = NativeDesktop.displays();
     // SAFETY: a window of this thread.
-    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
     let min = min_track_size(hwnd);
     Sizing {
         start: frame_of(hwnd).unwrap_or(Rect::NOTHING),
         cursor: cursor(),
         others,
         displays,
-        threshold: desktop::SNAP_DISTANCE_POINTS * dpi as f32 / 96.0,
+        threshold: desktop::SNAP_DISTANCE_POINTS * dpi_scale(dpi),
         min: vec2(min.0 as f32, min.1 as f32),
     }
 }

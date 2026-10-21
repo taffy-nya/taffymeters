@@ -386,7 +386,7 @@ fn shared_updates_change_every_member_at_once_and_local_updates_fork() {
     dataflow
         .handle
         .update_shared(SharedAnalysisId(9), |spec| {
-            spec.set_node(peak_node, peak(300.0))
+            spec.set_node(peak_node, peak(300.0));
         })
         .unwrap();
     for member in [&a, &b] {
@@ -408,7 +408,7 @@ fn shared_updates_change_every_member_at_once_and_local_updates_fork() {
                 hold_ms: f32::NAN,
                 fall_db_per_second_squared: 1.0,
             }),
-        )
+        );
     });
     assert!(matches!(invalid, Err(ControlError::InvalidSpec(_))));
     assert_eq!(
@@ -536,7 +536,7 @@ fn repeated_updates_replace_nodes_instead_of_accumulating() {
                 spec.set_node(
                     fft,
                     NodeSpec::Fft(FftConfig::new(size, 16, -160.0).unwrap()),
-                )
+                );
             })
             .unwrap();
     }
@@ -564,7 +564,7 @@ fn concurrent_edits_of_one_subscription_serialize() {
                 start.wait();
                 controller
                     .update(|spec| {
-                        spec.set_node(channel, NodeSpec::Channel(ChannelSelection::Right))
+                        spec.set_node(channel, NodeSpec::Channel(ChannelSelection::Right));
                     })
                     .unwrap();
                 finish.wait();
@@ -1085,7 +1085,7 @@ fn time_history_keeps_its_window_and_drops_old_chunks_after_gaps() {
     let drained = |frame: u64| {
         wait("block recycled", || {
             (dataflow.handle.processed_through_frame().unwrap() >= frame).then_some(())
-        })
+        });
     };
     drained(1_600);
     // With the worker held, the single-block queue accepts one block and drops the

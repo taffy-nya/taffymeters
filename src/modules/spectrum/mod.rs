@@ -992,7 +992,7 @@ mod tests {
                 spec.set_node(
                     fft_node,
                     NodeSpec::Fft(FftConfig::new(1_024, 256, -160.0).unwrap()),
-                )
+                );
             })
             .unwrap();
         source[1]
@@ -1049,12 +1049,11 @@ mod tests {
         let fixture = runtime_fixture();
         let registry = Registry::default();
 
-        let error =
-            match ModuleFactory::create(&SpectrumModuleFactory, &fixture.services, &registry, None)
-            {
-                Ok(_) => panic!("a Spectrum module requires its registered visual style"),
-                Err(error) => error,
-            };
+        let Err(error) =
+            ModuleFactory::create(&SpectrumModuleFactory, &fixture.services, &registry, None)
+        else {
+            panic!("a Spectrum module requires its registered visual style")
+        };
         assert!(matches!(error, RegistryError::UnknownStyle(_)));
         wait_for_subscriptions(&fixture.services.dataflow, 0);
     }

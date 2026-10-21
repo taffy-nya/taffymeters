@@ -1265,11 +1265,12 @@ impl Engine {
             match node.kernel {
                 Kernel::Channel { .. } => channels += 1,
                 Kernel::Fft(_) => ffts += 1,
-                Kernel::Levels { .. } | Kernel::Loudness { .. } => levels += 1,
                 Kernel::Tilt { .. } | Kernel::Smooth { .. } | Kernel::Gain { .. } => spectrum += 1,
                 // A Peak counts with the chain it follows.
                 Kernel::Peak { .. } if node.fft.is_some() => spectrum += 1,
-                Kernel::Peak { .. } => levels += 1,
+                Kernel::Levels { .. } | Kernel::Loudness { .. } | Kernel::Peak { .. } => {
+                    levels += 1;
+                }
                 Kernel::Source { .. } => {}
             }
         }

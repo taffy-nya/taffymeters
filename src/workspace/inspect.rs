@@ -7,7 +7,7 @@ use eframe::egui::{Pos2, Rect, Vec2};
 use super::{Axis, ModuleInstanceId, SplitId, WindowId, Workspace};
 use crate::{
     audio::SourceStatus,
-    dataflow::ChannelSelection,
+    dataflow::{ChannelSelection, DataController},
     module::Module,
     settings::SettingValue,
     theme::{Palette, RoleOverrides, ThemeSettings},
@@ -98,7 +98,7 @@ impl Workspace {
                 window_id: self.window_of(*id),
                 channel: entry.module.channel(),
                 active_style: entry.module.active_style(),
-                data: entry.module.data().map(|controller| controller.spec()),
+                data: entry.module.data().map(DataController::spec),
                 view: entry
                     .module
                     .view_settings()

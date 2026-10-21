@@ -654,9 +654,9 @@ pub(crate) fn compare_rgba(
     }
 
     let total_pixels = u64::from(expected.width) * u64::from(expected.height);
-    let mut changed_pixels = 0u64;
-    let mut max_channel_delta = 0u8;
-    let mut channel_error_sums = [0u128; 4];
+    let mut changed_pixels = 0_u64;
+    let mut max_channel_delta = 0_u8;
+    let mut channel_error_sums = [0_u128; 4];
     let mut diff_bbox: Option<DiffBoundingBox> = None;
     for (pixel_index, (expected_pixel, actual_pixel)) in expected
         .rgba8

@@ -34,20 +34,24 @@ fn count_allocation() {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count_allocation();
+        // SAFETY: forwarded unchanged; the caller upholds `GlobalAlloc::alloc`'s contract.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count_allocation();
+        // SAFETY: as in `alloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count_allocation();
+        // SAFETY: as in `alloc`; `ptr` came from this allocator, that is from `System`.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: as in `realloc`.
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -141,6 +145,7 @@ struct ThreadCpu(windows_sys::Win32::Foundation::HANDLE);
 // SAFETY: a duplicated thread handle may be used from any thread.
 #[cfg(all(windows, feature = "automation"))]
 unsafe impl Send for ThreadCpu {}
+// SAFETY: the handle is only passed to thread-time queries, which may run concurrently.
 #[cfg(all(windows, feature = "automation"))]
 unsafe impl Sync for ThreadCpu {}
 

@@ -19,10 +19,11 @@ use super::{
         match_displays, place, saved_frame,
     },
     layout::{Axis, Layout, Node, Split},
+    settings_window::SettingsWindow,
 };
 use crate::{
     LiveAudio,
-    dataflow::{DataSpec, SharedAnalysisId},
+    dataflow::{DataController, DataSpec, SharedAnalysisId},
     module::{Module, ModuleFrame, ModuleResponse, draw_notice},
     persistence::{
         DEFAULT_PRESET, DisplayFile, DisplayHint, FORMAT_VERSION, LayoutFile, ModuleFile,
@@ -50,7 +51,7 @@ impl ModuleConfig {
     pub(super) fn of(entry: &ModuleEntry) -> Self {
         Self {
             type_id: entry.type_id,
-            data: entry.module.data().map(|controller| controller.spec()),
+            data: entry.module.data().map(DataController::spec),
             style: entry
                 .preserved_style
                 .clone()
@@ -97,7 +98,7 @@ impl Workspace {
     /// The last session in `store`, or the built-in Default preset when there is
     /// none. An unreadable session file is reported and protected: the process runs
     /// on the Default preset and never saves over it.
-    pub fn open(
+    pub(crate) fn open(
         live: LiveAudio,
         store: WorkspaceStore,
         desktop: Arc<dyn DesktopProbe + Send + Sync>,
@@ -279,7 +280,7 @@ impl Workspace {
         let anchor = self
             .settings
             .as_ref()
-            .and_then(|settings| settings.window())
+            .and_then(SettingsWindow::window)
             .and_then(|id| self.windows.get(&id))
             .or_else(|| self.windows.values().next());
         let current = anchor

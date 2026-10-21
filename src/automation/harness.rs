@@ -46,7 +46,7 @@ struct FakeNative {
 
 impl FakeDesktop {
     /// One 1920×1080 monitor at 100% with a 40 px taskbar at the bottom.
-    pub fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Self::with_displays(vec![Display {
             work: Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0)),
             bounds: Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0)),
@@ -55,7 +55,7 @@ impl FakeDesktop {
         }])
     }
 
-    pub fn with_displays(displays: Vec<Display>) -> Arc<Self> {
+    pub(super) fn with_displays(displays: Vec<Display>) -> Arc<Self> {
         Arc::new(Self {
             button_down: AtomicBool::new(false),
             displays: Mutex::new(displays),
@@ -63,7 +63,7 @@ impl FakeDesktop {
         })
     }
 
-    pub fn set_button_down(&self, down: bool) {
+    pub(super) fn set_button_down(&self, down: bool) {
         self.button_down.store(down, Ordering::Relaxed);
     }
 
@@ -72,12 +72,12 @@ impl FakeDesktop {
     }
 
     /// Body drags that started a move so far.
-    pub fn moves_started(&self) -> usize {
+    pub(super) fn moves_started(&self) -> usize {
         self.native().moves_started
     }
 
     /// Take the positions `place` set so far.
-    pub fn take_placed(&self) -> Vec<(WindowId, Pos2)> {
+    pub(super) fn take_placed(&self) -> Vec<(WindowId, Pos2)> {
         std::mem::take(&mut self.native().placed)
     }
 
@@ -238,13 +238,13 @@ pub(super) struct Harness {
 
 impl Harness {
     /// Drive `ws` on a fresh simulated desktop (one 1920×1080 monitor).
-    pub fn new(ws: Workspace) -> Self {
+    pub(super) fn new(ws: Workspace) -> Self {
         Self::with_desktop(ws, FakeDesktop::new())
     }
 
     /// Drive `ws` on `desktop`, which the Workspace then uses too. Windows open at
     /// the scale of its primary display.
-    pub fn with_desktop(mut ws: Workspace, desktop: Arc<FakeDesktop>) -> Self {
+    pub(super) fn with_desktop(mut ws: Workspace, desktop: Arc<FakeDesktop>) -> Self {
         ws.set_desktop(Arc::clone(&desktop) as Arc<dyn DesktopProbe + Send + Sync>);
         let new_window_ppp = desktop
             .displays()
@@ -281,24 +281,24 @@ impl Harness {
         harness
     }
 
-    pub fn window(&self, id: WindowId) -> Result<&SimWindow, String> {
+    pub(super) fn window(&self, id: WindowId) -> Result<&SimWindow, String> {
         self.windows
             .get(&id)
             .ok_or_else(|| format!("window {} is not open", id.0))
     }
 
-    pub fn window_mut(&mut self, id: WindowId) -> Result<&mut SimWindow, String> {
+    pub(super) fn window_mut(&mut self, id: WindowId) -> Result<&mut SimWindow, String> {
         self.windows
             .get_mut(&id)
             .ok_or_else(|| format!("window {} is not open", id.0))
     }
 
-    pub fn context(&self) -> egui::Context {
+    pub(super) fn context(&self) -> egui::Context {
         self.windows[&self.focus].context.clone()
     }
 
     /// Size of the focused window (logical points).
-    pub fn set_size(&mut self, size: Vec2) {
+    pub(super) fn set_size(&mut self, size: Vec2) {
         if let Some(window) = self.windows.get_mut(&self.focus) {
             window.size = size.max(window.min_size);
         }
@@ -344,7 +344,7 @@ impl Harness {
     }
 
     /// Workspace windows only (the settings window excluded).
-    pub fn workspace_windows(&self) -> impl Iterator<Item = (&WindowId, &SimWindow)> {
+    pub(super) fn workspace_windows(&self) -> impl Iterator<Item = (&WindowId, &SimWindow)> {
         self.windows.iter().filter(|(id, _)| **id != SETTINGS)
     }
 
@@ -381,7 +381,7 @@ impl Harness {
 
     /// Another program (or the OS) moves a window to `position`: its group
     /// follows.
-    pub fn external_move(&mut self, id: WindowId, position: Pos2) -> Result<(), String> {
+    pub(super) fn external_move(&mut self, id: WindowId, position: Pos2) -> Result<(), String> {
         let window = self.window_mut(id)?;
         window.position = position;
         let frame = Self::frame_of(window);
@@ -394,7 +394,7 @@ impl Harness {
     /// threshold: the pass that sees the drag asks the desktop to move the window
     /// (and its group) with the pointer. Returns the pointer on the desktop
     /// (physical) at the press; `move_pointer` continues from there.
-    pub fn grab(&mut self, key: ControlKey) -> Result<Pos2, String> {
+    pub(super) fn grab(&mut self, key: ControlKey) -> Result<Pos2, String> {
         let target = self.locate(&key)?;
         let start = self.hover(&key, target)?;
         self.desktop.set_button_down(true);
@@ -413,7 +413,7 @@ impl Harness {
 
     /// The pointer of the move in progress is at `cursor` (desktop, physical);
     /// `alt`: Alt is held. Every window then runs a pass.
-    pub fn move_pointer(&mut self, cursor: Pos2, alt: bool) -> Result<(), String> {
+    pub(super) fn move_pointer(&mut self, cursor: Pos2, alt: bool) -> Result<(), String> {
         self.desktop.pointer(cursor, alt);
         self.apply_moves();
         self.desktop.native().tracker.settle(cursor);
@@ -421,14 +421,14 @@ impl Harness {
     }
 
     /// Escape during the move: the windows go back and the move ends.
-    pub fn cancel_move(&mut self) -> Result<(), String> {
+    pub(super) fn cancel_move(&mut self) -> Result<(), String> {
         self.desktop.escape();
         self.apply_moves();
         self.frame_all()
     }
 
     /// Release the button that `grab` pressed.
-    pub fn release(&mut self) -> Result<(), String> {
+    pub(super) fn release(&mut self) -> Result<(), String> {
         self.desktop.release();
         self.desktop.set_button_down(false);
         let at = self.grabbed.take().unwrap_or_default();
@@ -442,7 +442,7 @@ impl Harness {
     }
 
     /// Run one UI pass of `id` with `events`.
-    pub fn frame_window(
+    pub(super) fn frame_window(
         &mut self,
         id: WindowId,
         events: Vec<Event>,
@@ -523,13 +523,13 @@ impl Harness {
 
     /// One pass of the focused window. A closed focus window runs nothing; its
     /// controls then report Missing.
-    pub fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
+    pub(super) fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
         self.frame_window(self.focus, events).unwrap_or_default()
     }
 
     /// One pass of every open window, including windows opened during this call
     /// (new windows show their first frame).
-    pub fn frame_all(&mut self) -> Result<(), String> {
+    pub(super) fn frame_all(&mut self) -> Result<(), String> {
         let mut done = HashSet::new();
         loop {
             let pending: Vec<WindowId> = self
@@ -550,14 +550,14 @@ impl Harness {
         }
     }
 
-    pub fn take_commands(&mut self, id: WindowId) -> Vec<ViewportCommand> {
+    pub(super) fn take_commands(&mut self, id: WindowId) -> Vec<ViewportCommand> {
         self.windows
             .get_mut(&id)
             .map(|window| std::mem::take(&mut window.commands))
             .unwrap_or_default()
     }
 
-    pub fn locate(&self, key: &ControlKey) -> Result<ControlTarget, String> {
+    pub(super) fn locate(&self, key: &ControlKey) -> Result<ControlTarget, String> {
         let target = self
             .windows
             .get(&self.focus)
@@ -597,7 +597,7 @@ impl Harness {
     }
 
     /// Rest the pointer on a control (it reports hovered), without clicking.
-    pub fn point_at(&mut self, key: ControlKey) -> Result<Pos2, String> {
+    pub(super) fn point_at(&mut self, key: ControlKey) -> Result<Pos2, String> {
         let target = self.locate(&key)?;
         self.hover(&key, target)
     }
@@ -616,16 +616,20 @@ impl Harness {
         }
     }
 
-    pub fn click(&mut self, key: ControlKey) -> Result<(), String> {
+    pub(super) fn click(&mut self, key: ControlKey) -> Result<(), String> {
         let target = self.locate(&key)?;
         self.click_target(key, target)
     }
 
-    pub fn click_target(&mut self, key: ControlKey, target: ControlTarget) -> Result<(), String> {
+    pub(super) fn click_target(
+        &mut self,
+        key: ControlKey,
+        target: ControlTarget,
+    ) -> Result<(), String> {
         self.click_with(key, target, PointerButton::Primary)
     }
 
-    pub fn right_click(&mut self, key: ControlKey) -> Result<(), String> {
+    pub(super) fn right_click(&mut self, key: ControlKey) -> Result<(), String> {
         let target = self.locate(&key)?;
         self.click_with(key, target, PointerButton::Secondary)
     }
@@ -663,7 +667,7 @@ impl Harness {
         Ok(())
     }
 
-    pub fn double_click(&mut self, key: ControlKey) -> Result<(), String> {
+    pub(super) fn double_click(&mut self, key: ControlKey) -> Result<(), String> {
         let target = self.locate(&key)?;
         let pos = self.hover(&key, target)?;
         let none = egui::Modifiers::NONE;
@@ -676,7 +680,7 @@ impl Harness {
 
     /// Press on a control, move through `path` (one frame per point) and release at
     /// the last point. `escape_at` injects Escape after that many moves.
-    pub fn drag(
+    pub(super) fn drag(
         &mut self,
         key: ControlKey,
         path: &[Pos2],
@@ -720,7 +724,11 @@ impl Harness {
     /// Right-click `body` in the focused window (opening the settings window on it),
     /// then click `items` in the settings window in order. Focus returns to the
     /// original window if it still exists; the settings window stays open.
-    pub fn settings(&mut self, body: ControlKey, items: &[SettingsItem]) -> Result<(), String> {
+    pub(super) fn settings(
+        &mut self,
+        body: ControlKey,
+        items: &[SettingsItem],
+    ) -> Result<(), String> {
         let origin = self.focus;
         self.right_click(body)?;
         if !self.windows.contains_key(&SETTINGS) {
@@ -737,7 +745,7 @@ impl Harness {
     }
 
     /// Click `items` in the open settings window; focus stays there.
-    pub fn in_settings(&mut self, items: &[SettingsItem]) -> Result<(), String> {
+    pub(super) fn in_settings(&mut self, items: &[SettingsItem]) -> Result<(), String> {
         self.focus = SETTINGS;
         self.frame(vec![]);
         for item in items {
@@ -749,7 +757,7 @@ impl Harness {
         Ok(())
     }
 
-    pub fn dropdown(&mut self, opener: ControlKey, item: ControlKey) -> Result<(), String> {
+    pub(super) fn dropdown(&mut self, opener: ControlKey, item: ControlKey) -> Result<(), String> {
         self.click(opener)?;
         self.frame(vec![]);
         self.click(item)?;
@@ -769,7 +777,7 @@ impl Harness {
 
     /// Press and release `key` with `modifiers` held (also in the frames' modifier
     /// state, which egui's shortcuts read).
-    pub fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+    pub(super) fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
         let previous = self.modifiers;
         self.modifiers = previous | modifiers;
         self.frame(vec![Self::key_event(key, true, modifiers)]);
@@ -779,7 +787,7 @@ impl Harness {
         self.modifiers = previous;
     }
 
-    pub fn key(&mut self, key: egui::Key) {
+    pub(super) fn key(&mut self, key: egui::Key) {
         self.key_with(key, egui::Modifiers::NONE);
     }
 }

@@ -5,9 +5,10 @@
 //! configuration directories; settings operations use real egui events.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
@@ -888,7 +889,7 @@ fn s03() -> Result<Value, String> {
             && theme
                 .type_styles
                 .get(SPECTRUM_MODULE_ID)
-                .is_none_or(|s| s.is_empty())
+                .is_none_or(BTreeMap::is_empty)
             && h.ws
                 .observation()
                 .module(b)
@@ -1733,7 +1734,8 @@ fn s07() -> Result<Value, String> {
         primary: true,
     }]);
     let (live, _driver) = manual_live()?;
-    let ws = Workspace::open(live, dir.store(), desktop.clone()).map_err(|e| e.to_string())?;
+    let ws = Workspace::open(live, dir.store(), Arc::<FakeDesktop>::clone(&desktop))
+        .map_err(|e| e.to_string())?;
     let mut scaled = Harness::with_desktop(ws, desktop);
     scaled.frame_all()?;
     let frames: Vec<egui::Rect> = scaled
