@@ -812,37 +812,21 @@ impl RealtimeSource {
         let scratch = vec![0.0; sample_capacity];
         #[cfg(test)]
         let producer_frame = Arc::new(AtomicU64::new(0));
-        #[cfg(test)]
-        let worker_frame = Arc::clone(&producer_frame);
         telemetry.set_state(SourceState::Running);
 
-        #[cfg(test)]
+        let producer = RealtimeProducer {
+            endpoint,
+            synthetic,
+            scratch,
+            max_lag_blocks,
+            control: thread_control,
+            telemetry: thread_telemetry,
+            #[cfg(test)]
+            producer_frame: Arc::clone(&producer_frame),
+        };
         let worker = thread::Builder::new()
             .name("taffymeters-synthetic-input".to_owned())
-            .spawn(move || {
-                realtime_worker(
-                    endpoint,
-                    synthetic,
-                    scratch,
-                    max_lag_blocks,
-                    thread_control,
-                    thread_telemetry,
-                    worker_frame,
-                );
-            });
-        #[cfg(not(test))]
-        let worker = thread::Builder::new()
-            .name("taffymeters-synthetic-input".to_owned())
-            .spawn(move || {
-                realtime_worker(
-                    endpoint,
-                    synthetic,
-                    scratch,
-                    max_lag_blocks,
-                    thread_control,
-                    thread_telemetry,
-                );
-            });
+            .spawn(move || realtime_worker(producer));
         let worker = worker.map_err(|error| {
             telemetry.set_state(SourceState::Stopped);
             SyntheticError::ProducerStart(error.to_string())
@@ -925,15 +909,28 @@ impl Drop for RealtimeSource {
     }
 }
 
-fn realtime_worker(
-    mut endpoint: CaptureEndpoint,
+struct RealtimeProducer {
+    endpoint: CaptureEndpoint,
     synthetic: SyntheticConfig,
-    mut scratch: Vec<f32>,
+    scratch: Vec<f32>,
     max_lag_blocks: usize,
     control: Arc<RealtimeControl>,
     telemetry: Arc<SourceTelemetry>,
-    #[cfg(test)] producer_frame: Arc<AtomicU64>,
-) {
+    #[cfg(test)]
+    producer_frame: Arc<AtomicU64>,
+}
+
+fn realtime_worker(producer: RealtimeProducer) {
+    let RealtimeProducer {
+        mut endpoint,
+        synthetic,
+        mut scratch,
+        max_lag_blocks,
+        control,
+        telemetry,
+        #[cfg(test)]
+        producer_frame,
+    } = producer;
     // Yield interval while a controller is queued for the lock; the controller's
     // notify normally wakes the producer first.
     const CONTROL_YIELD: Duration = Duration::from_millis(1);

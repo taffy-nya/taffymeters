@@ -9,7 +9,7 @@ use std::time::Duration;
 use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 
 use self::widgets::record;
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 use super::window::ControlKey;
 use super::{ColorScope, ModuleInstanceId, WindowId, Workspace, WorkspaceAction, window::Controls};
 use crate::{
@@ -207,11 +207,11 @@ pub(crate) struct SettingsWindow {
     opening: u64,
     placed: bool,
     commands: Vec<ViewportCommand>,
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     targets: std::collections::HashMap<ControlKey, super::window::ControlTarget>,
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     frame_token: u64,
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pass_token: u64,
 }
 
@@ -232,11 +232,11 @@ impl SettingsWindow {
             opening,
             placed: false,
             commands: Vec::new(),
-            #[cfg(any(test, feature = "automation"))]
+            #[cfg(feature = "automation")]
             targets: std::collections::HashMap::new(),
-            #[cfg(any(test, feature = "automation"))]
+            #[cfg(feature = "automation")]
             frame_token: 0,
-            #[cfg(any(test, feature = "automation"))]
+            #[cfg(feature = "automation")]
             pass_token: 0,
         }
     }
@@ -417,7 +417,7 @@ impl Workspace {
         let Some(mut settings) = self.settings.take() else {
             return;
         };
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         {
             if ctx.current_pass_index() == 0 {
                 settings.frame_token += 1;
@@ -534,7 +534,7 @@ impl Workspace {
                 });
         });
         settings.text_focus = ctx.egui_wants_keyboard_input();
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         for (key, response) in controls.responses {
             settings.targets.insert(
                 key,

@@ -6,8 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -15,8 +14,7 @@ use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::{
-    LiveAudio, LiveAudioConfig,
-    audio::synthetic::{ManualInputDriver, SyntheticConfig},
+    audio::synthetic::ManualInputDriver,
     dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId},
     modules::{
         BARS_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID,
@@ -26,17 +24,20 @@ use crate::{
     settings::{NodeParam, SettingValue},
     theme::{ColorRole, ThemePreset},
     workspace::{
-        ActionOutcome, ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId,
-        SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction, swatches,
+        ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId, SettingsItem,
+        Side, Tab, WindowId, Workspace, WorkspaceAction, swatches,
     },
 };
 
 use crate::automation::{
     harness::{FakeDesktop, Harness, SETTINGS},
-    support::{action, check, created, deadline, first_leaf, wait_until, workspace},
+    support::{
+        TempDir, action, check, created, deadline, first_leaf, leaves, new_window, read_bytes,
+        read_json, settle_subscriptions, synthetic, workspace, write_bytes,
+    },
 };
 
-type Scenario = fn() -> Result<Value, String>;
+use super::Scenario;
 
 pub(super) const CASES: [(&str, Scenario); 9] = [
     ("S01", s01),
@@ -50,39 +51,24 @@ pub(super) const CASES: [(&str, Scenario); 9] = [
     ("S09", s09),
 ];
 
-/// A configuration directory removed when the scenario ends.
-struct TempDir(PathBuf);
-
+/// The scenario's directory as a configuration directory.
 impl TempDir {
-    fn new(case: &str) -> Result<Self, String> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_nanos());
-        let path =
-            std::env::temp_dir().join(format!("taffymeters-{case}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Self(path))
-    }
-
     fn store(&self) -> WorkspaceStore {
-        WorkspaceStore::new(&self.0)
+        WorkspaceStore::new(self.path())
     }
 
     fn preset(&self, name: &str) -> PathBuf {
-        self.0.join("presets").join(format!("{name}.json"))
+        self.path().join("presets").join(format!("{name}.json"))
     }
 
     fn session(&self) -> PathBuf {
-        self.0.join("session.json")
+        self.path().join("session.json")
     }
 
     /// Write `file` as the session to open next.
     fn write_session(&self, file: &Value) -> Result<(), String> {
-        fs::write(
-            self.session(),
-            serde_json::to_vec_pretty(file).unwrap_or_default(),
-        )
-        .map_err(|e| e.to_string())
+        let bytes = serde_json::to_vec_pretty(file).expect("a JSON value serializes");
+        write_bytes(&self.session(), &bytes)
     }
 }
 
@@ -93,7 +79,7 @@ fn primary_display() -> Value {
 
 /// Open the session in `dir` on the harness's default desktop.
 fn reopen(dir: &TempDir) -> Result<(Workspace, ManualInputDriver), String> {
-    let (live, driver) = manual_live()?;
+    let (live, driver) = synthetic()?;
     let ws = Workspace::open(live, dir.store(), FakeDesktop::new()).map_err(|e| e.to_string())?;
     Ok((ws, driver))
 }
@@ -105,23 +91,6 @@ fn saved(name: &str) -> PresetRef {
 fn builtin(name: &str) -> PresetRef {
     PresetRef::Builtin(name.to_owned())
 }
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn manual_live() -> Result<(LiveAudio, ManualInputDriver), String> {
-    LiveAudio::open_manual(LiveAudioConfig::default(), SyntheticConfig::default())
-        .map_err(|e| e.to_string())
-}
-
-fn read_json(path: &Path) -> Result<Value, String> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
-}
-
 fn spec(ws: &Workspace, id: ModuleInstanceId) -> Result<DataSpec, String> {
     ws.observation()
         .module(id)
@@ -140,27 +109,6 @@ fn channel_of(spec: &DataSpec) -> Option<ChannelSelection> {
     spec.nodes().find_map(|(_, _, node)| match node {
         NodeSpec::Channel(channel) => Some(channel),
         _ => None,
-    })
-}
-
-fn new_window(outcome: ActionOutcome) -> Result<WindowId, String> {
-    match outcome {
-        ActionOutcome::WindowCreated(id) => Ok(id),
-        other => Err(format!("expected a new window, got {other:?}")),
-    }
-}
-
-fn leaves(ws: &Workspace, window: WindowId) -> Vec<ModuleInstanceId> {
-    ws.observation()
-        .window(window)
-        .map(|w| w.leaves.clone())
-        .unwrap_or_default()
-}
-
-fn settle(ws: &Workspace, expected: u64) -> Result<(), String> {
-    let handle = ws.dataflow_handle_for_automation();
-    wait_until(deadline(), &format!("{expected} subscriptions"), || {
-        (handle.metrics().subscriptions == expected).then_some(())
     })
 }
 
@@ -307,7 +255,7 @@ fn s01() -> Result<Value, String> {
         "Split right did not add a copy beside the original",
     )?;
     let b = window[1];
-    settle(&h.ws, 2)?;
+    settle_subscriptions(&h.ws, 2)?;
     let (spec_a, spec_b) = (spec(&h.ws, a)?, spec(&h.ws, b)?);
     let o = h.ws.observation();
     check(
@@ -616,7 +564,7 @@ fn s02() -> Result<Value, String> {
             side: Side::Right,
         },
     )?)?;
-    settle(&h.ws, 2)?;
+    settle_subscriptions(&h.ws, 2)?;
     let fft_nodes = || handle.metrics().active_fft_nodes;
     let shared = fft_nodes();
     let fft = node(&spec(&h.ws, b)?, |n| matches!(n, NodeSpec::Fft(_)))?;
@@ -1211,7 +1159,7 @@ fn s04() -> Result<Value, String> {
         "restored a different number of instances",
     )?;
     let restored: Vec<ModuleInstanceId> = o.windows.iter().flat_map(|w| w.leaves.clone()).collect();
-    settle(&h.ws, restored.len() as u64)?;
+    settle_subscriptions(&h.ws, restored.len() as u64)?;
     let metrics = h.ws.dataflow_handle_for_automation().metrics();
     let positions: Vec<_> = h.workspace_windows().map(|(_, w)| w.position).collect();
     check(
@@ -1380,7 +1328,7 @@ fn s05() -> Result<Value, String> {
         o.modules[2].active_style == Some(LINE_OSCILLOSCOPE_STYLE_ID),
         "unknown style did not fall back to the default",
     )?;
-    settle(&h.ws, 1)?;
+    settle_subscriptions(&h.ws, 1)?;
     h.ws.autosave();
     let saved = read_json(&dir.session())?;
     let layout = &saved["windows"][0]["layout"];
@@ -1469,7 +1417,7 @@ fn s05() -> Result<Value, String> {
 
     // A session file from another build is protected.
     let future = br#"{"format_version": 99, "windows": []}"#;
-    fs::write(dir.session(), future).map_err(|e| e.to_string())?;
+    write_bytes(&dir.session(), future)?;
     let (mut ws, _driver) = reopen(&dir)?;
     let o = ws.observation();
     let notice = o.notices.first().cloned().unwrap_or_default();
@@ -1491,7 +1439,7 @@ fn s05() -> Result<Value, String> {
     )?;
     ws.autosave();
     check(
-        fs::read(dir.session()).map_err(|e| e.to_string())? == future,
+        read_bytes(&dir.session())? == future,
         "autosave touched the protected session",
     )?;
     check(
@@ -1512,8 +1460,7 @@ fn s05() -> Result<Value, String> {
     )?;
     ws.autosave();
     check(
-        dir.preset("Recovered").exists()
-            && fs::read(dir.session()).map_err(|e| e.to_string())? == future,
+        dir.preset("Recovered").exists() && read_bytes(&dir.session())? == future,
         "Save as did not write a preset, or the session became writable",
     )?;
     Ok(json!({"missing":missing,"notices":o.notices.len()}))
@@ -1544,7 +1491,7 @@ fn s06() -> Result<Value, String> {
             },
         )?;
     }
-    settle(&h.ws, 3)?;
+    settle_subscriptions(&h.ws, 3)?;
     h.frame(vec![]);
     h.settings(
         ControlKey::LeafBody(a),
@@ -1606,7 +1553,7 @@ fn s06() -> Result<Value, String> {
         !o.windows.iter().any(|w| w.id == FIRST_WINDOW),
         "the loaded preset reused the old window identity",
     )?;
-    settle(&h.ws, 1)?;
+    settle_subscriptions(&h.ws, 1)?;
     let mut baseline = None;
     for round in 0..10 {
         let (preset, expected) = if round % 2 == 0 {
@@ -1615,7 +1562,7 @@ fn s06() -> Result<Value, String> {
             (builtin("Default"), 1)
         };
         action(&mut h.ws, WorkspaceAction::LoadPreset { preset })?;
-        settle(&h.ws, expected)?;
+        settle_subscriptions(&h.ws, expected)?;
         h.ws.check_ownership()?;
         check(
             h.ws.observation().modules.len() == expected as usize,
@@ -1642,7 +1589,7 @@ fn s06() -> Result<Value, String> {
         o.preset == Some(saved("A 2")) && o.modules.len() == 3,
         "menu load failed",
     )?;
-    settle(&h.ws, 3)?;
+    settle_subscriptions(&h.ws, 3)?;
     // Deleting asks first; the session keeps running without a preset to save to.
     h.in_settings(&[SettingsItem::DeletePreset(index)])?;
     check(
@@ -1734,7 +1681,7 @@ fn s07() -> Result<Value, String> {
         scale: 1.25,
         primary: true,
     }]);
-    let (live, _driver) = manual_live()?;
+    let (live, _driver) = synthetic()?;
     let ws = Workspace::open(live, dir.store(), Arc::<FakeDesktop>::clone(&desktop))
         .map_err(|e| e.to_string())?;
     let mut scaled = Harness::with_desktop(ws, desktop);
@@ -1832,7 +1779,7 @@ fn s08() -> Result<Value, String> {
     let handle = ws.dataflow_handle_for_automation();
     let mut h = Harness::new(ws);
     h.frame_all()?;
-    settle(&h.ws, 3)?;
+    settle_subscriptions(&h.ws, 3)?;
     let restored = handle.metrics().active_spectrum_nodes;
     check(
         restored == 2,
@@ -1909,7 +1856,7 @@ fn s08() -> Result<Value, String> {
             && o.theme.colors.is_empty(),
         &format!("Default did not replace the workspace: {:?}", o.preset),
     )?;
-    settle(&h.ws, 1)?;
+    settle_subscriptions(&h.ws, 1)?;
     let new_window = o.windows[0].id;
     let position = h.window(new_window)?.position;
     check(

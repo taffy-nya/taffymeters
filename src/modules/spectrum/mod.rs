@@ -445,42 +445,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        audio::{
-            AudioDescriptor, CaptureEndpoint, ChannelLayout, Generation, SourceId, SourceReader,
-            SourceTelemetry, create_block_transport,
-        },
-        dataflow::{Dataflow, DataflowHandle, FftMetadata, WindowFunction},
-        modules::test_support::RecordingTarget,
+        dataflow::{DataflowHandle, FftMetadata, WindowFunction},
+        modules::test_support::{PcmFixture, RecordingTarget},
         render::ColoredRect,
         snapshot::Frame,
     };
-
-    struct RuntimeFixture {
-        capture: CaptureEndpoint,
-        _dataflow: Dataflow,
-        services: ModuleServices,
-    }
-
-    fn runtime_fixture() -> RuntimeFixture {
-        let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, 2, ChannelLayout::Stereo)
-                .unwrap(),
-        );
-        let telemetry = Arc::new(SourceTelemetry::new());
-        let (mut capture, endpoint) =
-            create_block_transport(2, 8, 4096, Arc::clone(&telemetry)).unwrap();
-        let (dataflow, handle) =
-            Dataflow::spawn(Arc::clone(&descriptor), endpoint, Arc::clone(&telemetry));
-        capture.set_worker(dataflow.worker_thread());
-        RuntimeFixture {
-            capture,
-            _dataflow: dataflow,
-            services: ModuleServices {
-                source: SourceReader::new(descriptor, telemetry),
-                dataflow: handle,
-            },
-        }
-    }
 
     fn wait_for_subscriptions(handle: &DataflowHandle, expected: u64) {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -833,7 +802,7 @@ mod tests {
 
     #[test]
     fn peak_curve_follows_tilt_and_overlays_are_hidden_until_enabled() {
-        let mut fixture = runtime_fixture();
+        let mut fixture = PcmFixture::new(2);
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
         let mut module = SpectrumModuleFactory
@@ -856,7 +825,7 @@ mod tests {
                 [sample, sample]
             })
             .collect();
-        fixture.capture.write(&samples);
+        fixture.feed(&samples);
         let main = main_at(&module, 2, 8_192);
         let deadline = Instant::now() + Duration::from_secs(2);
         let peak = loop {
@@ -897,7 +866,7 @@ mod tests {
 
     #[test]
     fn factory_instances_keep_private_state_and_release_only_their_own_analysis() {
-        let mut fixture = runtime_fixture();
+        let mut fixture = PcmFixture::new(2);
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
         let factory = SpectrumModuleFactory;
@@ -934,14 +903,14 @@ mod tests {
         assert_eq!(fixture.services.dataflow.metrics(), before_style_change);
 
         let samples: Vec<f32> = (0..4096).flat_map(|_| [0.05_f32, -0.05]).collect();
-        fixture.capture.write(&samples);
+        fixture.feed(&samples);
         let first_result = main_at(&first, 1, 4_096);
         let second_result = main_at(&second, 2, 4_096);
         let old_reader = first.reader.clone();
 
         drop(first);
         wait_for_subscriptions(&fixture.services.dataflow, 1);
-        fixture.capture.write(&samples);
+        fixture.feed(&samples);
         let continued = main_at(&second, 2, 8_192);
         assert!(continued.result_version > second_result.result_version);
 
@@ -956,7 +925,7 @@ mod tests {
 
     #[test]
     fn real_factory_instances_keep_fft_and_visual_state_when_moved() {
-        let mut fixture = runtime_fixture();
+        let mut fixture = PcmFixture::new(2);
         let mut registry = Registry::default();
         register(&mut registry).unwrap();
         let factory = SpectrumModuleFactory;
@@ -979,7 +948,7 @@ mod tests {
                 ]
             })
             .collect();
-        fixture.capture.write(&samples);
+        fixture.feed(&samples);
         let first_before = main_at(&first, 1, 4_096);
         main_at(&second, 1, 4_096);
         let shared = fixture.services.dataflow.metrics();
@@ -1009,7 +978,7 @@ mod tests {
         assert_eq!(destination[0].active_style(), Some(PIXEL_SPECTRUM_STYLE_ID));
         assert_eq!(destination[0].channel(), Some(ChannelSelection::Right));
 
-        fixture.capture.write(&samples);
+        fixture.feed(&samples);
         let first_after = main_at(&source[0], 1, 8_192);
         let second_after = main_at(&destination[0], 3, 8_192);
         let bins = |frame: &Frame| frame.spectrum().unwrap().clone();
@@ -1052,7 +1021,7 @@ mod tests {
 
     #[test]
     fn factory_failure_after_subscription_releases_the_subscription() {
-        let fixture = runtime_fixture();
+        let fixture = PcmFixture::new(2);
         let registry = Registry::default();
 
         let Err(error) =

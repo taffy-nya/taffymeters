@@ -12,17 +12,20 @@ use crate::{
     module::MIN_EXTENT,
     modules::{PIXEL_SPECTRUM_STYLE_ID, WAVEFORM_MODULE_ID},
     workspace::{
-        ActionOutcome, ControlKey, Edge, EdgeLine, FIRST_WINDOW, ModuleInstanceId, MoveTarget,
-        ResizeEdge, SettingsItem, Side, SplitId, Tab, WindowId, Workspace, WorkspaceAction,
+        ControlKey, Edge, EdgeLine, FIRST_WINDOW, ModuleInstanceId, MoveTarget, ResizeEdge,
+        SettingsItem, Side, SplitId, Tab, WindowId, Workspace, WorkspaceAction,
     },
 };
 
 use crate::automation::{
     harness::{Harness, SETTINGS},
-    support::{action, add_module, check, created, deadline, first_leaf, wait_until, workspace},
+    support::{
+        action, add_module, check, created, deadline, first_leaf, leaves, new_window,
+        settle_subscriptions, workspace,
+    },
 };
 
-type Scenario = fn() -> Result<Value, String>;
+use super::Scenario;
 
 pub(super) const CASES: [(&str, Scenario); 12] = [
     ("W01", w01),
@@ -57,32 +60,11 @@ fn object(ws: &Workspace, id: ModuleInstanceId) -> Result<usize, String> {
         .ok_or_else(|| format!("instance {} missing", id.0))
 }
 
-fn leaves(ws: &Workspace, window: WindowId) -> Vec<ModuleInstanceId> {
-    ws.observation()
-        .window(window)
-        .map(|w| w.leaves.clone())
-        .unwrap_or_default()
-}
-
 fn root_split(ws: &Workspace, index: usize) -> Result<(SplitId, f32, bool), String> {
     ws.observation()
         .window(FIRST_WINDOW)
         .and_then(|w| w.splits.get(index).map(|s| (s.id, s.ratio, s.manual)))
         .ok_or_else(|| "missing split".to_owned())
-}
-
-fn subscriptions_settle(ws: &Workspace, expected: u64) -> Result<(), String> {
-    let handle = ws.dataflow_handle_for_automation();
-    wait_until(deadline(), &format!("{expected} subscriptions"), || {
-        (handle.metrics().subscriptions == expected).then_some(())
-    })
-}
-
-fn new_window(outcome: ActionOutcome) -> Result<WindowId, String> {
-    match outcome {
-        ActionOutcome::WindowCreated(id) => Ok(id),
-        other => Err(format!("expected a new window, got {other:?}")),
-    }
 }
 
 /// Split, equalize, manual ratios, close with sibling fill, size rejection.
@@ -134,7 +116,7 @@ fn w01() -> Result<Value, String> {
         kept_id == first_split && (kept_ratio - 0.25).abs() < 1e-6 && kept_manual,
         "adding a leaf rewrote a manually adjusted ratio",
     )?;
-    subscriptions_settle(&h.ws, 4)?;
+    settle_subscriptions(&h.ws, 4)?;
     let objects: Vec<usize> = [a, c, d]
         .iter()
         .map(|id| object(&h.ws, *id))
@@ -148,7 +130,7 @@ fn w01() -> Result<Value, String> {
         leaves(&h.ws, FIRST_WINDOW) == vec![a, c, d] && after == objects,
         "closing a leaf disturbed the remaining instances",
     )?;
-    subscriptions_settle(&h.ws, 3)?;
+    settle_subscriptions(&h.ws, 3)?;
     // Shrink the window: the minimum width (three leaf minimums) is enforced and a
     // further split is rejected without creating anything.
     h.frame(vec![]);
@@ -425,7 +407,7 @@ fn w04() -> Result<Value, String> {
     )?;
     let mut h = Harness::new(ws);
     h.frame(vec![]);
-    subscriptions_settle(&h.ws, 2)?;
+    settle_subscriptions(&h.ws, 2)?;
     let b_object = object(&h.ws, b)?;
     let created_before = h.ws.observation().modules_created;
     h.settings(ControlKey::LeafBody(b), &[SettingsItem::Detach])?;
@@ -453,7 +435,7 @@ fn w04() -> Result<Value, String> {
             && o.modules_created == created_before,
         "detach rebuilt or lost the instance",
     )?;
-    subscriptions_settle(&h.ws, 2)?;
+    settle_subscriptions(&h.ws, 2)?;
     let position = h.window(pending)?.position;
     check(
         position == pos2(132.0, 132.0),
@@ -562,7 +544,7 @@ fn w05() -> Result<Value, String> {
         }),
         "merge did not insert below the target",
     )?;
-    subscriptions_settle(&h.ws, 2)?;
+    settle_subscriptions(&h.ws, 2)?;
     h.ws.check_ownership()?;
 
     // Escape and right click cancel; the tree is unchanged.
@@ -702,7 +684,7 @@ fn w06() -> Result<Value, String> {
             window_id: FIRST_WINDOW,
         },
     )?;
-    subscriptions_settle(&h.ws, 1)?;
+    settle_subscriptions(&h.ws, 1)?;
     let before = handle.metrics();
     driver
         .advance_frames(3200, deadline())
@@ -719,7 +701,7 @@ fn w06() -> Result<Value, String> {
         h.ws.windows().is_empty(),
         "closing the last window left windows",
     )?;
-    subscriptions_settle(&h.ws, 0)?;
+    settle_subscriptions(&h.ws, 0)?;
     let idle = handle.metrics();
     driver
         .advance_frames(1600, deadline())
@@ -977,7 +959,7 @@ fn w08() -> Result<Value, String> {
     let a = first_leaf(&ws)?;
     let mut h = Harness::new(ws);
     h.frame(vec![]);
-    subscriptions_settle(&h.ws, 1)?;
+    settle_subscriptions(&h.ws, 1)?;
     let baseline = handle.metrics();
     for round in 0..10 {
         let x = split(&mut h.ws, a, Side::Right)?;
@@ -1007,7 +989,7 @@ fn w08() -> Result<Value, String> {
         action(&mut h.ws, WorkspaceAction::CloseModule { instance_id: x })?;
         h.frame_all()?;
     }
-    subscriptions_settle(&h.ws, 1)?;
+    settle_subscriptions(&h.ws, 1)?;
     let o = h.ws.observation();
     check(
         o.windows.len() == 1

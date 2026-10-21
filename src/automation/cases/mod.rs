@@ -3,7 +3,11 @@ mod settings;
 mod visual;
 mod workspace;
 
+use serde_json::Value;
+
 use super::{report::Report, support::run_case};
+
+type Scenario = fn() -> Result<Value, String>;
 
 pub(in crate::automation) use visual::{compare_case, visual};
 

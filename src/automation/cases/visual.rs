@@ -7,7 +7,8 @@ use crate::{
         harness::Harness,
         report::{self, Case, Report, Status},
         support::{
-            action, check, created, deadline, first_leaf, replace_first, rgba_view, workspace,
+            action, check, created, deadline, first_leaf, read_json, replace_first, rgba_view,
+            workspace,
         },
         visual,
     },
@@ -223,11 +224,6 @@ fn judge_baseline(
     }
     compare_with_baseline(id, manifest, image, base, output)
         .unwrap_or_else(|error| Case::fail(id, "baseline integrity", error))
-}
-
-fn read_json(path: &Path) -> Result<Value, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn compare_with_baseline(

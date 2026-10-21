@@ -12,8 +12,8 @@ use crate::{
     automation::{
         harness::{Harness, SETTINGS},
         support::{
-            action, add_module, check, created, deadline, first_leaf, replace_first, rgba_view,
-            synthetic, wait_until, workspace,
+            TempDir, action, add_module, check, created, deadline, first_leaf, replace_first,
+            rgba_view, synthetic, wait_until, workspace, write_bytes,
         },
         visual,
     },
@@ -25,7 +25,7 @@ use crate::{
     },
 };
 
-type Scenario = fn() -> Result<Value, String>;
+use super::Scenario;
 
 pub(super) const CASES: [(&str, Scenario); 10] = [
     ("C01", c01),
@@ -956,31 +956,27 @@ fn c10() -> Result<Value, String> {
             .dimensions_match,
         "dimension mismatch not detected",
     )?;
-    // Exercise the project comparator on real files; core has no output directory, so
-    // use process-unique temporary files and remove them afterwards.
-    let dir = std::env::temp_dir().join(format!("taffymeters-c10-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let good = dir.join("good.png");
-    let bad = dir.join("bad.png");
-    let result = (|| {
-        visual::save_png(&good, b.width(), b.height(), b.as_raw()).map_err(|e| e.to_string())?;
-        std::fs::write(&bad, b"bad png").map_err(|e| e.to_string())?;
-        check(
-            visual::compare_png_paths(&good, &good)
-                .map_err(|e| e.to_string())?
-                .changed_pixels
-                == Some(0),
-            "comparator rejected identical PNG files",
-        )?;
-        match visual::compare_png_paths(&good, &bad) {
-            Err(visual::VisualError::Png { path, .. }) if path == bad => Ok(()),
-            other => Err(format!(
+    // Exercise the project comparator on real files; core has no output directory.
+    let dir = TempDir::new("c10")?;
+    let good = dir.path().join("good.png");
+    let bad = dir.path().join("bad.png");
+    visual::save_png(&good, b.width(), b.height(), b.as_raw()).map_err(|e| e.to_string())?;
+    write_bytes(&bad, b"bad png")?;
+    check(
+        visual::compare_png_paths(&good, &good)
+            .map_err(|e| e.to_string())?
+            .changed_pixels
+            == Some(0),
+        "comparator rejected identical PNG files",
+    )?;
+    match visual::compare_png_paths(&good, &bad) {
+        Err(visual::VisualError::Png { path, .. }) if path == bad => {}
+        other => {
+            return Err(format!(
                 "corrupt PNG not reported as a PNG error: {other:?}"
-            )),
+            ));
         }
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    result?;
+    }
     Ok(
         json!({"changed_pixels":diff.changed_pixels,"bad_png":"compare_png_paths returned Png error","dimension_mismatch":"rejected"}),
     )

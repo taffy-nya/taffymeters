@@ -234,7 +234,7 @@ pub(crate) enum ControlKey {
     SettingsReset(SettingsItem),
 }
 
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ControlTarget {
     pub(crate) rect: Rect,
@@ -275,7 +275,7 @@ impl EdgeLine {
 }
 
 /// A line one pass drew along the window's frame (physical span along `edge`).
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DrawnEdge {
     pub(crate) line: EdgeLine,
@@ -293,30 +293,30 @@ pub(crate) struct WindowUiState {
     resizable_sent: Option<bool>,
     /// Display time until which the "locked" hint shows.
     lock_hint_until: Option<Duration>,
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     targets: std::collections::HashMap<ControlKey, ControlTarget>,
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     frame_token: u64,
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pass_token: u64,
     /// Lines the last pass drew along the frame.
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pub(crate) edges: Vec<DrawnEdge>,
     /// The module the last pass outlined, and the logical rect of the outline.
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pub(crate) module_outline: Option<(ModuleInstanceId, Rect)>,
 }
 
 /// Responses of probe-visible controls collected during one pass.
 #[derive(Default)]
 pub(crate) struct Controls {
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(feature = "automation")]
     pub(super) responses: Vec<(ControlKey, Response)>,
 }
 
 impl Controls {
     pub(crate) fn record(&mut self, _key: ControlKey, _response: &Response) {
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         self.responses.push((_key, _response.clone()));
     }
 }
@@ -520,7 +520,7 @@ impl Workspace {
         let ctx = ui.ctx().clone();
         let window = self.windows.get_mut(&window_id)?;
         window.ui.display_time = display_time;
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         {
             if ctx.current_pass_index() == 0 {
                 window.ui.frame_token += 1;
@@ -622,7 +622,7 @@ impl Workspace {
             repaint = Some(repaint.map_or(remaining, |current: Duration| current.min(remaining)));
         }
 
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         if let Some(window) = self.windows.get_mut(&window_id) {
             for (key, response) in controls.responses {
                 window.ui.targets.insert(
@@ -870,7 +870,7 @@ impl Workspace {
     /// that move with the window it edits, and, dimmer while its Group button is
     /// hovered, of the windows grouping would add; edges they share are dividers.
     fn window_edges(&mut self, window_id: WindowId, ui: &egui::Ui, rect: Rect) {
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         let mut drawn = Vec::new();
         let window = &self.windows[&window_id];
         if let Some(own) = window.outer.filter(|_| !window.maximized) {
@@ -923,7 +923,7 @@ impl Workspace {
                 if pixels > 0.0 {
                     painter.rect_filled(strip(edge, start, end, pixels), 0.0, divider);
                 }
-                #[cfg(any(test, feature = "automation"))]
+                #[cfg(feature = "automation")]
                 drawn.push(DrawnEdge {
                     line: EdgeLine::Divider,
                     edge,
@@ -944,7 +944,7 @@ impl Workspace {
                     };
                     desktop::uncovered(edge.span(own), covered, |start, end| {
                         painter.rect_filled(strip(edge, start, end, width), 0.0, color);
-                        #[cfg(any(test, feature = "automation"))]
+                        #[cfg(feature = "automation")]
                         drawn.push(DrawnEdge {
                             line,
                             edge,
@@ -955,7 +955,7 @@ impl Workspace {
                 }
             }
         }
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.ui.edges = drawn;
         }
@@ -978,7 +978,7 @@ impl Workspace {
                 .into_iter()
                 .find_map(|(leaf, leaf_rect)| (leaf == id).then_some(leaf_rect))
         });
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         let mut drawn = None;
         if let Some(leaf_rect) = leaf_rect {
             let ppp = ui.ctx().pixels_per_point();
@@ -1002,12 +1002,12 @@ impl Workspace {
             ] {
                 painter.rect_filled(strip, 0.0, color);
             }
-            #[cfg(any(test, feature = "automation"))]
+            #[cfg(feature = "automation")]
             {
                 drawn = target.map(|id| (id, Rect::from_min_max(min, max)));
             }
         }
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(feature = "automation")]
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.ui.module_outline = drawn;
         }
