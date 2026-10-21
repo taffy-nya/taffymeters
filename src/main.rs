@@ -91,8 +91,6 @@ fn main() -> eframe::Result<()> {
     run_window(app::App::new(workspace))
 }
 
-/// `[--config-dir <dir>]`: where the session and presets are saved (default
-/// `%APPDATA%\taffymeters`).
 fn parse_config_dir(args: &[String]) -> Result<Option<std::path::PathBuf>, String> {
     match args {
         [] => Ok(None),

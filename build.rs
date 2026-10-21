@@ -1,14 +1,10 @@
-//! Embeds `assets/taffymeters.rc` (icon and version information, the version
-//! from Cargo.toml) into the Windows executable and extracts the 128×128 and
-//! 32×32 images of `assets/taffymeters.ico` as raw RGBA for the runtime window
-//! icons (`src/icon.rs`).
+//! Produces raw RGBA icons for `src/icon.rs` and embeds Windows icon/version resources.
 
 use std::{env, fs, path::Path};
 
 const ICON: &str = "assets/taffymeters.ico";
 const RESOURCE: &str = "assets/taffymeters.rc";
-/// Sizes `src/icon.rs` includes as `icon-<size>.rgba`. 128 covers the big
-/// system icon (`SM_CXICON`, 32 px per 100% scaling) up to 400%.
+/// 128 covers the big system icon (`SM_CXICON`, 32 px at 100% scaling) up to 400%.
 const RGBA_SIZES: [u32; 2] = [128, 32];
 
 fn main() {
@@ -45,8 +41,8 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
-/// Top-down RGBA of the `size`×`size` entry, which must be an uncompressed
-/// 32 bpp DIB (BGRA rows bottom-up, real alpha; the AND mask is ignored).
+/// Converts bottom-up BGRA to top-down RGBA; requires uncompressed 32 bpp DIB entries
+/// with real alpha and ignores the AND mask.
 fn ico_entry_rgba(ico: &[u8], size: u32) -> Vec<u8> {
     assert_eq!(u16_at(ico, 2), 1, "{ICON}: not an icon file");
     let count = usize::from(u16_at(ico, 4));

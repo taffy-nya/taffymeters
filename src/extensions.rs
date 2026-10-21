@@ -13,7 +13,6 @@ use crate::{
 #[derive(Default)]
 pub struct Registry {
     modules: HashMap<String, Arc<dyn ModuleFactory>>,
-    /// Each type's default analysis, built once when it registers.
     module_defaults: HashMap<String, DataSpec>,
     spectrum_styles: HashMap<String, Arc<dyn SpectrumStyleFactory>>,
     oscilloscope_styles: HashMap<String, Arc<dyn OscilloscopeStyleFactory>>,
@@ -61,7 +60,6 @@ impl Registry {
         Ok(())
     }
 
-    /// Create an instance of `id`, with its default analysis or the saved `data`.
     pub fn create_module(
         &self,
         id: &str,
@@ -74,19 +72,16 @@ impl Registry {
             .create(services, self, data)
     }
 
-    /// The registered type `id` as `(type_id, display_name)`.
     pub fn module_type(&self, id: &str) -> Option<(&'static str, &'static str)> {
         self.modules
             .get(id)
             .map(|factory| (factory.type_id(), factory.display_name()))
     }
 
-    /// The analysis a new instance of `id` starts with, if it has one to reset to.
     pub fn default_data(&self, id: &str) -> Option<&DataSpec> {
         self.module_defaults.get(id)
     }
 
-    /// Theme roles instances of type `id` can draw with: what its type style offers.
     pub fn color_roles(&self, id: &str) -> &'static [ColorRole] {
         self.modules
             .get(id)
@@ -168,7 +163,6 @@ mod tests {
         render::RenderTarget,
     };
 
-    /// Identifies itself through `active_style`, so a test can tell which factory built it.
     struct TaggedModule(&'static str);
 
     impl Module for TaggedModule {
@@ -181,7 +175,6 @@ mod tests {
         }
     }
 
-    /// A Module that keeps every default of the trait.
     struct PlainModule;
 
     impl Module for PlainModule {
@@ -247,8 +240,6 @@ mod tests {
         }
     }
 
-    /// Appends its tag to the shared log for every style it creates, which shows
-    /// which factory produced a style.
     struct TaggedStyleFactory {
         id: &'static str,
         tag: &'static str,

@@ -125,6 +125,7 @@ impl OpenSystemInput {
         f32: FromSample<T>,
     {
         let error_telemetry = Arc::clone(&telemetry);
+        // WASAPI treats an input stream on an output device as loopback capture.
         let stream = self
             .device
             .build_input_stream(

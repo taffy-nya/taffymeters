@@ -1,6 +1,4 @@
-//! Runs the headless core automation suite (C/W/S scenarios) through the real
-//! binary, so `cargo test --features automation` covers it. The suite needs no
-//! audio device, native window or desktop input.
+//! The core suite runs the real binary without audio devices, native windows or desktop input.
 
 use std::{
     path::{Path, PathBuf},
@@ -10,7 +8,6 @@ use std::{
 
 use serde_json::Value;
 
-/// A fresh output directory, removed when the test ends.
 struct OutputDir(PathBuf);
 
 impl OutputDir {

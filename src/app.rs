@@ -1,10 +1,6 @@
-//! Native adapter. egui's root viewport is an invisible host (1×1, off screen, no
-//! taskbar entry); every Workspace window is an immediate child viewport rendered
-//! inside the host's pass. One native paint therefore draws all windows together.
-//!
-//! Deferred viewports were tried first: each window then waits for its own Windows
-//! WM_PAINT, and the OS keeps choosing the focused window whenever it has a paint
-//! pending (input and vsync keep it pending), so other windows stopped updating.
+//! Immediate child viewports share one invisible host pass, so all windows paint together.
+//! Separate deferred viewports can starve unfocused windows when Windows keeps selecting
+//! the focused window's pending WM_PAINT.
 
 use std::{
     sync::{
@@ -24,9 +20,8 @@ type SharedTrace = Option<Arc<Mutex<crate::automation::Trace>>>;
 pub(crate) struct App {
     workspace: Arc<Mutex<Workspace>>,
     started_at: Instant,
-    /// A data wake-up is already queued for the next host pass.
     wake_pending: Arc<AtomicBool>,
-    /// Some window was drawn in the last host pass (not all minimized).
+    /// Whether any Workspace window drew in the last host pass.
     any_window_shown: Arc<AtomicBool>,
     #[cfg(feature = "automation")]
     trace: SharedTrace,
@@ -54,9 +49,7 @@ impl App {
         self
     }
 
-    /// Repaint the host when the analysis worker publishes new results, instead of
-    /// redrawing at a fixed rate. At most one wake-up is queued per host pass, and
-    /// none while every window is minimized.
+    /// Coalesces data wake-ups to one per host pass; none while all Workspace windows are minimized.
     pub(crate) fn install_waker(&self, ctx: &egui::Context) {
         let ctx = ctx.clone();
         let pending = Arc::clone(&self.wake_pending);
@@ -72,8 +65,7 @@ impl App {
         })));
     }
 
-    /// The invisible host viewport. It must stay "visible" to the windowing system:
-    /// eframe throttles hidden or minimized root viewports to 10 fps.
+    /// eframe throttles hidden or minimized roots to 10 fps, so this off-screen host stays visible.
     pub(crate) fn host_builder() -> egui::ViewportBuilder {
         egui::ViewportBuilder::default()
             .with_title("Taffymeters")
@@ -88,7 +80,6 @@ impl App {
     }
 }
 
-/// One UI pass of a Workspace window inside its viewport.
 fn window_pass(
     workspace: &Mutex<Workspace>,
     window_id: WindowId,

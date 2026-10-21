@@ -1,5 +1,3 @@
-//! Window icons from `assets/taffymeters.ico` (RGBA extracted by `build.rs`).
-
 use std::sync::{Arc, LazyLock};
 
 use eframe::egui::IconData;
@@ -25,14 +23,12 @@ static SMALL: LazyLock<Arc<IconData>> = LazyLock::new(|| {
     )
 });
 
-/// Root viewport icon. On Windows eframe rescales it to the system icon sizes and
-/// sets both the big and the small icon; it also replaces eframe's default egui logo.
+/// On Windows, eframe sets both system icon sizes from the root viewport's icon.
 pub(crate) fn large() -> Arc<IconData> {
     Arc::clone(&LARGE)
 }
 
-/// Icon of every other viewport. egui-winit only sets the small icon (`ICON_SMALL`),
-/// which Windows shows at 32 px under 200% scaling.
+/// egui-winit only sets ICON_SMALL on child viewports (32 px at 200% scaling).
 pub(crate) fn small() -> Arc<IconData> {
     Arc::clone(&SMALL)
 }

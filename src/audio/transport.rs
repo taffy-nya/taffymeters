@@ -27,8 +27,6 @@ impl AudioBlock {
         }
     }
 
-    /// A block of `frame_count` silent frames, for the worker to stand in for a
-    /// source that delivers nothing (see `dataflow::silence`).
     pub(crate) fn silence(channels: usize, frame_count: usize) -> Self {
         Self {
             frame_count,
@@ -125,6 +123,8 @@ impl CaptureEndpoint {
         self.worker = Some(worker);
     }
 
+    /// Called by the audio callback; must not allocate or wait for the worker.
+    /// Dropped input still advances source positions so the worker observes gaps.
     pub(crate) fn write<T>(&mut self, data: &[T])
     where
         T: Sample,
@@ -173,9 +173,7 @@ impl CaptureEndpoint {
             }
 
             if self.ready.try_push(block).is_err() {
-                // A block came from the paired free queue, so the ready queue must have room.
-                // Count and discard rather than ever waiting in the audio callback if that
-                // invariant is violated.
+                // The paired free queue guarantees room; never wait in the callback if that fails.
                 self.telemetry.add_dropped_block();
             }
             frame_offset += frame_count;

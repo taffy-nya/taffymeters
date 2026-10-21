@@ -41,15 +41,14 @@ pub(crate) enum SignalSpec {
     Indexed {
         offset: f32,
     },
-    /// Exponential sine sweep from `start_hz` to `end_hz`, restarting every
-    /// `period_seconds`; a deterministic, visibly changing preview signal.
+    /// Repeating exponential sine sweep.
     Sweep {
         start_hz: f64,
         end_hz: f64,
         period_seconds: f64,
         amplitude: f32,
     },
-    /// Sine whose amplitude rises and falls between 0 and `amplitude` at `rate_hz`.
+    /// Sine with a raised-cosine amplitude envelope at `rate_hz`.
     Pulse {
         frequency_hz: f64,
         rate_hz: f64,
@@ -88,8 +87,7 @@ impl Default for SyntheticConfig {
 }
 
 impl SyntheticConfig {
-    /// Changing preview signal: Left sweeps 80 Hz–12 kHz every 6 s, Right pulses a
-    /// 440 Hz tone at 0.5 Hz, so every view (and a stalled window) is easy to see.
+    /// Distinct, continuously changing channels make stalled preview windows visible.
     pub(crate) fn sweep() -> Self {
         Self {
             signals: vec![
@@ -719,9 +717,8 @@ impl ManualInputDriver {
     }
 
     fn wait_processed(&self, target_frame: u64, deadline: Instant) -> Result<(), SyntheticError> {
-        // The worker publishes the frontier through an atomic and never unparks this
-        // thread, so a bare park would cost one OS timer tick (up to ~15.6 ms on
-        // Windows) per block. Yield first; one block normally drains in microseconds.
+        // No worker unpark arrives here; yield before parking to avoid Windows timer-tick delays
+        // (up to ~15.6 ms) for blocks that normally drain in microseconds.
         const YIELD_ROUNDS: u32 = 1024;
         let mut rounds = 0_u32;
         loop {
@@ -773,8 +770,7 @@ struct RunControl {
 struct RealtimeControl {
     run: Mutex<RunControl>,
     wake: Condvar,
-    /// Controllers waiting for `run`. The producer yields the lock whenever this is
-    /// non-zero, so pause/resume/stop never wait behind a catch-up burst.
+    /// Controllers waiting for `run`; nonzero forces a lock yield between catch-up blocks.
     waiting: AtomicUsize,
 }
 
@@ -787,9 +783,8 @@ pub(crate) struct RealtimeSource {
 }
 
 impl RealtimeSource {
-    /// `max_lag_blocks` bounds how far the producer may fall behind wall time before it
-    /// re-anchors instead of back-filling; use the transport capacity so a catch-up
-    /// burst cannot overflow the bounded queue.
+    /// `max_lag_blocks` bounds wall-time lag before re-anchoring instead of back-filling.
+    /// Use transport capacity to avoid replaying long stalls into the bounded queue.
     pub(crate) fn start(
         endpoint: CaptureEndpoint,
         synthetic: SyntheticConfig,
@@ -840,8 +835,6 @@ impl RealtimeSource {
         })
     }
 
-    /// Runs `change` under the control lock, announcing the request first so the
-    /// producer releases the lock between blocks, then wakes the producer.
     fn with_control<R>(&self, change: impl FnOnce(&mut RunControl) -> R) -> R {
         let control = &*self.control;
         control.waiting.fetch_add(1, Ordering::AcqRel);
@@ -931,8 +924,7 @@ fn realtime_worker(producer: RealtimeProducer) {
         #[cfg(test)]
         producer_frame,
     } = producer;
-    // Yield interval while a controller is queued for the lock; the controller's
-    // notify normally wakes the producer first.
+    // Fallback lock-yield interval; a controller's notification normally wakes us sooner.
     const CONTROL_YIELD: Duration = Duration::from_millis(1);
     let sample_rate_hz = synthetic.descriptor.sample_rate_hz;
     let block_frames = synthetic.block_frames;
@@ -955,7 +947,6 @@ fn realtime_worker(producer: RealtimeProducer) {
         let wait = match state.state {
             RealtimeState::Stopped => return,
             RealtimeState::Paused => None,
-            // A queued pause/resume/stop gets the lock before the next block.
             RealtimeState::Running if control.waiting.load(Ordering::Acquire) != 0 => {
                 Some(CONTROL_YIELD)
             }
@@ -979,9 +970,7 @@ fn realtime_worker(producer: RealtimeProducer) {
                     Some(deadline - now)
                 } else {
                     if now - deadline > max_lag {
-                        // Suspended far beyond the transport capacity (debugger, sleep):
-                        // continue from now instead of back-filling a burst that the
-                        // bounded queue would mostly drop. Frame numbering stays contiguous.
+                        // Avoid flooding the bounded queue; keep source frame numbering contiguous.
                         state.anchor = now;
                         state.anchor_frame = next_frame;
                     }
@@ -1064,8 +1053,7 @@ mod tests {
         .unwrap();
         wait_frontier(&handle, 48, Instant::now() + Duration::from_secs(5));
 
-        // Model a producer that was suspended for 10 minutes: the wall-clock deadline
-        // is 28.8 M frames ahead of the producer position.
+        // Ten minutes far exceeds queue capacity, exercising the re-anchor path.
         let suspended = Duration::from_secs(600);
         source.with_control(|control| {
             control.anchor = Instant::now()

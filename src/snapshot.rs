@@ -1,9 +1,4 @@
-//! Immutable analysis results and the readers a Module uses to see them.
-//!
-//! The worker pushes `Arc<Frame>`s into output rings; a reader copies `Arc`s out
-//! under one short lock. A Module keeps a `Snapshot` (latest result of every
-//! output, read together) and, for histories, a `HistoryView` that only takes the
-//! frames it has not seen yet.
+//! The worker publishes immutable `Arc<Frame>`s; readers clone them under a short store lock.
 
 use std::{
     collections::VecDeque,
@@ -51,7 +46,6 @@ pub enum FrameData {
     Loudness(LoudnessData),
 }
 
-/// One result of one output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     /// Unique and increasing across every output of the worker.
@@ -59,7 +53,6 @@ pub struct Frame {
     /// Exclusive end of the source frames this result accounts for.
     pub processed_through_frame: u64,
     pub source_sequence: u64,
-    /// Source discontinuities seen by the worker when this result was produced.
     pub discontinuity_count: u64,
     /// The output was interrupted (source gap, reactivation) before this result.
     pub discontinuity_before: bool,
@@ -96,11 +89,9 @@ impl Frame {
     }
 }
 
-/// The latest result of every output of one subscription, read under one lock so
-/// the outputs of one processed block are seen together. A slot is only ever
-/// replaced by a newer result: after a spec change it keeps showing the previous
-/// result until the new nodes produce one. Code that must wait for a result of
-/// the new spec uses [`DataReader::latest`] and [`DataReader::config_revision`].
+/// Reads outputs of a processed block together under one lock. Slots retain the last result
+/// across spec changes until replacement data arrives; use [`DataReader::latest`] and
+/// [`DataReader::config_revision`] when results must belong to the new spec.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     frames: Vec<Option<Arc<Frame>>>,
@@ -119,10 +110,8 @@ pub struct ViewFrame {
     pub gap_before: bool,
 }
 
-/// A Module-held History: the frames of one output within its kept duration,
-/// updated incrementally. A spec change keeps the frames already seen (each
-/// carries its own metadata) and appends the new nodes' frames after them; only
-/// a reset clears it.
+/// Spec changes retain frames with their original metadata; runtime resets clear accumulated history.
+/// Frames are kept oldest first and pruned to the retained source-time duration.
 #[derive(Clone, Debug, Default)]
 pub struct HistoryView {
     frames: VecDeque<ViewFrame>,
@@ -138,7 +127,6 @@ impl HistoryView {
         Self::default()
     }
 
-    /// Frames oldest first, as one slice.
     pub fn frames(&mut self) -> &[ViewFrame] {
         self.frames.make_contiguous()
     }
@@ -161,8 +149,8 @@ impl HistoryView {
             .map(|frame| frame.frame.processed_through_frame)
     }
 
-    /// First source frame of the kept window. The oldest PCM chunk may start
-    /// before it; readers clip it themselves.
+    /// First source frame of the kept window. The oldest PCM chunk may start before it;
+    /// readers must clip that chunk themselves.
     pub fn window_start(&self) -> u64 {
         self.newest_frontier()
             .unwrap_or(0)
@@ -198,9 +186,7 @@ impl DataReader {
         }
     }
 
-    /// Refresh `snapshot` with the latest visible result of every output. Returns
-    /// false, leaving `snapshot` untouched, when the subscription is closed or its
-    /// analysis is paused.
+    /// Returns false without changing `snapshot` when the subscription is closed or paused.
     pub fn read(&self, snapshot: &mut Snapshot) -> bool {
         let store = crate::dataflow::store::lock(&self.store);
         let Some(route) = store.routes.get(&self.id) else {
@@ -211,7 +197,6 @@ impl DataReader {
         }
         snapshot.frames.resize(route.outputs.len(), None);
         for (slot, output) in snapshot.frames.iter_mut().zip(&route.outputs) {
-            // No result yet (e.g. right after a spec change): keep the last one.
             if let Some(frame) = store.rings[output.ring]
                 .as_ref()
                 .and_then(|ring| ring.frames.back())
@@ -224,8 +209,7 @@ impl DataReader {
         true
     }
 
-    /// Latest visible result of one output; while the subscription's analysis is
-    /// paused, the result that was visible when it paused.
+    /// Paused subscriptions return the result that was visible when they paused.
     pub fn latest(&self, output: OutputId) -> Option<Arc<Frame>> {
         let store = crate::dataflow::store::lock(&self.store);
         let route = store.routes.get(&self.id)?;
@@ -241,8 +225,8 @@ impl DataReader {
             .cloned()
     }
 
-    /// Append the frames of `output` that `view` has not seen and drop those older
-    /// than the kept duration. Returns false when closed or paused.
+    /// Returns false without changing `view` if the subscription is closed or paused,
+    /// or `output` does not exist.
     pub fn sync_history(&self, output: OutputId, view: &mut HistoryView) -> bool {
         let store = crate::dataflow::store::lock(&self.store);
         let Some(route) = store.routes.get(&self.id) else {
@@ -296,7 +280,6 @@ impl DataReader {
         true
     }
 
-    /// Revision of the spec the runtime has applied, or None once closed.
     pub fn config_revision(&self) -> Option<u64> {
         crate::dataflow::store::lock(&self.store)
             .routes

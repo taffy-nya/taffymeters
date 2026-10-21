@@ -1,5 +1,4 @@
-//! Test / automation-only measurement of the analysis worker: heap allocations made
-//! on that thread and its CPU time. Never compiled into the product build.
+//! Test/automation-only allocation and CPU-time probes for the analysis worker.
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -15,7 +14,6 @@ use std::{
 struct CountingAllocator;
 
 thread_local! {
-    /// Counter of the probe that owns the current thread, or null when uncounted.
     static COUNTER: Cell<*const AtomicU64> = const { Cell::new(std::ptr::null()) };
 }
 
@@ -59,7 +57,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-/// Allocation count and CPU time of one worker thread.
 #[derive(Default)]
 pub(crate) struct WorkerProbe {
     allocations: AtomicU64,
@@ -76,7 +73,6 @@ pub(crate) struct WorkerSample {
 }
 
 impl WorkerProbe {
-    /// Count allocations of the calling thread until the returned guard drops.
     pub(crate) fn count_this_thread(self: &Arc<Self>) -> CountGuard {
         let probe = Arc::clone(self);
         CountGuard {
@@ -100,9 +96,7 @@ impl WorkerProbe {
     }
 }
 
-/// Restores the calling thread's previous counter when dropped, including during
-/// unwinding. It holds a raw pointer, so it is neither `Send` nor `Sync` and must
-/// be dropped on the thread that installed it.
+/// Thread-affine: its drop must restore the counter on the thread that installed it.
 struct Restore {
     previous: *const AtomicU64,
 }
@@ -113,23 +107,20 @@ impl Drop for Restore {
     }
 }
 
-/// Point the calling thread's allocation counter at `counter` until the guard drops.
-/// The caller keeps `counter` alive for at least as long as the guard.
+/// The caller must keep `counter` alive until the returned guard drops.
 fn install(counter: &AtomicU64) -> Restore {
     Restore {
         previous: COUNTER.with(|current| current.replace(counter)),
     }
 }
 
-/// Counts the worker thread's allocations while alive; thread-affine through
-/// `Restore`. Field order matters: the counter pointer is removed before the probe
-/// that owns the counter is released.
+/// Field order removes the thread-local pointer before releasing its owner.
+/// `Restore` keeps the guard on the installing thread.
 pub(crate) struct CountGuard {
     _restore: Restore,
     _probe: Arc<WorkerProbe>,
 }
 
-/// Allocations made by the calling thread while `action` runs.
 #[cfg(test)]
 pub(crate) fn allocations_during(action: impl FnOnce()) -> u64 {
     let counter = AtomicU64::new(0);
@@ -189,6 +180,7 @@ impl ThreadCpu {
         let ticks = |time: &FILETIME| {
             (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
         };
+        // FILETIME counts 100 ns intervals.
         Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
     }
 

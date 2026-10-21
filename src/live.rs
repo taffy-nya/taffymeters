@@ -161,8 +161,7 @@ impl LiveAudio {
         ))
     }
 
-    /// `fill_silence`: the input stops delivering while nothing plays (the system
-    /// loopback), so the worker stands in silence for it.
+    /// WASAPI loopback stops callbacks during silence; `fill_silence` lets the worker fill the gap.
     fn create_transport(
         config: LiveAudioConfig,
         descriptor: Arc<crate::audio::AudioDescriptor>,
@@ -238,6 +237,7 @@ impl LiveAudio {
         } else {
             match input {
                 InputDriver::System(capture) => {
+                    // Queue the continuity boundary before capture can publish resumed blocks.
                     let continuity = self.telemetry.continuity().wrapping_add(1);
                     self.handle
                         .resume_at(continuity)
