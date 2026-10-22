@@ -53,7 +53,7 @@ impl ModuleFactory for WaveformFactory {
     ) -> Result<Box<dyn Module>, RegistryError> {
         let (subscription, output) =
             subscribe_pcm(services, Keep::Seconds(WAVEFORM_HISTORY_SECONDS), data)?;
-        Ok(Box::new(WaveformModule {
+        let mut module = WaveformModule {
             source: services.source.clone(),
             controller: subscription.controller(),
             reader: subscription.reader(),
@@ -69,7 +69,9 @@ impl ModuleFactory for WaveformFactory {
             picture_key: None,
             column: Vec::new(),
             clock: ViewClock::default(),
-        }))
+        };
+        module.seconds = module.seconds.min(module.visible_range().1);
+        Ok(Box::new(module))
     }
 
     fn default_data(&self) -> Option<DataSpec> {
@@ -406,8 +408,11 @@ mod tests {
 
         let two_seconds = history_of(2.0);
         let mut short = waveform(&fixture, Some(&two_seconds));
-        assert_eq!(visible_time(short.as_ref()).0, WAVEFORM_MIN_SECONDS);
-        assert_eq!(visible_time(short.as_ref()).1, 2.0);
+        assert_eq!(
+            visible_time(short.as_ref()),
+            (WAVEFORM_MIN_SECONDS, 2.0, 2.0),
+            "the default span starts within the History"
+        );
         set_visible_time(short.as_mut(), 4.0);
         assert_eq!(
             visible_time(short.as_ref()).2,

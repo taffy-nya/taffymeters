@@ -113,7 +113,8 @@ impl Color {
 
     pub fn from_hex(text: &str) -> Option<Self> {
         let digits = text.strip_prefix('#')?;
-        if !digits.is_ascii() || !matches!(digits.len(), 6 | 8) {
+        // `from_str_radix` alone would accept a leading sign in each pair.
+        if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) || !matches!(digits.len(), 6 | 8) {
             return None;
         }
         let channel = |index: usize| u8::from_str_radix(&digits[index..index + 2], 16).ok();
@@ -597,6 +598,10 @@ mod tests {
             "#ff0000 ",
             " #ff0000",
             "#ff00000g",
+            "#+1+2+3",
+            "#+f+f+f",
+            "#-1-2-3",
+            "#ff0000+f",
         ] {
             assert_eq!(Color::from_hex(text), None, "{text:?}");
         }

@@ -60,7 +60,7 @@ impl ModuleFactory for SpectrogramFactory {
             .dataflow
             .subscribe(spec)
             .map_err(ModuleError::from)?;
-        Ok(Box::new(SpectrogramModule {
+        let mut module = SpectrogramModule {
             source: services.source.clone(),
             controller: subscription.controller(),
             reader: subscription.reader(),
@@ -77,7 +77,9 @@ impl ModuleFactory for SpectrogramFactory {
             column: Vec::new(),
             written_through: 0,
             clock: ViewClock::default(),
-        }))
+        };
+        module.visible_seconds = module.visible_seconds.min(module.visible_range().1);
+        Ok(Box::new(module))
     }
 
     fn default_data(&self) -> Option<DataSpec> {
@@ -323,6 +325,22 @@ mod tests {
     fn row_of(frequency_hz: f32, rows: usize) -> usize {
         let fraction = (frequency_hz / MIN_FREQUENCY_HZ).ln() / (20_000.0 / MIN_FREQUENCY_HZ).ln();
         ((1.0 - fraction) * rows as f32) as usize
+    }
+
+    #[test]
+    fn the_default_visible_time_starts_within_a_short_history() {
+        let fixture = PcmFixture::new(1);
+        let (mut spec, _, history) = spectrogram_spec();
+        spec.set_keep(history, Keep::Seconds(3.0));
+        let module = SpectrogramFactory
+            .create(&fixture.services, &Registry::default(), Some(&spec))
+            .unwrap();
+        let setting = module
+            .view_settings()
+            .into_iter()
+            .find(|setting| setting.key == VISIBLE_SECONDS_KEY)
+            .unwrap();
+        assert_eq!(setting.value, SettingValue::Number(3.0));
     }
 
     #[test]
