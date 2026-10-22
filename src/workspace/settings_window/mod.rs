@@ -1,5 +1,6 @@
 //! Every settings change goes through `WorkspaceAction`.
 
+mod color_picker;
 mod module_tab;
 mod theme_tab;
 mod widgets;
@@ -97,6 +98,11 @@ pub(crate) enum SettingsItem {
         role: ColorRole,
         index: u8,
     },
+    ColorPicker {
+        scope: ColorScope,
+        role: ColorRole,
+        part: PickerPart,
+    },
     SplitRight,
     SplitDown,
     Detach,
@@ -129,6 +135,17 @@ pub(crate) enum SettingsItem {
     TextSize,
     ReferenceLevel,
     TypeStyle(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PickerPart {
+    Button,
+    /// 0–3: red, green, blue, alpha.
+    Channel(u8),
+    Hex,
+    Plane,
+    Hue,
+    Alpha,
 }
 
 // Catppuccin accents: Mocha on dark, Latte on light; matching order in both palettes.

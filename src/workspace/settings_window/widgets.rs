@@ -1,6 +1,6 @@
 use eframe::egui::{self, Align, Layout, RichText, Stroke, vec2};
 
-use super::{SettingsItem, swatches};
+use super::{SettingsItem, color_picker::color_picker, swatches};
 use crate::{
     dataflow::ChannelSelection,
     render::Color,
@@ -415,19 +415,12 @@ pub(super) fn color_row(
             }
         }
         ui.add_space(4.0);
-        let mut picked = color32(current);
-        if egui::color_picker::color_edit_button_srgba(
-            ui,
-            &mut picked,
-            egui::color_picker::Alpha::OnlyBlend,
-        )
-        .changed()
-        {
-            let [red, green, blue, alpha] = picked.to_srgba_unmultiplied();
+        let part = |part| SettingsItem::ColorPicker { scope, role, part };
+        if let Some(color) = color_picker(ui, current, part, controls) {
             actions.push(WorkspaceAction::SetColor {
                 scope,
                 role,
-                color: Some(Color::rgba(red, green, blue, alpha)),
+                color: Some(color),
             });
         }
     });

@@ -53,7 +53,7 @@ pub(crate) use native::on_session_end;
 use persist::SessionAutosave;
 use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
-pub(crate) use settings_window::{SettingsItem, Tab, swatches};
+pub(crate) use settings_window::{PickerPart, SettingsItem, Tab, swatches};
 use window::WindowUiState;
 #[cfg(feature = "automation")]
 pub(crate) use window::{ControlKey, ControlTarget, EdgeLine, ResizeEdge};

@@ -19,8 +19,8 @@ use crate::{
     settings::{NodeParam, SettingValue},
     theme::{ColorRole, ThemePreset},
     workspace::{
-        ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId, SettingsItem,
-        Side, Tab, WindowId, Workspace, WorkspaceAction, swatches,
+        ColorScope, ControlKey, Display, EdgeLine, FIRST_WINDOW, ModuleInstanceId, PickerPart,
+        SettingsItem, Side, Tab, WindowId, Workspace, WorkspaceAction, swatches,
     },
 };
 
@@ -34,7 +34,7 @@ use crate::automation::{
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 10] = [
+pub(super) const CASES: [(&str, Scenario); 11] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -45,6 +45,7 @@ pub(super) const CASES: [(&str, Scenario); 10] = [
     ("S08", s08),
     ("S09", s09),
     ("S10", s10),
+    ("S11", s11),
 ];
 
 impl TempDir {
@@ -2130,5 +2131,107 @@ fn s10() -> Result<Value, String> {
     Ok(
         json!({"interval_seconds":1,"first_write":"after one unchanged check",
         "steady":"no writes","edits":"written once they stop"}),
+    )
+}
+
+/// The picker's hex and channel fields commit typed values; a gray keeps the hue it
+/// was picked from.
+fn s11() -> Result<Value, String> {
+    use crate::render::Color;
+
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    h.frame(vec![]);
+    let a = first_leaf(&h.ws)?;
+    let part = |part| {
+        ControlKey::Settings(SettingsItem::ColorPicker {
+            scope: ColorScope::Instance(a),
+            role: ColorRole::Primary,
+            part,
+        })
+    };
+    let primary = |h: &Harness| {
+        h.ws.observation()
+            .module(a)
+            .map(|m| m.palette.color(ColorRole::Primary))
+    };
+    let replace_text = |h: &mut Harness, key: ControlKey, text: &str, end: egui::Key| {
+        h.click(key)?;
+        h.key_with(egui::Key::A, egui::Modifiers::COMMAND);
+        h.frame(vec![Event::Text(text.to_owned())]);
+        h.key(end);
+        h.frame(vec![]);
+        Ok::<_, String>(())
+    };
+    open_settings(&mut h, a, &[])?;
+    let original = primary(&h);
+    h.click(part(PickerPart::Button))?;
+
+    replace_text(&mut h, part(PickerPart::Hex), "89b4fa80", egui::Key::Enter)?;
+    let blue = Color::rgba(0x89, 0xb4, 0xfa, 0x80);
+    check(
+        primary(&h) == Some(blue) && original != Some(blue),
+        &format!("hex without # was not applied: {:?}", primary(&h)),
+    )?;
+    replace_text(&mut h, part(PickerPart::Hex), "#+1+2+3", egui::Key::Enter)?;
+    check(
+        primary(&h) == Some(blue),
+        &format!("an invalid hex changed the color: {:?}", primary(&h)),
+    )?;
+    replace_text(&mut h, part(PickerPart::Channel(0)), "10", egui::Key::Enter)?;
+    let edited = Color::rgba(10, 0xb4, 0xfa, 0x80);
+    check(
+        primary(&h) == Some(edited),
+        &format!("the red field did not edit only red: {:?}", primary(&h)),
+    )?;
+    let alpha = h.locate(&part(PickerPart::Alpha))?.rect;
+    h.drag(
+        part(PickerPart::Alpha),
+        &[egui::pos2(alpha.right() + 20.0, alpha.center().y)],
+        egui::Modifiers::NONE,
+        None,
+    )?;
+    check(
+        primary(&h)
+            == Some(Color {
+                alpha: 255,
+                ..edited
+            }),
+        &format!("the alpha bar changed more than alpha: {:?}", primary(&h)),
+    )?;
+
+    // Through premultiplied RGB, a zero alpha would also zero the hue.
+    replace_text(&mut h, part(PickerPart::Channel(3)), "0", egui::Key::Enter)?;
+    check(
+        primary(&h) == Some(Color { alpha: 0, ..edited }),
+        &format!("the alpha field changed more than alpha: {:?}", primary(&h)),
+    )?;
+    let plane = h.locate(&part(PickerPart::Plane))?.rect;
+    let middle = plane.center();
+    h.drag(
+        part(PickerPart::Plane),
+        &[egui::pos2(plane.left() - 20.0, middle.y)],
+        egui::Modifiers::NONE,
+        None,
+    )?;
+    let gray = primary(&h).ok_or("instance missing")?;
+    h.drag(
+        part(PickerPart::Plane),
+        &[egui::pos2(plane.right() + 20.0, middle.y)],
+        egui::Modifiers::NONE,
+        None,
+    )?;
+    let resaturated = primary(&h).ok_or("instance missing")?;
+    check(
+        gray.red == gray.green
+            && gray.green == gray.blue
+            && resaturated.blue > resaturated.red
+            && resaturated.alpha == 0,
+        &format!("gray {gray:?} lost the blue hue: {resaturated:?}"),
+    )?;
+    h.ws.check_ownership()?;
+    Ok(
+        json!({"hex":"accepted without #, invalid ignored","channel":"red only",
+        "gray":"keeps its hue"}),
     )
 }
