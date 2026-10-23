@@ -10,7 +10,6 @@ def run(c):
     app.open_settings()
     app.click("Tab(Workspace)")
     app.click("InputPicker")
-    app.target("Settings(InputChoice(1))")
     app.click("InputChoice(1)")
     chosen = w.wait(lambda: app.state().get("input", {}).get("chosen")
                     if app.state().get("input", {}).get("chosen", {}).get("kind") == "system_endpoint" else None,

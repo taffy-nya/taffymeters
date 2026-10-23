@@ -97,13 +97,39 @@ class App:
         rows = [row for row in self.records("targets") if row["body"]["window"] == window]
         return {key: (rect, enabled) for key, rect, enabled in rows[-1]["body"]["targets"]} if rows else {}
 
-    def target(self, key, window="settings"):
-        def find():
-            target = self.targets(window).get(key)
-            if target and not target[1]:
-                raise AssertionError(f"Disabled control: {key}")
-            return target[0] if target else None
-        return win.wait(find, f"current {window} target {key}")
+    def settled_targets(self, window="settings", quiet=0.35, timeout=12):
+        """Targets of a layout that has stopped changing.
+
+        The trace writes a window's targets at most every 100 ms and only when they change,
+        so the newest record can predate the next pass: a popup's first frame is an
+        off-place, disabled sizing pass, and scrolling keeps animating after the wheel.
+        Redrawing the window keeps passes coming, so a change cannot stay unwritten, and
+        `quiet` covers several sample intervals without a new record.
+        """
+        deadline = time.monotonic() + timeout
+        count, since = None, time.monotonic()
+        while True:
+            hwnd = self.settings_window() if window == "settings" else self.windows().get(window)
+            if hwnd:
+                win.redraw(hwnd)
+            current = sum(1 for row in self.records("targets") if row["body"]["window"] == window)
+            now = time.monotonic()
+            if current != count:
+                count, since = current, now
+            elif current and now - since >= quiet:
+                return self.targets(window)
+            if now >= deadline:
+                raise AssertionError(f"Timed out waiting for settled {window} targets")
+            time.sleep(0.04)
+
+    def target(self, key, window="settings", timeout=12):
+        deadline = time.monotonic() + timeout
+        while True:
+            found = self.settled_targets(window, timeout=max(deadline - time.monotonic(), 1)).get(key)
+            if found and found[1]:
+                return found[0]
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"{'Disabled' if found else 'Missing'} control: {key}")
 
     def click(self, item, window="settings"):
         hwnd = self.settings_window() if window == "settings" else self.windows()[window]
@@ -131,7 +157,7 @@ class App:
     def open_settings(self, window=1):
         hwnd = self.windows()[window]
         win.u.SetForegroundWindow(hwnd)
-        targets = self.targets(window)
+        targets = self.settled_targets(window)
         body = next((key for key in targets if key.startswith("LeafBody(")), "EmptyBody")
         win.click(win.screen(hwnd, self.target(body, window)), right=True)
         settings = win.wait(self.settings_window, "settings window")
