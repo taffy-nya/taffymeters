@@ -31,11 +31,12 @@ pub struct ModuleFrame<'a> {
     pub renderer: &'a mut dyn RenderTarget,
 }
 
-/// Reference level of a workspace that sets none: measured on the system loopback
-/// at the user's usual listening volume (music peaks: p50 −20, p90 −15, p99 −12.7,
-/// max −11 dBFS over 60 s), so everyday peaks stay within the views.
-pub const DEFAULT_REFERENCE_DBFS: f32 = -12.0;
-pub const REFERENCE_DBFS_RANGE: (f32, f32) = (-60.0, 0.0);
+/// Reference level of a workspace that sets none: full scale. Loopback of a device with
+/// hardware volume (many headphones) peaks there regardless of the system volume;
+/// devices with software volume read lower and need a lower reference.
+pub const DEFAULT_REFERENCE_DBFS: f32 = 0.0;
+/// The top leaves room for float signals above full scale.
+pub const REFERENCE_DBFS_RANGE: (f32, f32) = (-36.0, 12.0);
 /// Fraction of a linear view's height (half-height for signed views) reached by the reference.
 /// dB views put it at the top because tilted bins sit below the sample peak.
 pub const REFERENCE_HEIGHT: f32 = 0.9;
