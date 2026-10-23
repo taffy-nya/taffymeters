@@ -88,6 +88,8 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 .map(|path| Trace::create(Path::new(&path)))
                 .transpose()
                 .map_err(runtime)?;
+            let store = value_of("--config-dir").map(WorkspaceStore::new);
+            let mut unavailable = None;
             let live = match values[0].as_str() {
                 "synthetic" => {
                     LiveAudio::open_realtime(LiveAudioConfig::default(), SyntheticConfig::default())
@@ -95,17 +97,28 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 "sweep" => {
                     LiveAudio::open_realtime(LiveAudioConfig::default(), SyntheticConfig::sweep())
                 }
-                "system" => LiveAudio::open_default(LiveAudioConfig::default()),
+                // Like the product: a saved session chooses the system input.
+                "system" => {
+                    let chosen = store
+                        .as_ref()
+                        .map(WorkspaceStore::session_input)
+                        .unwrap_or_default();
+                    crate::live::open_chosen(&chosen).map(|(live, failure)| {
+                        unavailable = failure;
+                        live
+                    })
+                }
                 _ => return Err(usage("--input must be synthetic, sweep or system".into())),
             }
             .map_err(|e| runtime(e.to_string()))?;
-            let workspace = match value_of("--config-dir") {
-                Some(root) => {
-                    Workspace::open(live, WorkspaceStore::new(root), Arc::new(NativeDesktop))
-                }
+            let mut workspace = match store {
+                Some(store) => Workspace::open(live, store, Arc::new(NativeDesktop)),
                 None => Workspace::new(live, false),
             }
             .map_err(|e| runtime(e.to_string()))?;
+            if let Some(error) = unavailable {
+                workspace.input_unavailable(&error);
+            }
             let mut app = App::new(workspace);
             if let Some(trace) = trace {
                 app = app.with_trace(trace);

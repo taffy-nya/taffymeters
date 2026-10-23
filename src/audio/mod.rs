@@ -11,7 +11,9 @@ pub use descriptor::{AudioDescriptor, ChannelLayout, DescriptorError, Generation
 pub use source::SourceReader;
 pub(crate) use status::SourceTelemetry;
 pub use status::{SourceState, SourceStatus};
-pub(crate) use system::{OpenSystemInput, SystemCapture};
+pub(crate) use system::{
+    Endpoint, EndpointInfo, Endpoints, OpenSystemInput, SystemCapture, list_endpoints,
+};
 pub(crate) use transport::{
     AudioBlock, CaptureEndpoint, ProcessingEndpoint, create_block_transport,
 };

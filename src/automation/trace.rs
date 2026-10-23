@@ -25,8 +25,10 @@ pub(crate) struct Trace {
     state_settings_open: Option<bool>,
     targets_sampled: HashMap<WindowId, Instant>,
     passes: HashMap<WindowId, u64>,
+    /// Counters restart with each source, so a sample spans one generation only.
     rate_started: Option<(
         Instant,
+        crate::audio::Generation,
         crate::dataflow::RuntimeMetrics,
         crate::probe::WorkerSample,
     )>,
@@ -63,8 +65,13 @@ impl Trace {
         let metrics = handle.metrics();
         let worker = handle.worker_sample();
         let now = Instant::now();
-        let Some((started, previous, previous_worker)) = self.rate_started else {
-            self.rate_started = Some((now, metrics, worker));
+        let generation = workspace.source_descriptor_for_automation().generation;
+        let Some((started, previous, previous_worker)) = self
+            .rate_started
+            .filter(|(_, sampled, ..)| *sampled == generation)
+            .map(|(started, _, metrics, worker)| (started, metrics, worker))
+        else {
+            self.rate_started = Some((now, generation, metrics, worker));
             self.passes.clear();
             return;
         };
@@ -98,7 +105,7 @@ impl Trace {
             "active_level_nodes": metrics.active_level_nodes,
         });
         self.write("rate", body);
-        self.rate_started = Some((now, metrics, worker));
+        self.rate_started = Some((now, generation, metrics, worker));
     }
 
     /// Settings transitions bypass sampling: closing may be the last UI pass.
@@ -141,6 +148,13 @@ impl Trace {
             "nodes": metrics.nodes,
             "control_error": observation.control_error,
             "source": format!("{:?}", observation.source_status.state),
+            "input": {
+                "chosen": workspace.input(),
+                "running": workspace.source_name(),
+                "sample_rate_hz": workspace.source_descriptor_for_automation().sample_rate_hz,
+                "channels": workspace.source_descriptor_for_automation().channel_count,
+                "generation": workspace.source_descriptor_for_automation().generation.0,
+            },
             "preset": observation.preset,
             "theme": observation.theme.preset,
             "notices": observation.notices,

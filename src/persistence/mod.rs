@@ -14,7 +14,14 @@ use serde_json::Value;
 use crate::theme::ThemeSettings;
 
 pub(crate) const FORMAT_VERSION: u32 = 2;
-pub(crate) const SYSTEM_INPUT: &str = "system_default";
+/// Input kinds; the playback ones are captured through loopback.
+pub(crate) const DEFAULT_PLAYBACK_INPUT: &str = "system_default";
+pub(crate) const PLAYBACK_INPUT: &str = "system_endpoint";
+pub(crate) const DEFAULT_CAPTURE_INPUT: &str = "capture_default";
+pub(crate) const CAPTURE_INPUT: &str = "capture_endpoint";
+/// Device ID of a fixed endpoint, and its name for when the device is absent.
+pub(crate) const DEVICE_OPTION: &str = "device";
+pub(crate) const NAME_OPTION: &str = "name";
 pub(crate) const DEFAULT_PRESET: &str = "Default";
 
 const BUILTIN_PRESETS: [(&str, &str); 3] = [
@@ -82,9 +89,15 @@ pub(crate) struct InputConfig {
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
-            kind: SYSTEM_INPUT.to_owned(),
+            kind: DEFAULT_PLAYBACK_INPUT.to_owned(),
             options: BTreeMap::new(),
         }
+    }
+}
+
+impl InputConfig {
+    pub(crate) fn option(&self, key: &str) -> Option<&str> {
+        self.options.get(key).and_then(Value::as_str)
     }
 }
 
@@ -336,6 +349,15 @@ impl WorkspaceStore {
 
     pub(crate) fn load_session(&self) -> Result<Option<WorkspaceFile>, PersistError> {
         read(&self.session_path())
+    }
+
+    /// The session's input, or the default when there is no readable session.
+    pub(crate) fn session_input(&self) -> InputConfig {
+        self.load_session()
+            .ok()
+            .flatten()
+            .map(|file| file.input)
+            .unwrap_or_default()
     }
 
     pub(crate) fn save_session(&self, file: &WorkspaceFile) -> Result<(), PersistError> {

@@ -27,15 +27,26 @@ impl Workspace {
             .next_instance_id
             .checked_add(1)
             .ok_or(WorkspaceError::IdExhausted)?;
+        let id = ModuleInstanceId(self.next_instance_id);
+        self.build_instance(id, type_id, data)?;
+        self.next_instance_id = next;
+        Ok(id)
+    }
+
+    /// Inserts a Module created for `id` only when the factory succeeds.
+    pub(super) fn build_instance(
+        &mut self,
+        id: ModuleInstanceId,
+        type_id: &str,
+        data: Option<&crate::dataflow::DataSpec>,
+    ) -> Result<(), WorkspaceError> {
         let (type_id, label) = self
             .registry
             .module_type(type_id)
             .ok_or_else(|| RegistryError::UnknownModule(type_id.to_owned()))?;
         let module = self.registry.create_module(type_id, &self.services, data)?;
-        let id = ModuleInstanceId(self.next_instance_id);
-        self.next_instance_id = next;
         self.insert_entry(id, type_id, label, module, None);
-        Ok(id)
+        Ok(())
     }
 
     pub(super) fn insert_entry(

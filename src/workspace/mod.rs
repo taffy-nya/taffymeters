@@ -13,6 +13,7 @@ mod native;
 mod persist;
 mod placement;
 mod settings_window;
+mod source;
 mod window;
 
 use std::{
@@ -209,6 +210,10 @@ pub(crate) enum WorkspaceAction {
     /// `None` follows the preset's size.
     SetTextSize {
         size: Option<f32>,
+    },
+    /// Reopens the source even when `input` is unchanged, so a lost device can be retried.
+    SetInput {
+        input: InputConfig,
     },
     /// `None` follows the default.
     SetReferenceLevel {
@@ -464,7 +469,10 @@ pub(crate) struct Workspace {
     published_groups: Vec<(WindowId, u64)>,
     theme: ThemeSettings,
     chrome: Palette,
+    /// The chosen input; the running source may differ when it could not be opened.
     input: InputConfig,
+    /// Reinstalled on every source the workspace switches to.
+    waker: Option<Arc<dyn Fn() + Send + Sync>>,
     reference_dbfs: Option<f32>,
     notices: Vec<String>,
     notices_shown_until: Duration,
@@ -513,6 +521,7 @@ impl Workspace {
             chrome: theme.global_palette(),
             theme,
             input: InputConfig::default(),
+            waker: None,
             reference_dbfs: None,
             notices: Vec::new(),
             binding_numbers: HashMap::new(),
@@ -558,11 +567,6 @@ impl Workspace {
                 builder: window.viewport_builder(*id),
             })
             .collect()
-    }
-
-    /// Callback run on the analysis worker after it publishes new results.
-    pub(crate) fn set_publication_waker(&self, waker: Option<crate::dataflow::PublicationWaker>) {
-        self.services.dataflow.set_publication_waker(waker);
     }
 
     pub(crate) fn has_window(&self, id: WindowId) -> bool {
@@ -807,6 +811,7 @@ impl Workspace {
             }
             WorkspaceAction::SetTextSize { size } => self.set_text_size(size),
             WorkspaceAction::SetReferenceLevel { dbfs } => self.set_reference_level(dbfs),
+            WorkspaceAction::SetInput { input } => self.set_input(input),
             WorkspaceAction::LoadPreset { preset } => self.load_preset(preset),
             WorkspaceAction::SavePresetAs { name } => self.save_preset_as(name),
             WorkspaceAction::SavePreset => self.save_preset(),

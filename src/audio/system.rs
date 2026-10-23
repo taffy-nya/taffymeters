@@ -1,7 +1,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use cpal::{
-    FromSample, Sample, SampleFormat, SizedSample, Stream,
+    DeviceId, FromSample, Sample, SampleFormat, SizedSample, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
@@ -10,11 +10,88 @@ use super::{
     SourceTelemetry,
 };
 
+/// Playback endpoints are captured through WASAPI loopback; capture endpoints directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    DefaultPlayback,
+    /// `cpal::DeviceId` in its `host:id` text form.
+    Playback(String),
+    DefaultCapture,
+    Capture(String),
+}
+
+impl Endpoint {
+    pub(crate) fn is_playback(&self) -> bool {
+        matches!(self, Self::DefaultPlayback | Self::Playback(_))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EndpointInfo {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) name: String,
+}
+
+/// Fixed endpoints of both directions, each list led by its current default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Endpoints {
+    pub(crate) playback: Vec<EndpointInfo>,
+    pub(crate) capture: Vec<EndpointInfo>,
+    pub(crate) default_playback: Option<String>,
+    pub(crate) default_capture: Option<String>,
+}
+
+/// Queries the system; call on demand, not every frame.
+pub(crate) fn list_endpoints() -> Endpoints {
+    let host = cpal::default_host();
+    let infos = |devices: Option<Vec<cpal::Device>>, fixed: fn(String) -> Endpoint| {
+        devices
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|device| {
+                Some(EndpointInfo {
+                    endpoint: fixed(device.id().ok()?.to_string()),
+                    name: device_name(device),
+                })
+            })
+            .collect()
+    };
+    Endpoints {
+        playback: infos(
+            host.output_devices().ok().map(Iterator::collect),
+            Endpoint::Playback,
+        ),
+        capture: infos(
+            host.input_devices().ok().map(Iterator::collect),
+            Endpoint::Capture,
+        ),
+        default_playback: host.default_output_device().as_ref().map(device_name),
+        default_capture: host.default_input_device().as_ref().map(device_name),
+    }
+}
+
+/// The friendly name ("Headphones (Device)") as Windows shows it, or the bare
+/// description ("Headphones") when that is all there is.
+fn device_name(device: &cpal::Device) -> String {
+    device
+        .description()
+        .map(|description| {
+            description
+                .extended()
+                .first()
+                .map_or_else(|| description.name().to_owned(), Clone::clone)
+        })
+        .unwrap_or_else(|_| "Unnamed device".to_owned())
+}
+
 pub(crate) struct OpenSystemInput {
     device: cpal::Device,
     stream_config: cpal::StreamConfig,
     sample_format: SampleFormat,
     descriptor: Arc<AudioDescriptor>,
+    name: String,
+    /// Captured through loopback rather than as a recording device.
+    playback: bool,
 }
 
 pub(crate) struct SystemCapture {
@@ -24,11 +101,13 @@ pub(crate) struct SystemCapture {
 
 #[derive(Debug)]
 pub(crate) enum SystemInputError {
-    NoOutputDevice,
+    NoDevice,
+    UnknownDevice,
     DefaultConfig(cpal::DefaultStreamConfigError),
     InvalidDescriptor(super::DescriptorError),
     UnsupportedSampleFormat(SampleFormat),
     BuildStream(cpal::BuildStreamError),
+    MicrophoneBlocked,
     PlayStream(cpal::PlayStreamError),
     PauseStream(cpal::PauseStreamError),
 }
@@ -36,15 +115,20 @@ pub(crate) enum SystemInputError {
 impl fmt::Display for SystemInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoOutputDevice => f.write_str("no default output device is available"),
-            Self::DefaultConfig(error) => write!(f, "cannot read default output format: {error}"),
-            Self::InvalidDescriptor(error) => write!(f, "invalid output descriptor: {error}"),
+            Self::NoDevice => f.write_str("no default device is available"),
+            Self::UnknownDevice => f.write_str("the device is not connected"),
+            Self::DefaultConfig(error) => write!(f, "cannot read the device format: {error}"),
+            Self::InvalidDescriptor(error) => write!(f, "invalid device format: {error}"),
             Self::UnsupportedSampleFormat(format) => {
                 write!(f, "unsupported system sample format: {format}")
             }
-            Self::BuildStream(error) => write!(f, "cannot build WASAPI loopback stream: {error}"),
-            Self::PlayStream(error) => write!(f, "cannot start WASAPI loopback stream: {error}"),
-            Self::PauseStream(error) => write!(f, "cannot pause WASAPI loopback stream: {error}"),
+            Self::BuildStream(error) => write!(f, "cannot build the WASAPI stream: {error}"),
+            Self::MicrophoneBlocked => f.write_str(
+                "Windows blocks microphone access for desktop apps \
+                 (Settings › Privacy & security › Microphone)",
+            ),
+            Self::PlayStream(error) => write!(f, "cannot start the WASAPI stream: {error}"),
+            Self::PauseStream(error) => write!(f, "cannot pause the WASAPI stream: {error}"),
         }
     }
 }
@@ -52,14 +136,29 @@ impl fmt::Display for SystemInputError {
 impl Error for SystemInputError {}
 
 impl OpenSystemInput {
-    pub(crate) fn open_default() -> Result<Self, SystemInputError> {
+    pub(crate) fn open(
+        endpoint: &Endpoint,
+        generation: Generation,
+    ) -> Result<Self, SystemInputError> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(SystemInputError::NoOutputDevice)?;
-        let supported = device
-            .default_output_config()
-            .map_err(SystemInputError::DefaultConfig)?;
+        let device = match endpoint {
+            Endpoint::DefaultPlayback => host.default_output_device(),
+            Endpoint::DefaultCapture => host.default_input_device(),
+            Endpoint::Playback(id) | Endpoint::Capture(id) => {
+                let parsed: DeviceId = id.parse().map_err(|_| SystemInputError::UnknownDevice)?;
+                Some(
+                    host.device_by_id(&parsed)
+                        .ok_or(SystemInputError::UnknownDevice)?,
+                )
+            }
+        }
+        .ok_or(SystemInputError::NoDevice)?;
+        let supported = if endpoint.is_playback() {
+            device.default_output_config()
+        } else {
+            device.default_input_config()
+        }
+        .map_err(SystemInputError::DefaultConfig)?;
         let channel_count = supported.channels();
         let channel_layout = match channel_count {
             1 => ChannelLayout::Mono,
@@ -68,7 +167,7 @@ impl OpenSystemInput {
         };
         let descriptor = AudioDescriptor::new(
             SourceId(1),
-            Generation(1),
+            generation,
             supported.sample_rate(),
             channel_count,
             channel_layout,
@@ -77,11 +176,17 @@ impl OpenSystemInput {
         let sample_format = supported.sample_format();
         let stream_config = supported.into();
         Ok(Self {
+            name: device_name(&device),
+            playback: endpoint.is_playback(),
             device,
             stream_config,
             sample_format,
             descriptor: Arc::new(descriptor),
         })
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
     pub(crate) fn descriptor(&self) -> &Arc<AudioDescriptor> {
@@ -134,7 +239,15 @@ impl OpenSystemInput {
                 move |error| error_telemetry.device_lost(error.to_string()),
                 None,
             )
-            .map_err(SystemInputError::BuildStream)?;
+            .map_err(|error| {
+                // Capture endpoints fail with E_ACCESSDENIED when the privacy settings
+                // deny desktop apps the microphone; cpal only passes the text on.
+                if !self.playback && error.to_string().contains("0x80070005") {
+                    SystemInputError::MicrophoneBlocked
+                } else {
+                    SystemInputError::BuildStream(error)
+                }
+            })?;
         stream.play().map_err(SystemInputError::PlayStream)?;
         telemetry.set_state(SourceState::Running);
         Ok(SystemCapture { stream, telemetry })

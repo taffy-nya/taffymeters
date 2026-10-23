@@ -26,6 +26,8 @@ mod app;
 #[cfg(feature = "automation")]
 mod automation;
 mod crash;
+#[cfg(windows)]
+mod fonts;
 mod icon;
 mod live;
 mod persistence;
@@ -67,16 +69,22 @@ fn main() {
     };
     crash::install(root.clone());
     let store = persistence::WorkspaceStore::new(root);
-    let live = LiveAudio::open_default(LiveAudioConfig::default())
+    let (live, unavailable) = live::open_chosen(&store.session_input())
         .unwrap_or_else(|error| exit_with_error(&error.to_string()));
     let descriptor = Arc::clone(live.reader().descriptor());
     eprintln!(
-        "system audio: {} Hz, {} channels, {:?}",
-        descriptor.sample_rate_hz, descriptor.channel_count, descriptor.channel_layout
+        "{}: {} Hz, {} channels, {:?}",
+        live.name(),
+        descriptor.sample_rate_hz,
+        descriptor.channel_count,
+        descriptor.channel_layout
     );
     let desktop = Arc::new(workspace::NativeDesktop);
-    let workspace = workspace::Workspace::open(live, store, desktop)
+    let mut workspace = workspace::Workspace::open(live, store, desktop)
         .unwrap_or_else(|error| exit_with_error(&format!("couldn't open the workspace: {error}")));
+    if let Some(error) = unavailable {
+        workspace.input_unavailable(&error);
+    }
     if let Err(error) = run_window(app::App::new(workspace)) {
         exit_with_error(&format!("couldn't open the window: {error}"));
     }
@@ -128,6 +136,8 @@ fn run_window(app: app::App) -> eframe::Result<()> {
         options,
         Box::new(move |creation_context| {
             app.install_waker(&creation_context.egui_ctx);
+            #[cfg(windows)]
+            fonts::install_fallbacks(&creation_context.egui_ctx);
             #[cfg(windows)]
             app.save_on_session_end();
             Ok(Box::new(app))

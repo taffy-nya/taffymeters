@@ -2,10 +2,14 @@ use std::{error::Error, fmt, io, sync::Arc};
 
 use crate::{
     audio::{
-        CaptureEndpoint, OpenSystemInput, SourceReader, SourceState, SourceTelemetry,
-        SystemCapture, create_block_transport,
+        CaptureEndpoint, Endpoint, Generation, OpenSystemInput, SourceReader, SourceState,
+        SourceTelemetry, SystemCapture, create_block_transport,
     },
     dataflow::{ControlError, Dataflow, DataflowHandle},
+    persistence::{
+        CAPTURE_INPUT, DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT, DEVICE_OPTION, InputConfig,
+        PLAYBACK_INPUT,
+    },
 };
 
 #[cfg(feature = "automation")]
@@ -43,11 +47,13 @@ pub struct LiveAudio {
     handle: DataflowHandle,
     telemetry: Arc<SourceTelemetry>,
     paused: bool,
+    name: String,
 }
 
 #[derive(Debug)]
 pub enum LiveAudioError {
     Input(String),
+    UnsupportedInput(String),
     Synthetic(String),
     Transport(String),
     Worker(io::Error),
@@ -59,6 +65,7 @@ impl fmt::Display for LiveAudioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Input(error) => write!(f, "system audio input failed: {error}"),
+            Self::UnsupportedInput(kind) => write!(f, "input {kind:?} is not supported"),
             Self::Synthetic(error) => write!(f, "synthetic audio input failed: {error}"),
             Self::Transport(error) => write!(f, "audio transport failed: {error}"),
             Self::Worker(error) => write!(f, "couldn't start the analysis thread: {error}"),
@@ -70,20 +77,61 @@ impl fmt::Display for LiveAudioError {
 
 impl Error for LiveAudioError {}
 
+#[cfg(feature = "automation")]
+const SYNTHETIC_NAME: &str = "Synthetic";
+
+/// `None` for input kinds this build cannot open.
+pub(crate) fn endpoint_of(input: &InputConfig) -> Option<Endpoint> {
+    let device = || input.option(DEVICE_OPTION).map(str::to_owned);
+    match input.kind.as_str() {
+        DEFAULT_PLAYBACK_INPUT => Some(Endpoint::DefaultPlayback),
+        PLAYBACK_INPUT => device().map(Endpoint::Playback),
+        DEFAULT_CAPTURE_INPUT => Some(Endpoint::DefaultCapture),
+        CAPTURE_INPUT => device().map(Endpoint::Capture),
+        _ => None,
+    }
+}
+
+/// Opens the chosen input, or the default playback device when that fails. The error of
+/// a supported input that failed comes back for the workspace to report; unsupported
+/// kinds it reports itself.
+pub(crate) fn open_chosen(
+    chosen: &InputConfig,
+) -> Result<(LiveAudio, Option<LiveAudioError>), LiveAudioError> {
+    let open = |input| LiveAudio::open(LiveAudioConfig::default(), input, Generation(1));
+    let default = InputConfig::default();
+    match open(chosen) {
+        Ok(live) => Ok((live, None)),
+        Err(error) if *chosen != default => {
+            let failure = endpoint_of(chosen).is_some().then_some(error);
+            Ok((open(&default)?, failure))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl LiveAudio {
-    pub fn open_default(config: LiveAudioConfig) -> Result<Self, LiveAudioError> {
-        let system_input = OpenSystemInput::open_default()
+    pub(crate) fn open(
+        config: LiveAudioConfig,
+        input: &InputConfig,
+        generation: Generation,
+    ) -> Result<Self, LiveAudioError> {
+        let endpoint = endpoint_of(input)
+            .ok_or_else(|| LiveAudioError::UnsupportedInput(input.kind.clone()))?;
+        let system_input = OpenSystemInput::open(&endpoint, generation)
             .map_err(|error| LiveAudioError::Input(error.to_string()))?;
         let descriptor = Arc::clone(system_input.descriptor());
+        let name = system_input.name().to_owned();
         let telemetry = Arc::new(SourceTelemetry::new());
-        let (endpoint, dataflow, handle) = Self::create_transport(
+        // Capture endpoints keep delivering silence; only loopback stops.
+        let (capture_endpoint, dataflow, handle) = Self::create_transport(
             config,
             Arc::clone(&descriptor),
             Arc::clone(&telemetry),
-            true,
+            endpoint.is_playback(),
         )?;
         let capture = system_input
-            .start(endpoint, Arc::clone(&telemetry))
+            .start(capture_endpoint, Arc::clone(&telemetry))
             .map_err(|error| LiveAudioError::Input(error.to_string()))?;
 
         Ok(Self::from_parts(
@@ -92,6 +140,7 @@ impl LiveAudio {
             handle,
             descriptor,
             telemetry,
+            name,
         ))
     }
 
@@ -125,6 +174,7 @@ impl LiveAudio {
                 handle,
                 descriptor,
                 telemetry,
+                SYNTHETIC_NAME.to_owned(),
             ),
             driver,
         ))
@@ -160,6 +210,7 @@ impl LiveAudio {
             handle,
             descriptor,
             telemetry,
+            SYNTHETIC_NAME.to_owned(),
         ))
     }
 
@@ -194,6 +245,7 @@ impl LiveAudio {
         handle: DataflowHandle,
         descriptor: Arc<crate::audio::AudioDescriptor>,
         telemetry: Arc<SourceTelemetry>,
+        name: String,
     ) -> Self {
         Self {
             input: Some(input),
@@ -202,7 +254,17 @@ impl LiveAudio {
             handle,
             telemetry,
             paused: false,
+            name,
         }
+    }
+
+    /// Device or source name shown to the user.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn paused(&self) -> bool {
+        self.paused
     }
 
     pub fn reader(&self) -> SourceReader {

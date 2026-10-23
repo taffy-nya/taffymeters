@@ -22,11 +22,12 @@ use super::{
 use crate::{
     LiveAudio,
     dataflow::{DataController, DataSpec, SharedAnalysisId},
+    live::endpoint_of,
     module::{Module, ModuleFrame, ModuleResponse, draw_notice},
     persistence::{
-        DEFAULT_PRESET, DisplayFile, DisplayHint, FORMAT_VERSION, LayoutFile, ModuleFile,
-        PersistError, PresetRef, SYSTEM_INPUT, SplitAxis, WindowFile, WorkspaceFile,
-        WorkspaceStore, builtin_preset, builtin_presets, same_name, valid_name,
+        DEFAULT_PRESET, DisplayFile, DisplayHint, FORMAT_VERSION, InputConfig, LayoutFile,
+        ModuleFile, PersistError, PresetRef, SplitAxis, WindowFile, WorkspaceFile, WorkspaceStore,
+        builtin_preset, builtin_presets, same_name, valid_name,
     },
     settings::SettingValue,
     theme::{ColorRole, RoleOverrides},
@@ -127,9 +128,18 @@ impl Workspace {
             }
         };
         workspace.preset = file.preset.clone();
+        // Inputs belong to the session; presets are layouts and leave the input alone.
+        let input = file.input.clone();
         let displays = workspace.displays();
         let current = Self::primary(&displays);
         workspace.restore(file, &displays, current)?;
+        if endpoint_of(&input).is_none() {
+            workspace.push_notice(format!(
+                "Input {:?} unavailable; using system audio (saved input kept)",
+                input.kind
+            ));
+        }
+        workspace.input = input;
         Ok(workspace)
     }
 
@@ -322,6 +332,7 @@ impl Workspace {
     fn preset_contents(&mut self) -> WorkspaceFile {
         let mut file = self.saved_file();
         file.preset = None;
+        file.input = InputConfig::default();
         file
     }
 
@@ -390,13 +401,6 @@ impl Workspace {
             ));
         }
         self.refresh_palettes();
-        if file.input.kind != SYSTEM_INPUT {
-            self.push_notice(format!(
-                "Input {:?} unavailable; using system audio (saved input kept)",
-                file.input.kind
-            ));
-        }
-        self.input = file.input;
         self.reference_dbfs = file.reference_dbfs;
         let saved: Vec<SavedDisplay> = file
             .displays
@@ -543,25 +547,41 @@ impl Workspace {
         file: &ModuleFile,
         bindings: &mut HashMap<u64, SharedAnalysisId>,
     ) -> Result<ModuleInstanceId, WorkspaceError> {
-        match self.module_config(file, bindings) {
-            Ok(config) => match self.create_instance(config.type_id, config.data.as_ref()) {
-                Ok(id) => match self.apply_config(id, &config) {
-                    Ok(warnings) => {
-                        for warning in warnings {
-                            self.push_notice(warning);
-                        }
-                        Ok(id)
-                    }
-                    Err(reason) => {
-                        // Running with defaults would overwrite the saved values.
-                        self.modules.remove(&id);
-                        self.missing_module(file, reason)
-                    }
-                },
-                Err(WorkspaceError::IdExhausted) => Err(WorkspaceError::IdExhausted),
-                Err(error) => self.missing_module(file, error.to_string()),
-            },
-            Err(reason) => self.missing_module(file, reason),
+        let next = self
+            .next_instance_id
+            .checked_add(1)
+            .ok_or(WorkspaceError::IdExhausted)?;
+        let id = ModuleInstanceId(self.next_instance_id);
+        self.next_instance_id = next;
+        self.restore_module_as(id, file, bindings);
+        Ok(id)
+    }
+
+    /// A configuration that cannot run becomes a placeholder that keeps it.
+    pub(super) fn restore_module_as(
+        &mut self,
+        id: ModuleInstanceId,
+        file: &ModuleFile,
+        bindings: &mut HashMap<u64, SharedAnalysisId>,
+    ) {
+        let config = match self.module_config(file, bindings) {
+            Ok(config) => config,
+            Err(reason) => return self.insert_missing(id, file, reason),
+        };
+        if let Err(error) = self.build_instance(id, config.type_id, config.data.as_ref()) {
+            return self.insert_missing(id, file, error.to_string());
+        }
+        match self.apply_config(id, &config) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    self.push_notice(warning);
+                }
+            }
+            Err(reason) => {
+                // Running with defaults would overwrite the saved values.
+                self.modules.remove(&id);
+                self.insert_missing(id, file, reason);
+            }
         }
     }
 
@@ -616,17 +636,7 @@ impl Workspace {
         })
     }
 
-    fn missing_module(
-        &mut self,
-        file: &ModuleFile,
-        reason: String,
-    ) -> Result<ModuleInstanceId, WorkspaceError> {
-        let next = self
-            .next_instance_id
-            .checked_add(1)
-            .ok_or(WorkspaceError::IdExhausted)?;
-        let id = ModuleInstanceId(self.next_instance_id);
-        self.next_instance_id = next;
+    fn insert_missing(&mut self, id: ModuleInstanceId, file: &ModuleFile, reason: String) {
         let name = self.saved_type_name(&file.type_id).to_owned();
         self.push_notice(format!("{name} not restored: {reason}; settings kept"));
         let module = Box::new(MissingModule {
@@ -642,7 +652,6 @@ impl Workspace {
                 reason,
             }),
         );
-        Ok(id)
     }
 
     pub(super) fn saved_type_name<'a>(&self, type_id: &'a str) -> &'a str {
@@ -757,7 +766,7 @@ impl Workspace {
         }
     }
 
-    fn module_file(
+    pub(super) fn module_file(
         &self,
         entry: &ModuleEntry,
         numbers: &mut HashMap<SharedAnalysisId, u64>,

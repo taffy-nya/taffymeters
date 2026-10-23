@@ -1,14 +1,21 @@
+use std::collections::BTreeMap;
+
 use eframe::egui::{self, Align, Layout, RichText};
+use serde_json::Value;
 
 use super::{
     SettingsItem, SettingsWindow,
     widgets::{
-        Number, button, card, danger_button, differs, header, number_row, record, trailing, warning,
+        Number, button, card, danger_button, differs, header, number_row, record, row, trailing,
+        warning,
     },
 };
 use crate::{
-    audio::SourceState,
-    persistence::{PresetRef, builtin_presets, same_name, valid_name},
+    audio::{Endpoint, EndpointInfo, SourceState, list_endpoints},
+    persistence::{
+        CAPTURE_INPUT, DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT, DEVICE_OPTION, InputConfig,
+        NAME_OPTION, PLAYBACK_INPUT, PresetRef, builtin_presets, same_name, valid_name,
+    },
     settings::unit,
     workspace::{Workspace, WorkspaceAction, window::Controls},
 };
@@ -133,7 +140,18 @@ impl Workspace {
             });
         });
         card(ui, "Audio source", |ui| {
+            self.input_row(ui, settings, controls, actions);
             let status = self.source_status();
+            let descriptor = self.services.source.descriptor();
+            ui.label(
+                RichText::new(format!(
+                    "{} · {:.1} kHz · {} ch",
+                    self.source_name(),
+                    f64::from(descriptor.sample_rate_hz) / 1000.0,
+                    descriptor.channel_count
+                ))
+                .weak(),
+            );
             ui.label(crate::workspace::window::source_status_text(&status));
             let label = match status.state {
                 SourceState::Paused => "Resume (Space)",
@@ -207,5 +225,108 @@ impl Workspace {
                 actions.push(WorkspaceAction::Quit);
             }
         });
+    }
+
+    /// Lists devices only while the picker is open: each listing queries the system.
+    fn input_row(
+        &self,
+        ui: &mut egui::Ui,
+        settings: &mut SettingsWindow,
+        controls: &mut Controls,
+        actions: &mut Vec<WorkspaceAction>,
+    ) {
+        let chosen = self.input();
+        let lost = self.source_status().state == SourceState::DeviceLost;
+        row(ui, "Input", |ui| {
+            let response = egui::ComboBox::from_id_salt("taffymeters.settings.input")
+                .selected_text(input_label(chosen))
+                .width(ui.available_width())
+                .truncate()
+                .show_ui(ui, |ui| {
+                    let endpoints = settings.endpoints.get_or_insert_with(list_endpoints);
+                    let mut index = 0_u16;
+                    let mut choice = |ui: &mut egui::Ui, label: &str, input: InputConfig| {
+                        let selected = same_input(&input, chosen);
+                        let response = ui.selectable_label(selected, label);
+                        record(controls, SettingsItem::InputChoice(index), &response);
+                        index += 1;
+                        // Choosing the running input again reopens a lost device.
+                        if response.clicked() && (!selected || lost) {
+                            actions.push(WorkspaceAction::SetInput { input });
+                        }
+                    };
+                    let groups = [
+                        (
+                            "Playback",
+                            DEFAULT_PLAYBACK_INPUT,
+                            &endpoints.default_playback,
+                            &endpoints.playback,
+                        ),
+                        (
+                            "Microphones",
+                            DEFAULT_CAPTURE_INPUT,
+                            &endpoints.default_capture,
+                            &endpoints.capture,
+                        ),
+                    ];
+                    for (title, default_kind, default_name, fixed) in groups {
+                        ui.label(RichText::new(title).small().weak());
+                        let label = match default_name {
+                            Some(name) => format!("Default ({name})"),
+                            None => "Default (none)".to_owned(),
+                        };
+                        choice(ui, &label, input_config(default_kind, None));
+                        for info in fixed {
+                            choice(ui, &info.name, endpoint_input(info));
+                        }
+                    }
+                });
+            if response.inner.is_none() {
+                settings.endpoints = None;
+            }
+            record(controls, SettingsItem::InputPicker, &response.response);
+        });
+    }
+}
+
+fn input_config(kind: &str, device: Option<(&str, &str)>) -> InputConfig {
+    let mut options = BTreeMap::new();
+    if let Some((id, name)) = device {
+        options.insert(DEVICE_OPTION.to_owned(), Value::from(id));
+        options.insert(NAME_OPTION.to_owned(), Value::from(name));
+    }
+    InputConfig {
+        kind: kind.to_owned(),
+        options,
+    }
+}
+
+fn endpoint_input(info: &EndpointInfo) -> InputConfig {
+    match &info.endpoint {
+        Endpoint::Playback(id) => input_config(PLAYBACK_INPUT, Some((id, &info.name))),
+        Endpoint::Capture(id) => input_config(CAPTURE_INPUT, Some((id, &info.name))),
+        Endpoint::DefaultPlayback => input_config(DEFAULT_PLAYBACK_INPUT, None),
+        Endpoint::DefaultCapture => input_config(DEFAULT_CAPTURE_INPUT, None),
+    }
+}
+
+/// Names can change with drivers; the kind and device ID identify an input.
+fn same_input(a: &InputConfig, b: &InputConfig) -> bool {
+    a.kind == b.kind && a.option(DEVICE_OPTION) == b.option(DEVICE_OPTION)
+}
+
+/// A headset shows one name for its playback and microphone endpoints.
+fn input_label(input: &InputConfig) -> String {
+    let name = || {
+        input
+            .option(NAME_OPTION)
+            .or_else(|| input.option(DEVICE_OPTION))
+            .unwrap_or(&input.kind)
+    };
+    match input.kind.as_str() {
+        DEFAULT_PLAYBACK_INPUT => "Default playback".to_owned(),
+        DEFAULT_CAPTURE_INPUT => "Default microphone".to_owned(),
+        CAPTURE_INPUT => format!("Microphone: {}", name()),
+        _ => name().to_owned(),
     }
 }

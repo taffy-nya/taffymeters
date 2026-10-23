@@ -14,6 +14,7 @@ use std::time::Duration;
 use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::{
+    audio::Endpoints,
     dataflow::{ChannelSelection, NodeRef, OutputId},
     render::Color,
     settings::NodeParam,
@@ -129,6 +130,9 @@ pub(crate) enum SettingsItem {
     Pause,
     Notice(u16),
     CopyNotices,
+    InputPicker,
+    /// Position in the open input picker, from the top.
+    InputChoice(u16),
     ClearNotices,
     Quit,
     Preset(ThemePreset),
@@ -192,6 +196,8 @@ pub(crate) struct SettingsWindow {
     /// egui clears focus on Escape before our UI pass; retain the previous pass's text focus
     /// so canceling an edit does not also close the settings window.
     text_focus: bool,
+    /// Listed when the input picker opens and kept while it stays open.
+    endpoints: Option<Endpoints>,
     highlight: Option<Highlight>,
     /// The instance and window the pages showed in the last pass.
     shown: (Option<ModuleInstanceId>, Option<WindowId>),
@@ -221,6 +227,7 @@ impl SettingsWindow {
             confirm_delete: None,
             notices_copied: false,
             text_focus: false,
+            endpoints: None,
             highlight: None,
             shown: (None, None),
             initial_position,

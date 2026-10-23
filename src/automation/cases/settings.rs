@@ -34,7 +34,7 @@ use crate::automation::{
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 11] = [
+pub(super) const CASES: [(&str, Scenario); 12] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -46,6 +46,7 @@ pub(super) const CASES: [(&str, Scenario); 11] = [
     ("S09", s09),
     ("S10", s10),
     ("S11", s11),
+    ("S12", s12),
 ];
 
 impl TempDir {
@@ -2233,5 +2234,183 @@ fn s11() -> Result<Value, String> {
     Ok(
         json!({"hex":"accepted without #, invalid ignored","channel":"red only",
         "gray":"keeps its hue"}),
+    )
+}
+
+/// Switching inputs rebuilds every instance in place for the new format, keeps the
+/// configurations that no longer fit, and leaves nothing running on the old source.
+fn s12() -> Result<Value, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::{
+        LiveAudio, LiveAudioConfig,
+        audio::synthetic::{SignalSpec, SyntheticConfig},
+        audio::{AudioDescriptor, ChannelLayout, Generation, SourceId, SourceState},
+        persistence::InputConfig,
+    };
+
+    let source = |generation: u64, rate: u32, layout: ChannelLayout| {
+        let channels = if layout == ChannelLayout::Mono { 1 } else { 2 };
+        let tone = SignalSpec::Sine {
+            frequency_hz: 1_000.0,
+            amplitude: 0.1,
+            phase_radians: 0.0,
+        };
+        let config = SyntheticConfig {
+            descriptor: AudioDescriptor::new(
+                SourceId(1),
+                Generation(generation),
+                rate,
+                channels,
+                layout,
+            )
+            .map_err(|e| e.to_string())?,
+            signals: vec![tone; usize::from(channels)],
+            ..SyntheticConfig::default()
+        };
+        LiveAudio::open_manual(LiveAudioConfig::default(), config).map_err(|e| e.to_string())
+    };
+    let (ws, mut first_driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    let wakes = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&wakes);
+    h.ws.set_publication_waker(Some(Box::new(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+    })));
+    h.frame(vec![]);
+    let left = first_leaf(&h.ws)?;
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetChannel {
+            instance_id: left,
+            channel: ChannelSelection::Left,
+        },
+    )?;
+    let copy = created(action(
+        &mut h.ws,
+        WorkspaceAction::SplitModule {
+            instance_id: left,
+            side: Side::Right,
+        },
+    )?)?;
+    let picture = created(action(
+        &mut h.ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: copy,
+            type_id: crate::modules::SPECTROGRAM_MODULE_ID,
+        },
+    )?)?;
+    let tint = swatches(true)[2];
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetColor {
+            scope: ColorScope::Instance(picture),
+            role: ColorRole::Primary,
+            color: Some(tint),
+        },
+    )?;
+    action(&mut h.ws, WorkspaceAction::TogglePause)?;
+    open_settings(&mut h, picture, &[])?;
+    let layout = leaves(&h.ws, FIRST_WINDOW);
+
+    let (mono, mut mono_driver) = source(2, 44_100, ChannelLayout::Mono)?;
+    h.ws.replace_source(mono);
+    h.frame(vec![]);
+    let o = h.ws.observation();
+    let descriptor = h.ws.source_descriptor_for_automation().clone();
+    check(
+        leaves(&h.ws, FIRST_WINDOW) == layout
+            && h.ws.settings_open()
+            && (
+                descriptor.sample_rate_hz,
+                descriptor.channel_count,
+                descriptor.generation,
+            ) == (44_100, 1, Generation(2))
+            && o.source_status.state == SourceState::Paused,
+        &format!(
+            "after the switch: layout {:?} (was {layout:?}), source {descriptor:?}, {:?}",
+            leaves(&h.ws, FIRST_WINDOW),
+            o.source_status.state
+        ),
+    )?;
+    let module = |h: &Harness, id: ModuleInstanceId| {
+        h.ws.observation()
+            .module(id)
+            .cloned()
+            .ok_or_else(|| format!("instance {} missing", id.0))
+    };
+    let (kept, rebuilt) = (module(&h, left)?, module(&h, picture)?);
+    check(
+        kept.missing.as_deref() == Some(SPECTRUM_MODULE_ID)
+            && rebuilt.type_id == crate::modules::SPECTROGRAM_MODULE_ID
+            && rebuilt.palette.color(ColorRole::Primary) == tint,
+        &format!(
+            "mono input: Left Spectrum {:?}/{:?}, Spectrogram {} with {:?}",
+            kept.type_id,
+            kept.missing,
+            rebuilt.type_id,
+            rebuilt.palette.color(ColorRole::Primary)
+        ),
+    )?;
+    check(
+        first_driver.advance_frames(160, deadline()).is_err(),
+        "the replaced source still accepts input",
+    )?;
+
+    action(&mut h.ws, WorkspaceAction::TogglePause)?;
+    let woken = wakes.load(Ordering::Relaxed);
+    mono_driver
+        .advance_frames(44_100, deadline())
+        .map_err(|e| e.to_string())?;
+    let metrics = h.ws.dataflow_handle_for_automation().metrics();
+    check(
+        metrics.fft_evaluations > 0 && wakes.load(Ordering::Relaxed) > woken,
+        &format!(
+            "the new source did not analyze or wake the UI: {} FFTs, wakes {woken} -> {}",
+            metrics.fft_evaluations,
+            wakes.load(Ordering::Relaxed)
+        ),
+    )?;
+
+    let (stereo, _stereo_driver) = source(3, 48_000, ChannelLayout::Stereo)?;
+    h.ws.replace_source(stereo);
+    h.frame(vec![]);
+    let o = h.ws.observation();
+    let (restored, rebuilt) = (module(&h, left)?, module(&h, picture)?);
+    check(
+        restored.type_id == SPECTRUM_MODULE_ID
+            && restored.missing.is_none()
+            && restored.channel == Some(ChannelSelection::Left)
+            && rebuilt.palette.color(ColorRole::Primary) == tint,
+        &format!(
+            "stereo again: Spectrum {}/{:?} on {:?}",
+            restored.type_id, restored.missing, restored.channel
+        ),
+    )?;
+
+    let objects: Vec<usize> = o.modules.iter().map(|m| m.object).collect();
+    let unknown = InputConfig {
+        kind: "vendor.file".to_owned(),
+        options: BTreeMap::new(),
+    };
+    let rejected =
+        h.ws.apply_action(WorkspaceAction::SetInput { input: unknown });
+    let after: Vec<usize> =
+        h.ws.observation()
+            .modules
+            .iter()
+            .map(|m| m.object)
+            .collect();
+    check(
+        rejected.is_err()
+            && after == objects
+            && h.ws.source_descriptor_for_automation().generation == Generation(3),
+        &format!("an unsupported input changed the workspace: {rejected:?}"),
+    )?;
+    h.ws.check_ownership()?;
+    Ok(
+        json!({"mono":"Left Spectrum kept as placeholder, others rebuilt",
+        "stereo":"Left Spectrum restored","paused":"kept","old_source":"stopped",
+        "unsupported":"rejected without changes"}),
     )
 }
