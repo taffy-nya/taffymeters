@@ -198,4 +198,10 @@ impl Workspace {
     pub(crate) fn source_descriptor_for_automation(&self) -> &crate::audio::AudioDescriptor {
         self.services.source.descriptor().as_ref()
     }
+
+    pub(crate) fn lose_device_for_automation(&self) {
+        if let Some(live) = &self.live {
+            live.lose_device_for_automation();
+        }
+    }
 }

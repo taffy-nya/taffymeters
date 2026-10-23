@@ -5,17 +5,44 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 
 use super::{ActionOutcome, ModuleInstanceId, Workspace, WorkspaceError};
 use crate::{
     LiveAudio, LiveAudioConfig,
-    audio::Generation,
+    audio::{Generation, SourceState},
     dataflow::{PublicationWaker, SharedAnalysisId},
-    live::LiveAudioError,
+    live::{LiveAudioError, endpoint_of},
     module::ModuleServices,
-    persistence::{InputConfig, NAME_OPTION},
+    persistence::{DEFAULT_CAPTURE_INPUT, InputConfig, NAME_OPTION},
 };
+
+/// Display time between attempts while no fallback input opens.
+const RECOVERY_RETRY: Duration = Duration::from_secs(2);
+
+/// Opens an input; replaceable so headless scenarios never touch system devices.
+pub(crate) type InputOpener =
+    Box<dyn Fn(&InputConfig, Generation) -> Result<LiveAudio, LiveAudioError> + Send>;
+
+pub(super) fn system_opener() -> InputOpener {
+    Box::new(|input, generation| LiveAudio::open(LiveAudioConfig::default(), input, generation))
+}
+
+/// The default of the lost input's own group first: a lost microphone falls back to
+/// the default microphone, everything else to the default playback device.
+fn fallbacks(lost: &InputConfig) -> Vec<InputConfig> {
+    let playback = InputConfig::default();
+    if endpoint_of(lost).is_some_and(|endpoint| !endpoint.is_playback()) {
+        let capture = InputConfig {
+            kind: DEFAULT_CAPTURE_INPUT.to_owned(),
+            ..InputConfig::default()
+        };
+        vec![capture, playback]
+    } else {
+        vec![playback]
+    }
+}
 
 impl Workspace {
     pub(crate) fn input(&self) -> &InputConfig {
@@ -58,11 +85,54 @@ impl Workspace {
         &mut self,
         input: InputConfig,
     ) -> Result<ActionOutcome, WorkspaceError> {
-        let generation = Generation(self.services.source.descriptor().generation.0 + 1);
-        let live = LiveAudio::open(LiveAudioConfig::default(), &input, generation)?;
+        let live = (self.opener)(&input, self.next_generation())?;
         self.replace_source(live);
         self.input = input;
+        self.next_recovery = None;
         Ok(ActionOutcome::Applied)
+    }
+
+    fn next_generation(&self) -> Generation {
+        Generation(self.services.source.descriptor().generation.0 + 1)
+    }
+
+    #[cfg(feature = "automation")]
+    pub(crate) fn set_input_opener(&mut self, opener: InputOpener) {
+        self.opener = opener;
+    }
+
+    /// Called from `tick`. Switches a lost source to a default device and keeps the
+    /// chosen input, which reopens at the next start; the lost device coming back is
+    /// not detected. Costs one atomic read while the source runs.
+    pub(super) fn recover_lost_source(&mut self) {
+        if self.source_status().state != SourceState::DeviceLost {
+            self.next_recovery = None;
+            return;
+        }
+        let now = self.display_time;
+        if self.next_recovery.is_some_and(|at| now < at) {
+            return;
+        }
+        self.next_recovery = Some(now + RECOVERY_RETRY);
+        let lost = self.source_name().to_owned();
+        let mut failure = None;
+        for input in fallbacks(&self.input) {
+            match (self.opener)(&input, self.next_generation()) {
+                Ok(live) => {
+                    self.replace_source(live);
+                    self.next_recovery = None;
+                    let name = self.source_name().to_owned();
+                    self.push_notice(format!("Input {lost} lost; switched to {name}"));
+                    return;
+                }
+                Err(error) => failure = Some(error),
+            }
+        }
+        if let Some(error) = failure {
+            self.push_notice(format!(
+                "Input {lost} lost; no other device opened: {error}"
+            ));
+        }
     }
 
     /// Modules whose configuration no longer fits the new format become placeholders

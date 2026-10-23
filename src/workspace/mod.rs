@@ -473,6 +473,9 @@ pub(crate) struct Workspace {
     input: InputConfig,
     /// Reinstalled on every source the workspace switches to.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
+    opener: source::InputOpener,
+    /// Display time of the next attempt to replace a lost source.
+    next_recovery: Option<Duration>,
     reference_dbfs: Option<f32>,
     notices: Vec<String>,
     notices_shown_until: Duration,
@@ -522,6 +525,8 @@ impl Workspace {
             theme,
             input: InputConfig::default(),
             waker: None,
+            opener: source::system_opener(),
+            next_recovery: None,
             reference_dbfs: None,
             notices: Vec::new(),
             binding_numbers: HashMap::new(),

@@ -34,7 +34,7 @@ use crate::automation::{
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 12] = [
+pub(super) const CASES: [(&str, Scenario); 13] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -47,6 +47,7 @@ pub(super) const CASES: [(&str, Scenario); 12] = [
     ("S10", s10),
     ("S11", s11),
     ("S12", s12),
+    ("S13", s13),
 ];
 
 impl TempDir {
@@ -2413,4 +2414,122 @@ fn s12() -> Result<Value, String> {
         "stereo":"Left Spectrum restored","paused":"kept","old_source":"stopped",
         "unsupported":"rejected without changes"}),
     )
+}
+
+/// A lost source switches to the default device of its own group, keeps the chosen
+/// input, and retries every two seconds while nothing opens.
+fn s13() -> Result<Value, String> {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use crate::{
+        LiveAudio, LiveAudioConfig,
+        audio::{AudioDescriptor, Generation, SourceState, synthetic::SyntheticConfig},
+        live::LiveAudioError,
+        persistence::{CAPTURE_INPUT, DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT, InputConfig},
+    };
+
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let refuse = Arc::new(AtomicBool::new(false));
+    let (seen, refused) = (Arc::clone(&requests), Arc::clone(&refuse));
+    h.ws.set_input_opener(Box::new(move |input, generation| {
+        if let Ok(mut seen) = seen.lock() {
+            seen.push(input.kind.clone());
+        }
+        if refused.load(Ordering::Relaxed) {
+            return Err(LiveAudioError::Input("no device".to_owned()));
+        }
+        let defaults = SyntheticConfig::default();
+        let d = &defaults.descriptor;
+        let config = SyntheticConfig {
+            descriptor: AudioDescriptor::new(
+                d.source_id,
+                generation,
+                d.sample_rate_hz,
+                d.channel_count,
+                d.channel_layout,
+            )
+            .expect("only the generation differs from a valid descriptor"),
+            ..defaults
+        };
+        LiveAudio::open_manual(LiveAudioConfig::default(), config).map(|(live, _)| live)
+    }));
+    let taken = |requests: &Mutex<Vec<String>>| {
+        requests
+            .lock()
+            .map(|mut seen| std::mem::take(&mut *seen))
+            .unwrap_or_default()
+    };
+    h.frame(vec![]);
+    let leaf = first_leaf(&h.ws)?;
+    let microphone = InputConfig {
+        kind: CAPTURE_INPUT.to_owned(),
+        options: BTreeMap::from([("device".to_owned(), json!("wasapi:mic"))]),
+    };
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetInput {
+            input: microphone.clone(),
+        },
+    )?;
+    action(&mut h.ws, WorkspaceAction::TogglePause)?;
+    taken(&requests);
+    let state = |h: &Harness| h.ws.observation().source_status.state;
+
+    refuse.store(true, Ordering::Relaxed);
+    h.ws.lose_device_for_automation();
+    h.frame(vec![]);
+    let first_attempt = taken(&requests);
+    h.display_time += Duration::from_secs(1);
+    h.frame(vec![]);
+    let too_soon = taken(&requests);
+    check(
+        first_attempt == [DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT]
+            && too_soon.is_empty()
+            && state(&h) == SourceState::DeviceLost
+            && h.ws
+                .observation()
+                .notices
+                .iter()
+                .any(|notice| notice.contains("no other device opened")),
+        &format!(
+            "while nothing opens: tried {first_attempt:?}, then {too_soon:?}, state {:?}",
+            state(&h)
+        ),
+    )?;
+
+    refuse.store(false, Ordering::Relaxed);
+    h.display_time += Duration::from_millis(1_100);
+    h.frame(vec![]);
+    let retried = taken(&requests);
+    let o = h.ws.observation();
+    check(
+        retried == [DEFAULT_CAPTURE_INPUT]
+            && state(&h) == SourceState::Paused
+            && h.ws.source_descriptor_for_automation().generation == Generation(3)
+            && *h.ws.input() == microphone
+            && o.module(leaf).is_some_and(|m| m.missing.is_none())
+            && o.notices
+                .iter()
+                .any(|notice| notice.contains("lost; switched to")),
+        &format!(
+            "retry: tried {retried:?}, state {:?}, input {:?}, notices {:?}",
+            state(&h),
+            h.ws.input(),
+            o.notices
+        ),
+    )?;
+    h.display_time += Duration::from_secs(5);
+    h.frame(vec![]);
+    check(
+        taken(&requests).is_empty(),
+        "a recovered source kept retrying",
+    )?;
+    h.ws.check_ownership()?;
+    Ok(json!({"order":"default microphone, then default playback",
+        "retry_seconds":2,"choice":"kept","paused":"kept"}))
 }

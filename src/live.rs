@@ -263,6 +263,13 @@ impl LiveAudio {
         &self.name
     }
 
+    /// Reports the loss the way a failing system stream does.
+    #[cfg(feature = "automation")]
+    pub(crate) fn lose_device_for_automation(&self) {
+        self.telemetry
+            .device_lost("device unplugged (simulated)".to_owned());
+    }
+
     pub(crate) fn paused(&self) -> bool {
         self.paused
     }
