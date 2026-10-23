@@ -11,7 +11,7 @@ use super::{
     },
 };
 use crate::{
-    audio::{Endpoint, EndpointInfo, SourceState, list_endpoints},
+    audio::{Endpoint, EndpointInfo, SourceState},
     persistence::{
         CAPTURE_INPUT, DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT, DEVICE_OPTION, InputConfig,
         NAME_OPTION, PLAYBACK_INPUT, PresetRef, builtin_presets, same_name, valid_name,
@@ -266,7 +266,7 @@ impl Workspace {
                 .width(ui.available_width())
                 .truncate()
                 .show_ui(ui, |ui| {
-                    let endpoints = settings.endpoints.get_or_insert_with(list_endpoints);
+                    let endpoints = settings.endpoints.get_or_insert_with(&self.endpoint_lister);
                     let mut index = 0_u16;
                     let mut choice = |ui: &mut egui::Ui, label: &str, input: InputConfig| {
                         let selected = same_input(&input, chosen);

@@ -40,6 +40,10 @@ realfft = "3"
 name = "automation_core"
 required-features = ["automation"]
 
+[[test]]
+name = "automation_crash"
+required-features = ["automation"]
+
 [build-dependencies]
 embed-resource = "3"
 

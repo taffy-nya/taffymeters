@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use eframe::egui::{FullOutput, Shape};
 use serde_json::Value;
 
 use crate::{
@@ -27,6 +28,26 @@ pub(super) fn check(condition: bool, message: &str) -> Result<(), String> {
         Err(message.into())
     }
 }
+
+pub(super) fn drawn_text(output: &FullOutput) -> Vec<String> {
+    fn collect(shape: &Shape, text: &mut Vec<String>) {
+        match shape {
+            Shape::Text(shape) => text.push(shape.galley.text().to_owned()),
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, text);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut text = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut text);
+    }
+    text
+}
+
 pub(super) fn synthetic() -> Result<(LiveAudio, ManualInputDriver), String> {
     LiveAudio::open_manual(LiveAudioConfig::default(), SyntheticConfig::default())
         .map_err(|e| e.to_string())

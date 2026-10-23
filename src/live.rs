@@ -92,13 +92,21 @@ pub(crate) fn endpoint_of(input: &InputConfig) -> Option<Endpoint> {
     }
 }
 
+pub(crate) fn open_system(
+    input: &InputConfig,
+    generation: Generation,
+) -> Result<LiveAudio, LiveAudioError> {
+    LiveAudio::open(LiveAudioConfig::default(), input, generation)
+}
+
 /// Opens the chosen input, or the default playback device when that fails. The error of
 /// a supported input that failed comes back for the workspace to report; unsupported
 /// kinds it reports itself.
 pub(crate) fn open_chosen(
     chosen: &InputConfig,
+    opener: &dyn Fn(&InputConfig, Generation) -> Result<LiveAudio, LiveAudioError>,
 ) -> Result<(LiveAudio, Option<LiveAudioError>), LiveAudioError> {
-    let open = |input| LiveAudio::open(LiveAudioConfig::default(), input, Generation(1));
+    let open = |input| opener(input, Generation(1));
     let default = InputConfig::default();
     match open(chosen) {
         Ok(live) => Ok((live, None)),

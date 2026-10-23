@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -9,8 +9,10 @@ use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::{
-    audio::synthetic::ManualInputDriver,
+    LiveAudio,
+    audio::{Generation, synthetic::ManualInputDriver},
     dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId},
+    live::LiveAudioError,
     modules::{
         BARS_SPECTRUM_STYLE_ID, EMPTY_MODULE_ID, LINE_OSCILLOSCOPE_STYLE_ID,
         OSCILLOSCOPE_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID,
@@ -27,14 +29,14 @@ use crate::{
 use crate::automation::{
     harness::{FakeDesktop, Harness, SETTINGS},
     support::{
-        TempDir, action, check, created, deadline, first_leaf, leaves, new_window, read_bytes,
-        read_json, settle_subscriptions, synthetic, workspace, write_bytes,
+        TempDir, action, check, created, deadline, drawn_text, first_leaf, leaves, new_window,
+        read_bytes, read_json, settle_subscriptions, synthetic, workspace, write_bytes,
     },
 };
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 13] = [
+pub(super) const CASES: [(&str, Scenario); 16] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -48,6 +50,9 @@ pub(super) const CASES: [(&str, Scenario); 13] = [
     ("S11", s11),
     ("S12", s12),
     ("S13", s13),
+    ("S14", s14),
+    ("S15", s15),
+    ("S16", s16),
 ];
 
 impl TempDir {
@@ -226,6 +231,41 @@ fn type_value(
     Ok(())
 }
 
+fn slider_endpoint(h: &mut Harness, item: SettingsItem, right: bool) -> Result<(), String> {
+    let rect = h.locate(&ControlKey::Settings(item))?.rect;
+    let x = if right {
+        rect.right() + 20.0
+    } else {
+        rect.left() - 20.0
+    };
+    h.drag(
+        ControlKey::Settings(item),
+        &[pos2(x, rect.center().y)],
+        egui::Modifiers::NONE,
+        None,
+    )?;
+    Ok(())
+}
+
+fn slider_initial_text(h: &mut Harness, item: SettingsItem, expected: &str) -> Result<(), String> {
+    let output = h.frame(vec![]);
+    let rect = h.locate(&ControlKey::SettingsValue(item))?.rect;
+    let text: Vec<_> = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(shape) if rect.intersects(shape.visual_bounding_rect()) => {
+                Some(shape.galley.text())
+            }
+            _ => None,
+        })
+        .collect();
+    check(
+        text.contains(&expected),
+        &format!("{item:?} initial value should display {expected:?}, got {text:?}"),
+    )
+}
+
 /// Copy, analysis settings shown once per node, edits that only reach the target.
 fn s01() -> Result<Value, String> {
     let (ws, mut driver) = workspace()?;
@@ -275,6 +315,83 @@ fn s01() -> Result<Value, String> {
             "Channel/FFT read by both outputs must appear once: {channel_controls} channel, {fft_controls} FFT controls"
         ),
     )?;
+    for (node, param, expected, label) in [
+        (
+            fft,
+            NodeParam::FftFloor,
+            FftConfig::default().floor_dbfs,
+            "-160.0 dBFS",
+        ),
+        (
+            tilt,
+            NodeParam::Tilt,
+            crate::modules::DEFAULT_TILT_DB_PER_OCTAVE,
+            "4.5 dB/oct",
+        ),
+        (
+            node(&spec_b, |n| matches!(n, NodeSpec::Peak(_)))?,
+            NodeParam::PeakHold,
+            1_000.0,
+            "1000 ms",
+        ),
+        (
+            node(&spec_b, |n| matches!(n, NodeSpec::Peak(_)))?,
+            NodeParam::PeakFall,
+            30.0,
+            "30.0 dB/s²",
+        ),
+    ] {
+        let item = SettingsItem::Number { node, param };
+        check(
+            spec_b.node(node).and_then(|spec| param.number(&spec)) == Some(expected),
+            &format!("{param:?} initial analysis value differs from its descriptor default"),
+        )?;
+        slider_initial_text(&mut h, item, label)?;
+        let (min, max, _) = param.range().ok_or("numeric parameter range missing")?;
+        for (right, endpoint) in [(false, min), (true, max)] {
+            slider_endpoint(&mut h, item, right)?;
+            let actual = spec(&h.ws, b)?
+                .node(node)
+                .and_then(|spec| param.number(&spec));
+            check(
+                actual == Some(endpoint),
+                &format!("{param:?} slider endpoint {right} should be {endpoint}, got {actual:?}"),
+            )?;
+            h.click(ControlKey::SettingsReset(item))?;
+            check(
+                spec(&h.ws, b)?
+                    .node(node)
+                    .and_then(|spec| param.number(&spec))
+                    == Some(expected),
+                &format!("{param:?} reset did not restore its descriptor default"),
+            )?;
+        }
+    }
+    for (key, expected, range, label) in [
+        ("max_frequency_hz", 20_000.0, (80.0, 96_000.0), "20.0 kHz"),
+        ("bottom_db", -90.0, (-150.0, -30.0), "-90.0 dB"),
+        ("range_db", 90.0, (30.0, 150.0), "90.0 dB"),
+    ] {
+        let item = SettingsItem::ViewNumber(key);
+        check(
+            view_number(&h.ws, b, key)? == expected,
+            &format!("{key} initial value differs from its descriptor default"),
+        )?;
+        slider_initial_text(&mut h, item, label)?;
+        for (right, endpoint) in [(false, range.0), (true, range.1)] {
+            slider_endpoint(&mut h, item, right)?;
+            let actual = view_number(&h.ws, b, key)?;
+            check(
+                actual == endpoint,
+                &format!("{key} slider endpoint should be {endpoint}, got {actual}"),
+            )?;
+            h.click(ControlKey::SettingsReset(item))?;
+            check(
+                view_number(&h.ws, b, key)? == expected,
+                &format!("{key} reset did not restore descriptor default"),
+            )?;
+        }
+    }
     h.in_settings(&[
         SettingsItem::Channel(ChannelSelection::Right),
         SettingsItem::FftWindow {
@@ -1378,6 +1495,54 @@ fn s05() -> Result<Value, String> {
     )?;
     drop(h);
 
+    let mut invalid_instance = file.clone();
+    let invalid_module = json!({"type_id":EMPTY_MODULE_ID,
+        "colors":{"primary":"#+1+2+3"}});
+    invalid_instance["input"] = json!({"kind":"system_default"});
+    invalid_instance["windows"] = json!([{"display":0,"frame":[120.0,140.0,1020.0,560.0],
+        "layout":{"node":"leaf","module":invalid_module}}]);
+    dir.write_session(&invalid_instance)?;
+    let (mut ws, _driver) = reopen(&dir)?;
+    check(
+        ws.observation()
+            .modules
+            .iter()
+            .any(|module| module.missing.as_deref() == Some(EMPTY_MODULE_ID))
+            && ws.can_save(),
+        "invalid instance color did not become a writable placeholder",
+    )?;
+    ws.autosave();
+    check(
+        read_json(&dir.session())?["windows"][0]["layout"]["module"] == invalid_module,
+        "invalid instance color/configuration was not saved verbatim",
+    )?;
+    drop(ws);
+
+    let mut invalid_theme = invalid_instance;
+    invalid_theme["theme"] = json!({"preset":"dark","colors":{"primary":"#+1+2+3"}});
+    dir.write_session(&invalid_theme)?;
+    let original = read_bytes(&dir.session())?;
+    let (mut ws, _driver) = reopen(&dir)?;
+    let o = ws.observation();
+    check(
+        !ws.can_save()
+            && o.preset == Some(builtin("Default"))
+            && o.modules.iter().all(|module| module.missing.is_none())
+            && o.notices
+                .iter()
+                .any(|notice| notice.contains("Session file unreadable")),
+        &format!(
+            "invalid Theme color did not protect the session and open Default: {:?}",
+            o.notices
+        ),
+    )?;
+    ws.autosave();
+    check(
+        read_bytes(&dir.session())? == original,
+        "invalid Theme session was overwritten",
+    )?;
+    drop(ws);
+
     let future = br#"{"format_version": 99, "windows": []}"#;
     write_bytes(&dir.session(), future)?;
     let (mut ws, _driver) = reopen(&dir)?;
@@ -2438,15 +2603,10 @@ fn s12() -> Result<Value, String> {
 /// A lost source switches to the default device of its own group, keeps the chosen
 /// input, and retries every two seconds while nothing opens.
 fn s13() -> Result<Value, String> {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::{
-        LiveAudio, LiveAudioConfig,
-        audio::{AudioDescriptor, Generation, SourceState, synthetic::SyntheticConfig},
-        live::LiveAudioError,
+        audio::SourceState,
         persistence::{CAPTURE_INPUT, DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT, InputConfig},
     };
 
@@ -2462,20 +2622,7 @@ fn s13() -> Result<Value, String> {
         if refused.load(Ordering::Relaxed) {
             return Err(LiveAudioError::Input("no device".to_owned()));
         }
-        let defaults = SyntheticConfig::default();
-        let d = &defaults.descriptor;
-        let config = SyntheticConfig {
-            descriptor: AudioDescriptor::new(
-                d.source_id,
-                generation,
-                d.sample_rate_hz,
-                d.channel_count,
-                d.channel_layout,
-            )
-            .expect("only the generation differs from a valid descriptor"),
-            ..defaults
-        };
-        LiveAudio::open_manual(LiveAudioConfig::default(), config).map(|(live, _)| live)
+        manual_at_generation(generation)
     }));
     let taken = |requests: &Mutex<Vec<String>>| {
         requests
@@ -2551,4 +2698,418 @@ fn s13() -> Result<Value, String> {
     h.ws.check_ownership()?;
     Ok(json!({"order":"default microphone, then default playback",
         "retry_seconds":2,"choice":"kept","paused":"kept"}))
+}
+
+fn manual_at_generation(generation: Generation) -> Result<LiveAudio, LiveAudioError> {
+    use crate::{
+        LiveAudioConfig,
+        audio::{AudioDescriptor, synthetic::SyntheticConfig},
+    };
+    let defaults = SyntheticConfig::default();
+    let d = &defaults.descriptor;
+    let config = SyntheticConfig {
+        descriptor: AudioDescriptor::new(
+            d.source_id,
+            generation,
+            d.sample_rate_hz,
+            d.channel_count,
+            d.channel_layout,
+        )
+        .expect("only the generation differs from a valid descriptor"),
+        ..defaults
+    };
+    LiveAudio::open_manual(LiveAudioConfig::default(), config).map(|(live, _)| live)
+}
+
+/// The input picker lists each group's default and devices in order and opens the clicked one.
+fn s14() -> Result<Value, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::{
+        audio::{Endpoint, EndpointInfo, Endpoints, Generation},
+        live::LiveAudioError,
+        persistence::{InputConfig, PLAYBACK_INPUT},
+    };
+
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    let listings = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&listings);
+    h.ws.set_endpoint_lister(Box::new(move || {
+        let count = calls.fetch_add(1, Ordering::Relaxed);
+        Endpoints {
+            playback: vec![
+                EndpointInfo {
+                    endpoint: Endpoint::Playback("wasapi:speakers".to_owned()),
+                    name: "Speakers".to_owned(),
+                },
+                EndpointInfo {
+                    endpoint: Endpoint::Playback("wasapi:headphones".to_owned()),
+                    name: "耳机".to_owned(),
+                },
+            ],
+            capture: vec![EndpointInfo {
+                endpoint: Endpoint::Capture("wasapi:mic".to_owned()),
+                name: "Microphone".to_owned(),
+            }],
+            default_playback: (count == 0).then(|| "Speakers".to_owned()),
+            default_capture: (count == 0).then(|| "Microphone".to_owned()),
+        }
+    }));
+    let requests = Arc::new(Mutex::new(Vec::<InputConfig>::new()));
+    let seen = Arc::clone(&requests);
+    h.ws.set_input_opener(Box::new(move |input, generation| {
+        seen.lock()
+            .expect("scenario request lock is not poisoned")
+            .push(input.clone());
+        if input.kind != PLAYBACK_INPUT {
+            return Err(LiveAudioError::Input("fallback unavailable".to_owned()));
+        }
+        manual_at_generation(generation)
+    }));
+    h.frame(vec![]);
+    let leaf = first_leaf(&h.ws)?;
+    open_settings(&mut h, leaf, &[SettingsItem::Tab(Tab::Workspace)])?;
+    check(
+        listings.load(Ordering::Relaxed) == 0,
+        "closed input picker enumerated devices",
+    )?;
+    h.click(ControlKey::Settings(SettingsItem::InputPicker))?;
+    let output = h.frame(vec![]);
+    let text = drawn_text(&output);
+    let expected = [
+        "Playback",
+        "Default (Speakers)",
+        "Speakers",
+        "耳机",
+        "Microphones",
+        "Default (Microphone)",
+        "Microphone",
+    ];
+    for label in expected {
+        check(
+            text.iter().any(|s| s == label),
+            &format!("input picker missing {label:?}: {text:?}"),
+        )?;
+    }
+    let labels: Vec<_> = text.iter().map(String::as_str).collect();
+    check(
+        labels
+            .windows(expected.len())
+            .any(|group| group == expected),
+        &format!("input picker headings do not precede their grouped choices: {text:?}"),
+    )?;
+    let mut last_y = f32::NEG_INFINITY;
+    for (index, label) in [
+        "Default (Speakers)",
+        "Speakers",
+        "耳机",
+        "Default (Microphone)",
+        "Microphone",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let target = h.locate(&ControlKey::Settings(SettingsItem::InputChoice(
+            index as u16,
+        )))?;
+        let labels: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape)
+                    if target.rect.intersects(shape.visual_bounding_rect()) =>
+                {
+                    Some(shape.galley.text())
+                }
+                _ => None,
+            })
+            .collect();
+        check(
+            target.rect.center().y > last_y && labels.contains(&label),
+            &format!("InputChoice({index}) is not {label:?} in order: {labels:?}"),
+        )?;
+        last_y = target.rect.center().y;
+    }
+    check(
+        h.locate(&ControlKey::Settings(SettingsItem::InputChoice(5)))
+            .is_err()
+            && listings.load(Ordering::Relaxed) == 1,
+        "input picker has extra choices or enumerated more than once while open",
+    )?;
+    h.click(ControlKey::Settings(SettingsItem::InputChoice(2)))?;
+    let chosen = InputConfig {
+        kind: PLAYBACK_INPUT.to_owned(),
+        options: BTreeMap::from([
+            ("device".to_owned(), json!("wasapi:headphones")),
+            ("name".to_owned(), json!("耳机")),
+        ]),
+    };
+    check(
+        *h.ws.input() == chosen
+            && *requests.lock().map_err(|e| e.to_string())? == [chosen.clone()]
+            && h.ws.source_descriptor_for_automation().generation == Generation(2),
+        "fixed playback click did not open and select the endpoint with its id and name",
+    )?;
+    h.click(ControlKey::Settings(SettingsItem::InputPicker))?;
+    let text = drawn_text(&h.frame(vec![]));
+    check(
+        text.iter()
+            .filter(|s| s.as_str() == "Default (none)")
+            .count()
+            == 2
+            && listings.load(Ordering::Relaxed) == 2,
+        &format!("reopened picker did not refresh absent defaults once: {text:?}"),
+    )?;
+    h.click(ControlKey::Settings(SettingsItem::InputChoice(2)))?;
+    check(
+        requests.lock().map_err(|e| e.to_string())?.len() == 1
+            && h.ws.source_descriptor_for_automation().generation == Generation(2),
+        "clicking the running selected endpoint reopened it",
+    )?;
+    h.click(ControlKey::Settings(SettingsItem::InputPicker))?;
+    h.ws.lose_device_for_automation();
+    h.click(ControlKey::Settings(SettingsItem::InputChoice(2)))?;
+    let fixed_requests = requests
+        .lock()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|input| **input == chosen)
+        .count();
+    check(
+        fixed_requests == 2
+            && *h.ws.input() == chosen
+            && h.ws.source_descriptor_for_automation().generation == Generation(3),
+        "reselecting a lost endpoint did not reopen the chosen device",
+    )?;
+    Ok(
+        json!({"groups":["Playback","Microphones"],"choices":5,"list_once_per_open":true,
+        "fixed_device":"耳机","selected_running":"no-op","selected_lost":"reopened"}),
+    )
+}
+
+/// A chosen input that fails at startup runs the default device, reports it and stays chosen;
+/// presets neither save nor change the input.
+fn s15() -> Result<Value, String> {
+    use crate::{
+        audio::Generation,
+        live::{LiveAudioError, open_chosen},
+        persistence::{InputConfig, PLAYBACK_INPUT},
+    };
+
+    let dir = TempDir::new("s15")?;
+    let (mut seed, _driver) = reopen(&dir)?;
+    seed.autosave();
+    drop(seed);
+    let chosen = InputConfig {
+        kind: PLAYBACK_INPUT.to_owned(),
+        options: BTreeMap::from([
+            ("device".to_owned(), json!("wasapi:missing")),
+            ("name".to_owned(), json!("Missing speakers")),
+        ]),
+    };
+    let mut file = read_json(&dir.session())?;
+    file["input"] = serde_json::to_value(&chosen).map_err(|e| e.to_string())?;
+    dir.write_session(&file)?;
+    let requests = Mutex::new(Vec::new());
+    let opener = |input: &InputConfig, generation| {
+        requests
+            .lock()
+            .expect("scenario request lock is not poisoned")
+            .push(input.clone());
+        if *input == chosen {
+            Err(LiveAudioError::Input("device absent".to_owned()))
+        } else {
+            manual_at_generation(generation)
+        }
+    };
+    let (live, unavailable) =
+        open_chosen(&dir.store().session_input(), &opener).map_err(|e| e.to_string())?;
+    let mut ws =
+        Workspace::open(live, dir.store(), FakeDesktop::new()).map_err(|e| e.to_string())?;
+    ws.input_unavailable(&unavailable.ok_or("startup fallback omitted the chosen-input error")?);
+    check(*requests.lock().map_err(|e| e.to_string())? == [chosen.clone(), InputConfig::default()]
+        && *ws.input() == chosen
+        && ws.source_descriptor_for_automation().generation == Generation(1)
+        && ws.observation().notices.iter().any(|notice| notice ==
+            "Input Missing speakers unavailable: system audio input failed: device absent; using the default playback device (choice kept)"),
+        &format!("startup fallback did not preserve/report the choice: {:?}", ws.observation().notices))?;
+    ws.autosave();
+    check(
+        read_json(&dir.session())?["input"]
+            == serde_json::to_value(&chosen).map_err(|e| e.to_string())?,
+        "startup fallback overwrote the chosen input in the session",
+    )?;
+    action(
+        &mut ws,
+        WorkspaceAction::SavePresetAs {
+            name: "Input-free".to_owned(),
+        },
+    )?;
+    check(
+        read_json(&dir.preset("Input-free"))?["input"] == json!({"kind":"system_default"}),
+        "saved preset leaked the chosen endpoint rather than the default input",
+    )?;
+    let descriptor = ws.source_descriptor_for_automation().clone();
+    for preset in [builtin("Default"), saved("Input-free")] {
+        action(&mut ws, WorkspaceAction::LoadPreset { preset })?;
+        check(
+            *ws.input() == chosen && *ws.source_descriptor_for_automation() == descriptor,
+            "loading a built-in or saved preset changed the input/source generation",
+        )?;
+    }
+    Ok(
+        json!({"startup":"chosen fails, default playback opens","choice":"session kept",
+        "preset_input":"default","load_preset":"source unchanged"}),
+    )
+}
+
+fn view_number(ws: &Workspace, instance: ModuleInstanceId, key: &str) -> Result<f32, String> {
+    ws.observation()
+        .module(instance)
+        .and_then(|module| {
+            module
+                .view
+                .iter()
+                .find(|(candidate, _)| *candidate == key)
+                .and_then(|(_, value)| value.number())
+        })
+        .ok_or_else(|| format!("instance {} has no numeric view setting {key}", instance.0))
+}
+
+fn wheel(h: &mut Harness, instance: ModuleInstanceId, delta_y: f32) -> Result<(), String> {
+    h.focus =
+        h.ws.observation()
+            .module(instance)
+            .and_then(|module| module.window_id)
+            .ok_or("wheel target has no window")?;
+    h.frame(vec![]);
+    let at = h.point_at(ControlKey::LeafBody(instance))?;
+    h.frame(vec![Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, delta_y),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    // Advancing display time drains egui's smoothed wheel input without audio.
+    h.display_time += Duration::from_secs(1);
+    h.frame(vec![Event::PointerMoved(at)]);
+    h.display_time += Duration::from_secs(1);
+    h.frame(vec![]);
+    Ok(())
+}
+
+/// Wheel and settings changes to Spectrogram and Spectrum views survive a restart.
+fn s16() -> Result<Value, String> {
+    use crate::modules::SPECTROGRAM_MODULE_ID;
+
+    let dir = TempDir::new("s16")?;
+    let (ws, mut driver) = workspace()?;
+    let mut h = Harness::new(ws.with_store(dir.store()));
+    h.frame_all()?;
+    let spectrum = first_leaf(&h.ws)?;
+    let copy = created(action(
+        &mut h.ws,
+        WorkspaceAction::SplitModule {
+            instance_id: spectrum,
+            side: Side::Right,
+        },
+    )?)?;
+    let spectrogram = created(action(
+        &mut h.ws,
+        WorkspaceAction::ReplaceModule {
+            instance_id: copy,
+            type_id: SPECTROGRAM_MODULE_ID,
+        },
+    )?)?;
+    driver
+        .advance_frames(9_600, deadline())
+        .map_err(|e| e.to_string())?;
+    h.frame_all()?;
+    let analysis_spectrum = spec(&h.ws, spectrum)?;
+    let analysis_spectrogram = spec(&h.ws, spectrogram)?;
+    check(
+        view_number(&h.ws, spectrogram, "gain_db")? == 0.0,
+        "Spectrogram gain is not initially zero",
+    )?;
+    wheel(&mut h, spectrogram, 36.0)?;
+    let notch_db = view_number(&h.ws, spectrogram, "gain_db")?;
+    check(
+        (notch_db - 1.8).abs() < 0.1,
+        &format!("Spectrogram wheel notch should add about 2 dB, got {notch_db}"),
+    )?;
+    wheel(&mut h, spectrogram, 2_000.0)?;
+    check(
+        view_number(&h.ws, spectrogram, "gain_db")? == 24.0,
+        "Spectrogram gain did not clamp at +24 dB",
+    )?;
+    wheel(&mut h, spectrogram, -4_000.0)?;
+    check(
+        view_number(&h.ws, spectrogram, "gain_db")? == -24.0,
+        "Spectrogram gain did not clamp at -24 dB",
+    )?;
+    wheel(&mut h, spectrogram, 36.0)?;
+    let gain_db = view_number(&h.ws, spectrogram, "gain_db")?;
+    let bottom_db = view_number(&h.ws, spectrum, "bottom_db")?;
+    let range_db = view_number(&h.ws, spectrum, "range_db")?;
+    wheel(&mut h, spectrum, 40.0)?;
+    let zoomed_db = view_number(&h.ws, spectrum, "range_db")?;
+    check(
+        view_number(&h.ws, spectrum, "bottom_db")? == bottom_db
+            && (zoomed_db - range_db * (-0.04_f32).exp()).abs() < 0.1,
+        &format!(
+            "Spectrum wheel moved bottom or scaled incorrectly: bottom {bottom_db}, range {range_db} -> {zoomed_db}"
+        ),
+    )?;
+    open_settings(
+        &mut h,
+        spectrum,
+        &[
+            SettingsItem::ViewToggle("show_peak"),
+            SettingsItem::ViewToggle("show_readout"),
+        ],
+    )?;
+    let view =
+        h.ws.observation()
+            .module(spectrum)
+            .ok_or("Spectrum missing")?
+            .view
+            .clone();
+    for key in ["show_peak", "show_readout"] {
+        check(
+            view.contains(&(key, SettingValue::Bool(true))),
+            &format!("{key} real toggle did not enable it"),
+        )?;
+    }
+    check(
+        spec(&h.ws, spectrum)? == analysis_spectrum
+            && spec(&h.ws, spectrogram)? == analysis_spectrogram,
+        "wheel or overlay controls changed analysis parameters",
+    )?;
+    h.ws.autosave();
+    drop(h);
+    let (restored, _driver) = reopen(&dir)?;
+    let o = restored.observation();
+    let spectrum = o
+        .modules
+        .iter()
+        .find(|m| m.type_id == SPECTRUM_MODULE_ID)
+        .ok_or("restored Spectrum missing")?;
+    let spectrogram = o
+        .modules
+        .iter()
+        .find(|m| m.type_id == SPECTROGRAM_MODULE_ID)
+        .ok_or("restored Spectrogram missing")?;
+    check(
+        spectrum.view == view
+            && (view_number(&restored, spectrogram.instance_id, "gain_db")? - gain_db).abs() < 0.01
+            && spectrum.data.as_ref() == Some(&analysis_spectrum)
+            && spectrogram.data.as_ref() == Some(&analysis_spectrogram),
+        "view settings or unchanged analysis did not survive session save and restore",
+    )?;
+    Ok(
+        json!({"spectrogram":{"notch_db":notch_db,"limits_db":[-24,24],"restored_db":gain_db},
+        "spectrum":{"bottom_db":bottom_db,"range_db":zoomed_db,"peak":true,"readout":true},
+        "analysis":"unchanged","session":"restored"}),
+    )
 }

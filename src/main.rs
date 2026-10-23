@@ -69,7 +69,7 @@ fn main() {
     };
     crash::install(root.clone());
     let store = persistence::WorkspaceStore::new(root);
-    let (live, unavailable) = live::open_chosen(&store.session_input())
+    let (live, unavailable) = live::open_chosen(&store.session_input(), &live::open_system)
         .unwrap_or_else(|error| exit_with_error(&error.to_string()));
     let descriptor = Arc::clone(live.reader().descriptor());
     eprintln!(
@@ -143,4 +143,35 @@ fn run_window(app: app::App) -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_dir_accepts_only_an_optional_flag_and_its_value() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(parse_config_dir(&[]), Ok(None));
+        assert_eq!(
+            parse_config_dir(&args(&["--config-dir", "X"])),
+            Ok(Some(PathBuf::from("X")))
+        );
+        for values in [
+            vec!["--config-dir"],
+            vec!["--config-dir", "--other"],
+            vec!["--unknown"],
+        ] {
+            let error = parse_config_dir(&args(&values)).expect_err("invalid arguments must fail");
+            assert!(
+                error.contains("unknown arguments") && error.contains("--config-dir <dir>"),
+                "{error}"
+            );
+        }
+    }
 }

@@ -10,10 +10,10 @@ use std::{
 
 use super::{ActionOutcome, ModuleInstanceId, Workspace, WorkspaceError};
 use crate::{
-    LiveAudio, LiveAudioConfig,
-    audio::{Generation, SourceState},
+    LiveAudio,
+    audio::{Endpoints, Generation, SourceState, list_endpoints},
     dataflow::{PublicationWaker, SharedAnalysisId},
-    live::{LiveAudioError, endpoint_of},
+    live::{LiveAudioError, endpoint_of, open_system},
     module::ModuleServices,
     persistence::{DEFAULT_CAPTURE_INPUT, InputConfig, NAME_OPTION},
 };
@@ -26,7 +26,13 @@ pub(crate) type InputOpener =
     Box<dyn Fn(&InputConfig, Generation) -> Result<LiveAudio, LiveAudioError> + Send>;
 
 pub(super) fn system_opener() -> InputOpener {
-    Box::new(|input, generation| LiveAudio::open(LiveAudioConfig::default(), input, generation))
+    Box::new(open_system)
+}
+
+pub(crate) type EndpointLister = Box<dyn Fn() -> Endpoints + Send>;
+
+pub(super) fn system_lister() -> EndpointLister {
+    Box::new(list_endpoints)
 }
 
 /// The default of the lost input's own group first: a lost microphone falls back to
@@ -99,6 +105,11 @@ impl Workspace {
     #[cfg(feature = "automation")]
     pub(crate) fn set_input_opener(&mut self, opener: InputOpener) {
         self.opener = opener;
+    }
+
+    #[cfg(feature = "automation")]
+    pub(crate) fn set_endpoint_lister(&mut self, lister: EndpointLister) {
+        self.endpoint_lister = lister;
     }
 
     /// Called from `tick`. Switches a lost source to a default device and keeps the

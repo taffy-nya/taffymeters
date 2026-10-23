@@ -103,10 +103,12 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                         .as_ref()
                         .map(WorkspaceStore::session_input)
                         .unwrap_or_default();
-                    crate::live::open_chosen(&chosen).map(|(live, failure)| {
-                        unavailable = failure;
-                        live
-                    })
+                    crate::live::open_chosen(&chosen, &crate::live::open_system).map(
+                        |(live, failure)| {
+                            unavailable = failure;
+                            live
+                        },
+                    )
                 }
                 _ => return Err(usage("--input must be synthetic, sweep or system".into())),
             }

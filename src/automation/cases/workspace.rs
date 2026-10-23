@@ -18,7 +18,7 @@ use crate::{
 use crate::automation::{
     harness::{Harness, SETTINGS},
     support::{
-        action, add_module, check, created, deadline, first_leaf, leaves, new_window,
+        action, add_module, check, created, deadline, drawn_text, first_leaf, leaves, new_window,
         settle_subscriptions, workspace,
     },
 };
@@ -1236,6 +1236,27 @@ fn w10() -> Result<Value, String> {
         ),
     )?;
 
+    h.focus = FIRST_WINDOW;
+    let hint = "Locked · right-click for settings";
+    let at = h.point_at(ControlKey::LeafBody(b))?;
+    let started = h.display_time;
+    let pressed = h.frame(vec![primary(at, true)]);
+    check(
+        drawn_text(&pressed).iter().any(|text| text == hint),
+        "locked body left press did not draw the lock hint",
+    )?;
+    h.frame(vec![primary(at, false)]);
+    h.display_time = started + Duration::from_millis(1_999);
+    check(
+        drawn_text(&h.frame(vec![])).iter().any(|text| text == hint),
+        "lock hint disappeared before two seconds of display time",
+    )?;
+    h.display_time = started + Duration::from_secs(2);
+    check(
+        !drawn_text(&h.frame(vec![])).iter().any(|text| text == hint),
+        "lock hint remained after two seconds of display time",
+    )?;
+
     let before = h.ws.observation().window(FIRST_WINDOW).cloned();
     let target_before = h.ws.observation().settings_target;
     let view_before = view(&h, a)?;
@@ -1276,6 +1297,10 @@ fn w10() -> Result<Value, String> {
         &format!("unlocked window: commands {commands:?}, {registered} chrome controls"),
     )?;
     raw_clicks(&mut h, body_b, 1);
+    check(
+        !drawn_text(&h.frame(vec![])).iter().any(|text| text == hint),
+        "unlocked body click drew the lock hint",
+    )?;
     let selected = h.ws.observation().settings_target.and_then(|(id, _)| id);
     raw_drag(&mut h, divider, aside);
     let moved_ratio = root_split(&h.ws, 0)?.1;
