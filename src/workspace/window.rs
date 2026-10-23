@@ -421,19 +421,17 @@ impl Workspace {
         self.tick(display_time);
         let repaint = self.window_pass(window_id, ui, rect, display_time);
         if let Some(delay) = repaint {
-            let now = Instant::now();
-            let wait = if delay <= FRAME_INTERVAL {
-                // Share a frame clock: immediate self-repaints can starve other windows'
-                // paint messages in the Windows queue.
-                self.next_frame(now).saturating_duration_since(now)
+            // Animating views ask for every frame; the pacer spaces those by the limit.
+            let at_least = if delay <= FRAME_INTERVAL {
+                Duration::ZERO
             } else {
                 delay.saturating_sub(pass_started.elapsed())
             };
-            // egui subtracts its predicted frame time from every delay; add it back.
-            let predicted = ctx.input(|input| input.predicted_dt);
-            let predicted = Duration::try_from_secs_f32(predicted).unwrap_or_default();
             // Windows are drawn inside the host (root) viewport's pass: schedule that.
-            ctx.request_repaint_after_for(wait + predicted, egui::ViewportId::ROOT);
+            ctx.request_repaint_after_for(
+                self.pacer.request_delay(Instant::now(), at_least),
+                egui::ViewportId::ROOT,
+            );
         }
         let windows_after: Vec<WindowId> = self.windows.keys().copied().collect();
         if windows_before != windows_after || settings_before != self.settings.is_some() {
@@ -446,13 +444,12 @@ impl Workspace {
             .values()
             .any(|window| window.pending_detach.is_some() && !window.opened);
         if pending_detach || self.source_status().state != SourceState::Running {
-            ctx.request_repaint_after_for(STATE_POLL, egui::ViewportId::ROOT);
+            let delay = self.pacer.request_delay(Instant::now(), STATE_POLL);
+            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
         }
         if let Some(change) = self.badge_change_in() {
-            ctx.request_repaint_after_for(
-                change.max(Duration::from_millis(1)),
-                egui::ViewportId::ROOT,
-            );
+            let delay = self.pacer.request_delay(Instant::now(), change);
+            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
         }
         self.send_window_commands(window_id, &ctx);
         true
@@ -464,16 +461,6 @@ impl Workspace {
                 ctx.send_viewport_cmd(command);
             }
         }
-    }
-
-    fn next_frame(&mut self, now: Instant) -> Instant {
-        let next = match self.frame_clock {
-            Some(tick) if tick > now => tick,
-            Some(tick) if tick + FRAME_INTERVAL > now => tick + FRAME_INTERVAL,
-            _ => now + FRAME_INTERVAL,
-        };
-        self.frame_clock = Some(next);
-        next
     }
 
     fn window_pass(

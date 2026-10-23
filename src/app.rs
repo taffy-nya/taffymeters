@@ -12,7 +12,7 @@ use std::{
 
 use eframe::egui::{self, ViewportCommand};
 
-use crate::workspace::{WindowId, Workspace, WorkspaceAction};
+use crate::workspace::{FramePacer, WindowId, Workspace, WorkspaceAction};
 
 #[cfg(feature = "automation")]
 type SharedTrace = Option<Arc<Mutex<crate::automation::Trace>>>;
@@ -20,6 +20,7 @@ type SharedTrace = Option<Arc<Mutex<crate::automation::Trace>>>;
 pub(crate) struct App {
     workspace: Arc<Mutex<Workspace>>,
     started_at: Instant,
+    pacer: Arc<FramePacer>,
     wake_pending: Arc<AtomicBool>,
     /// Whether any Workspace window drew in the last host pass.
     any_window_shown: Arc<AtomicBool>,
@@ -33,9 +34,11 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl App {
     pub(crate) fn new(workspace: Workspace) -> Self {
+        let pacer = Arc::clone(workspace.frame_pacer());
         Self {
             workspace: Arc::new(Mutex::new(workspace)),
             started_at: Instant::now(),
+            pacer,
             wake_pending: Arc::new(AtomicBool::new(false)),
             any_window_shown: Arc::new(AtomicBool::new(true)),
             #[cfg(feature = "automation")]
@@ -49,15 +52,17 @@ impl App {
         self
     }
 
-    /// Coalesces data wake-ups to one per host pass; none while all Workspace windows are minimized.
+    /// Coalesces data wake-ups to one per host pass, paced by the frame-rate limit; none
+    /// while all Workspace windows are minimized.
     pub(crate) fn install_waker(&self, ctx: &egui::Context) {
         let ctx = ctx.clone();
         let pending = Arc::clone(&self.wake_pending);
         let shown = Arc::clone(&self.any_window_shown);
+        let pacer = Arc::clone(&self.pacer);
         lock(&self.workspace).set_publication_waker(Some(Box::new(move || {
             if shown.load(Ordering::Relaxed) && !pending.swap(true, Ordering::AcqRel) {
-                // Non-zero on purpose: a zero-delay request makes egui run two passes.
-                ctx.request_repaint_after_for(Duration::from_millis(1), egui::ViewportId::ROOT);
+                let delay = pacer.request_delay(Instant::now(), Duration::ZERO);
+                ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
             }
         })));
     }
@@ -121,18 +126,23 @@ fn window_pass(
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let predicted = ctx.input(|input| input.predicted_dt);
+        let predicted = Duration::try_from_secs_f32(predicted).unwrap_or_default();
+        // Before `ui` clears the wake flag: a wake-up in between must see this pass's start.
+        self.pacer.begin_pass(Instant::now(), predicted);
         let mut workspace = lock(&self.workspace);
         workspace.tick(self.started_at.elapsed());
         if workspace.windows().is_empty() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         } else if let Some(delay) = workspace.autosave_when_settled() {
+            let delay = self.pacer.request_delay(Instant::now(), delay);
             ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.wake_pending.store(false, Ordering::Release);
         let ctx = ui.ctx().clone();
+        self.wake_pending.store(false, Ordering::Release);
         let windows = lock(&self.workspace).windows();
         let mut shown = false;
         for window in windows {

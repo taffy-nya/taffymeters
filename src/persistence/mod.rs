@@ -41,6 +41,9 @@ pub(crate) struct WorkspaceFile {
     /// Absence follows the build's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reference_dbfs: Option<f32>,
+    /// Frames per second; absence follows the build's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fps_limit: Option<f32>,
     #[serde(default = "ThemeSettings::dark")]
     pub(crate) theme: ThemeSettings,
     pub(crate) displays: Vec<DisplayFile>,
@@ -426,6 +429,7 @@ mod tests {
             preset: None,
             input: InputConfig::default(),
             reference_dbfs: None,
+            fps_limit: None,
             theme: ThemeSettings::dark(),
             displays: vec![DisplayFile {
                 work_area: [1920.0, 1040.0],

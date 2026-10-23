@@ -10,6 +10,7 @@ mod layout;
 mod moving;
 #[cfg(windows)]
 mod native;
+mod pacing;
 mod persist;
 mod placement;
 mod settings_window;
@@ -21,7 +22,7 @@ use std::{
     error::Error,
     fmt,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, vec2};
@@ -51,6 +52,7 @@ pub(crate) use layout::{Side, SplitId};
 pub(crate) use moving::{MoveRequest, WindowTracker};
 #[cfg(windows)]
 pub(crate) use native::on_session_end;
+pub(crate) use pacing::FramePacer;
 use persist::SessionAutosave;
 use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
@@ -218,6 +220,10 @@ pub(crate) enum WorkspaceAction {
     /// `None` follows the default.
     SetReferenceLevel {
         dbfs: Option<f32>,
+    },
+    /// Frames per second; `None` follows the default.
+    SetFpsLimit {
+        fps: Option<f32>,
     },
     LoadPreset {
         preset: PresetRef,
@@ -458,8 +464,7 @@ pub(crate) struct Workspace {
     next_group_id: u64,
     modules_created: u64,
     control_error: Option<(String, Duration)>,
-    /// Shared repaint clock of animating windows (real time).
-    frame_clock: Option<Instant>,
+    pacer: Arc<FramePacer>,
     preset: Option<PresetRef>,
     store: Option<WorkspaceStore>,
     /// The session file could not be read; saving must not replace it.
@@ -477,6 +482,7 @@ pub(crate) struct Workspace {
     /// Display time of the next attempt to replace a lost source.
     next_recovery: Option<Duration>,
     reference_dbfs: Option<f32>,
+    fps_limit: Option<f32>,
     notices: Vec<String>,
     notices_shown_until: Duration,
     /// File number of each binding of this workspace (restored or saved).
@@ -514,7 +520,7 @@ impl Workspace {
             modules_created: 0,
             control_error: None,
             notices_shown_until: Duration::ZERO,
-            frame_clock: None,
+            pacer: Arc::new(FramePacer::new(pacing::DEFAULT_FPS_LIMIT)),
             preset: None,
             store: None,
             protected: false,
@@ -528,6 +534,7 @@ impl Workspace {
             opener: source::system_opener(),
             next_recovery: None,
             reference_dbfs: None,
+            fps_limit: None,
             notices: Vec::new(),
             binding_numbers: HashMap::new(),
             settings: None,
@@ -816,6 +823,7 @@ impl Workspace {
             }
             WorkspaceAction::SetTextSize { size } => self.set_text_size(size),
             WorkspaceAction::SetReferenceLevel { dbfs } => self.set_reference_level(dbfs),
+            WorkspaceAction::SetFpsLimit { fps } => self.set_fps_limit(fps),
             WorkspaceAction::SetInput { input } => self.set_input(input),
             WorkspaceAction::LoadPreset { preset } => self.load_preset(preset),
             WorkspaceAction::SavePresetAs { name } => self.save_preset_as(name),
@@ -908,6 +916,28 @@ impl Workspace {
         self.reference_dbfs
             .unwrap_or(crate::module::DEFAULT_REFERENCE_DBFS)
             .clamp(min, max)
+    }
+
+    fn set_fps_limit(&mut self, fps: Option<f32>) -> Result<ActionOutcome, WorkspaceError> {
+        if fps.is_some_and(|fps| !fps.is_finite()) {
+            return Err(WorkspaceError::Unsupported("a non-finite frame rate limit"));
+        }
+        let (min, max) = pacing::FPS_LIMIT_RANGE;
+        self.fps_limit = fps.map(|fps| fps.round().clamp(min, max));
+        self.pacer.set_fps(self.fps_limit());
+        Ok(ActionOutcome::Applied)
+    }
+
+    /// Frames per second.
+    pub(crate) fn fps_limit(&self) -> f32 {
+        let (min, max) = pacing::FPS_LIMIT_RANGE;
+        self.fps_limit
+            .unwrap_or(pacing::DEFAULT_FPS_LIMIT)
+            .clamp(min, max)
+    }
+
+    pub(crate) fn frame_pacer(&self) -> &Arc<FramePacer> {
+        &self.pacer
     }
 
     fn quit(&mut self) -> Result<ActionOutcome, WorkspaceError> {

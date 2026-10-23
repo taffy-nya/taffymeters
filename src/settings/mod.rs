@@ -52,6 +52,7 @@ pub mod unit {
     pub const DB_PER_OCTAVE: &str = "dB/oct";
     pub const DB_PER_SECOND_SQUARED: &str = "dB/s²";
     pub const TIMES: &str = "×";
+    pub const FPS: &str = "fps";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

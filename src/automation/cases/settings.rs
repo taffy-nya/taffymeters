@@ -781,6 +781,16 @@ fn s03() -> Result<Value, String> {
             h.ws.reference_dbfs()
         ),
     )?;
+    type_value(&mut h, SettingsItem::FpsLimit, "30", egui::Key::Enter)?;
+    let typed_fps = h.ws.fps_limit();
+    h.click(ControlKey::SettingsReset(SettingsItem::FpsLimit))?;
+    check(
+        typed_fps == 30.0 && h.ws.fps_limit() == 60.0,
+        &format!(
+            "frame rate limit typed {typed_fps}, after ↺ {}",
+            h.ws.fps_limit()
+        ),
+    )?;
     h.in_settings(&[SettingsItem::Tab(Tab::Theme)])?;
     h.in_settings(&[
         SettingsItem::Swatch {
@@ -938,6 +948,7 @@ fn s04() -> Result<Value, String> {
             seconds: 3.0,
         },
         WorkspaceAction::SetReferenceLevel { dbfs: Some(-24.0) },
+        WorkspaceAction::SetFpsLimit { fps: Some(30.0) },
         WorkspaceAction::SetThemePreset {
             preset: ThemePreset::Light,
         },
@@ -1102,6 +1113,14 @@ fn s04() -> Result<Value, String> {
             "reference level not restored: {} (file {})",
             h.ws.reference_dbfs(),
             saved_session["reference_dbfs"]
+        ),
+    )?;
+    check(
+        h.ws.fps_limit() == 30.0 && saved_session["fps_limit"] == 30.0,
+        &format!(
+            "frame rate limit not restored: {} (file {})",
+            h.ws.fps_limit(),
+            saved_session["fps_limit"]
         ),
     )?;
     let o = h.ws.observation();

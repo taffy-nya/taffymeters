@@ -49,7 +49,8 @@ pub fn reference_gain(reference_dbfs: f32) -> f32 {
     REFERENCE_HEIGHT / 10.0_f32.powf(reference_dbfs / 20.0)
 }
 
-/// Animating views target 60 fps.
+/// Animating views return this to ask for the next frame; the Workspace frame-rate limit
+/// spaces the frames.
 pub const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

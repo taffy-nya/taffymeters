@@ -17,7 +17,11 @@ use crate::{
         NAME_OPTION, PLAYBACK_INPUT, PresetRef, builtin_presets, same_name, valid_name,
     },
     settings::unit,
-    workspace::{Workspace, WorkspaceAction, window::Controls},
+    workspace::{
+        Workspace, WorkspaceAction,
+        pacing::{DEFAULT_FPS_LIMIT, FPS_LIMIT_RANGE},
+        window::Controls,
+    },
 };
 
 impl Workspace {
@@ -182,6 +186,25 @@ impl Workspace {
             ) {
                 let dbfs = differs(dbfs, default).then_some(dbfs);
                 actions.push(WorkspaceAction::SetReferenceLevel { dbfs });
+            }
+        });
+        card(ui, "Display", |ui| {
+            let default = DEFAULT_FPS_LIMIT;
+            if let Some(fps) = number_row(
+                ui,
+                Number {
+                    label: "Frame rate limit",
+                    key: SettingsItem::FpsLimit,
+                    current: self.fps_limit(),
+                    range: FPS_LIMIT_RANGE,
+                    unit: unit::FPS,
+                    logarithmic: false,
+                    default: Some(default),
+                },
+                controls,
+            ) {
+                let fps = differs(fps, default).then_some(fps);
+                actions.push(WorkspaceAction::SetFpsLimit { fps });
             }
         });
         if self.notices.is_empty() {

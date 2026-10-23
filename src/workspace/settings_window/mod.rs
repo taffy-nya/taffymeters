@@ -138,6 +138,7 @@ pub(crate) enum SettingsItem {
     Preset(ThemePreset),
     TextSize,
     ReferenceLevel,
+    FpsLimit,
     TypeStyle(&'static str),
 }
 

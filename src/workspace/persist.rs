@@ -402,6 +402,8 @@ impl Workspace {
         }
         self.refresh_palettes();
         self.reference_dbfs = file.reference_dbfs;
+        self.fps_limit = file.fps_limit;
+        self.pacer.set_fps(self.fps_limit());
         let saved: Vec<SavedDisplay> = file
             .displays
             .iter()
@@ -727,6 +729,7 @@ impl Workspace {
             preset: self.preset.clone(),
             input: self.input.clone(),
             reference_dbfs: self.reference_dbfs,
+            fps_limit: self.fps_limit,
             theme: self.theme.clone(),
             displays: on
                 .into_iter()

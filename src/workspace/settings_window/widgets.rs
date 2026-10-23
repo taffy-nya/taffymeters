@@ -257,7 +257,7 @@ pub(super) fn warning(ui: &mut egui::Ui, text: &str) -> egui::Response {
 pub(super) fn format_value(value: f32, unit: &str) -> String {
     let (value, unit, decimals) = match unit {
         unit::HZ if value.abs() >= 1_000.0 => (value / 1_000.0, "kHz", 1),
-        unit::HZ | unit::MS => (value, unit, 0),
+        unit::HZ | unit::MS | unit::FPS => (value, unit, 0),
         unit::SECONDS if value.abs() >= 10.0 => (value, unit, 0),
         unit::TIMES if value.abs() < 10.0 => (value, unit, 2),
         _ => (value, unit, 1),
