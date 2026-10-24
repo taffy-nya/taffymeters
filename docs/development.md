@@ -51,7 +51,7 @@ Without a selector it runs the headless tests, then the native groups in `tools/
 2. On `main`, run the Release workflow manually (`workflow_dispatch`): it builds and uploads the package as an artifact without publishing. Download it and check that it runs.
 3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow builds the package again and creates a draft release with the CHANGELOG section as notes. Review it and publish.
 
-`python tools/package.py [--tag vX.Y.Z] [--out <empty dir>]` does the packaging locally, by default into `target/dist/`: release build with a statically linked C runtime, version check of the exe, `THIRD_PARTY_LICENSES.txt` from cargo-about (`tools/about.toml`, `tools/about.hbs`), zip, `SHA256SUMS.txt` and `release-notes.md`.
+`python tools/package.py [--tag vX.Y.Z] [--out <empty dir>]` does the packaging locally, by default into `target/dist/`: release build with a statically linked C runtime, version check of the exe, `THIRD_PARTY_LICENSES.txt` from cargo-about (`tools/about.toml`, `tools/about.hbs`), zip and `release-notes.md`.
 
 ## Conventions
 

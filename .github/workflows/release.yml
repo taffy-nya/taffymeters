@@ -45,7 +45,7 @@ jobs:
       - run: >-
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag
           --title "$GITHUB_REF_NAME" --notes-file dist/release-notes.md
-          dist/*.zip dist/SHA256SUMS.txt
+          dist/*.zip
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

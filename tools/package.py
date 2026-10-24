@@ -3,8 +3,8 @@
 Usage: python tools/package.py [--tag vX.Y.Z] [--out EMPTY_DIRECTORY]
 
 Writes taffymeters-vX.Y.Z-windows-amd64.zip (exe, LICENSE, THIRD_PARTY_LICENSES.txt,
-README.md, CHANGELOG.md), SHA256SUMS.txt and release-notes.md. The exe links the C
-runtime statically so it runs without the Visual C++ Redistributable.
+README.md, CHANGELOG.md) and release-notes.md. The exe links the C runtime statically so
+it runs without the Visual C++ Redistributable.
 
 --tag is for release builds: it must equal v + the Cargo.toml version, and the
 CHANGELOG section of that version must carry a date.
@@ -12,7 +12,6 @@ Requires cargo-about: cargo install cargo-about --locked --features cli
 """
 import argparse
 import ctypes as c
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -123,10 +122,8 @@ def main():
             archive.write(ROOT / document, document)
         archive.write(licenses, licenses.name)
     licenses.unlink()
-    digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
-    (out / "SHA256SUMS.txt").write_text(f"{digest}  {name}\n", encoding="utf-8", newline="\n")
     (out / "release-notes.md").write_text(notes, encoding="utf-8", newline="\n")
-    print(f"{out / name}\n{digest}")
+    print(out / name)
 
 
 if __name__ == "__main__":
