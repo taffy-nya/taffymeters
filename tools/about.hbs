@@ -1,0 +1,21 @@
+Third-party licenses for taffymeters
+
+taffymeters is licensed under the GNU General Public License v3.0 or later (see
+LICENSE). The executable includes the following third-party software.
+
+Overview:
+{{#each overview}}
+  {{{name}}}: {{count}} crate(s)
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
