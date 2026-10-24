@@ -29,6 +29,8 @@ mod crash;
 #[cfg(windows)]
 mod fonts;
 mod icon;
+#[cfg(windows)]
+mod instance;
 mod live;
 mod persistence;
 #[cfg(any(test, feature = "automation"))]
@@ -66,6 +68,19 @@ fn main() {
         Ok(None) => persistence::WorkspaceStore::default_root()
             .unwrap_or_else(|error| exit_with_error(&error)),
         Err(error) => exit_with_error(&error),
+    };
+    #[cfg(windows)]
+    let _instance = match instance::claim(&root) {
+        Ok(instance::Claim::First(instance)) => Some(instance),
+        Ok(instance::Claim::Running { pid }) => {
+            eprintln!("already running with {}", root.display());
+            instance::raise(pid);
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("couldn't check for another instance: {error}");
+            None
+        }
     };
     crash::install(root.clone());
     let store = persistence::WorkspaceStore::new(root);
