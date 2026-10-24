@@ -55,5 +55,5 @@ Without a selector it runs the headless tests, then the native groups in `tools/
 
 ## Conventions
 
-- Commit messages: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `build:`, `ci:`, `chore:`), a one-line summary in the imperative, details in the body if needed.
+- Commit messages: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `perf:`, `refactor:`, `style:`, `docs:`, `test:`, `build:`, `ci:`, `chore:`), a one-line summary in the imperative, details in the body if needed. `refactor:` is only for restructuring that keeps behavior; new, changed or removed behavior is `feat:` or `fix:`, and automation and test tooling is `test:`.
 - Formatting is plain `cargo fmt`; extra lints are in `Cargo.toml`. Comments explain only what the code can't: reasons, invariants, units, platform quirks, and `// SAFETY:` before every `unsafe` block.
