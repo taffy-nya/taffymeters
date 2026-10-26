@@ -16,7 +16,7 @@ use serde_json::json;
 use crate::{
     LiveAudio, LiveAudioConfig,
     app::App,
-    audio::synthetic::SyntheticConfig,
+    audio::inputs::synthetic::SyntheticConfig,
     persistence::WorkspaceStore,
     workspace::{NativeDesktop, Workspace},
 };

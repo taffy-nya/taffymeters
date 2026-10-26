@@ -7,7 +7,7 @@ use crate::{
     LiveAudio, LiveAudioConfig,
     audio::{
         ChannelLayout, SourceState,
-        synthetic::{SignalSpec, SyntheticConfig},
+        inputs::synthetic::{SignalSpec, SyntheticConfig},
     },
     automation::{
         harness::{Harness, SETTINGS},

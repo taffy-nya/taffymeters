@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::{
     LiveAudio, LiveAudioConfig,
-    audio::synthetic::{ManualInputDriver, SyntheticConfig},
+    audio::inputs::synthetic::{ManualInputDriver, SyntheticConfig},
     workspace::{
         ActionOutcome, FIRST_WINDOW, ModuleInstanceId, Side, WindowId, Workspace, WorkspaceAction,
     },

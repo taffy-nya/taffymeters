@@ -5,7 +5,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
-use super::{
+use crate::audio::{
     AudioDescriptor, CaptureEndpoint, ChannelLayout, Generation, SourceId, SourceState,
     SourceTelemetry,
 };
@@ -104,7 +104,7 @@ pub(crate) enum SystemInputError {
     NoDevice,
     UnknownDevice,
     DefaultConfig(cpal::DefaultStreamConfigError),
-    InvalidDescriptor(super::DescriptorError),
+    InvalidDescriptor(crate::audio::DescriptorError),
     UnsupportedSampleFormat(SampleFormat),
     BuildStream(cpal::BuildStreamError),
     MicrophoneBlocked,

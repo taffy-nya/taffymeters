@@ -14,7 +14,7 @@ use std::time::Duration;
 use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::{
-    audio::Endpoints,
+    audio::inputs::Endpoints,
     dataflow::{ChannelSelection, NodeRef, OutputId},
     render::Color,
     settings::NodeParam,

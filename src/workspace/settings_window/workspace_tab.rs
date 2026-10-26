@@ -11,7 +11,10 @@ use super::{
     },
 };
 use crate::{
-    audio::{Endpoint, EndpointInfo, SourceState},
+    audio::{
+        SourceState,
+        inputs::{Endpoint, EndpointInfo},
+    },
     persistence::{
         CAPTURE_INPUT, DEFAULT_CAPTURE_INPUT, DEFAULT_PLAYBACK_INPUT, DEVICE_OPTION, InputConfig,
         NAME_OPTION, PLAYBACK_INPUT, PresetRef, builtin_presets, same_name, valid_name,

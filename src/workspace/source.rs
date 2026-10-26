@@ -11,7 +11,10 @@ use std::{
 use super::{ActionOutcome, ModuleInstanceId, Workspace, WorkspaceError};
 use crate::{
     LiveAudio,
-    audio::{Endpoints, Generation, SourceState, list_endpoints},
+    audio::{
+        Generation, SourceState,
+        inputs::{Endpoints, list_endpoints},
+    },
     dataflow::{PublicationWaker, SharedAnalysisId},
     live::{LiveAudioError, endpoint_of, open_system},
     module::ModuleServices,

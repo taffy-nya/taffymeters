@@ -2,8 +2,9 @@ use std::{error::Error, fmt, io, sync::Arc};
 
 use crate::{
     audio::{
-        CaptureEndpoint, Endpoint, Generation, OpenSystemInput, SourceReader, SourceState,
-        SourceTelemetry, SystemCapture, create_block_transport,
+        CaptureEndpoint, Generation, SourceReader, SourceState, SourceTelemetry,
+        create_block_transport,
+        inputs::{Endpoint, OpenSystemInput, SystemCapture},
     },
     dataflow::{ControlError, Dataflow, DataflowHandle},
     persistence::{
@@ -13,7 +14,7 @@ use crate::{
 };
 
 #[cfg(feature = "automation")]
-use crate::audio::synthetic::{
+use crate::audio::inputs::synthetic::{
     ManualInputDriver, ManualSource, RealtimeSource, SyntheticConfig, SyntheticError,
 };
 

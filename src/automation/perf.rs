@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{
     LiveAudio, LiveAudioConfig,
-    audio::synthetic::SyntheticConfig,
+    audio::inputs::synthetic::SyntheticConfig,
     modules::{
         EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, LOUDNESS_METER_MODULE_ID, OSCILLOSCOPE_MODULE_ID,
         SPECTROGRAM_MODULE_ID, STEREOMETER_MODULE_ID, WAVEFORM_MODULE_ID,
@@ -89,7 +89,9 @@ fn measure(label: &str, setup: Setup) -> Result<Value, String> {
     h.frame(vec![]);
     let modules = h.ws.observation().modules.len();
     let handle = h.ws.dataflow_handle_for_automation();
-    let run = |h: &mut Harness, driver: &mut crate::audio::synthetic::ManualInputDriver, frames| {
+    let run = |h: &mut Harness,
+               driver: &mut crate::audio::inputs::synthetic::ManualInputDriver,
+               frames| {
         let mut done = 0;
         while done < frames {
             let step = DRAW_EVERY_FRAMES.min(frames - done);

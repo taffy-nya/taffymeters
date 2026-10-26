@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::{
     LiveAudio,
-    audio::{Generation, synthetic::ManualInputDriver},
+    audio::{Generation, inputs::synthetic::ManualInputDriver},
     dataflow::{ChannelSelection, DataSpec, FftConfig, Keep, NodeRef, NodeSpec, OutputId},
     live::LiveAudioError,
     modules::{
@@ -2429,7 +2429,7 @@ fn s12() -> Result<Value, String> {
 
     use crate::{
         LiveAudio, LiveAudioConfig,
-        audio::synthetic::{SignalSpec, SyntheticConfig},
+        audio::inputs::synthetic::{SignalSpec, SyntheticConfig},
         audio::{AudioDescriptor, ChannelLayout, Generation, SourceId, SourceState},
         persistence::InputConfig,
     };
@@ -2703,7 +2703,7 @@ fn s13() -> Result<Value, String> {
 fn manual_at_generation(generation: Generation) -> Result<LiveAudio, LiveAudioError> {
     use crate::{
         LiveAudioConfig,
-        audio::{AudioDescriptor, synthetic::SyntheticConfig},
+        audio::{AudioDescriptor, inputs::synthetic::SyntheticConfig},
     };
     let defaults = SyntheticConfig::default();
     let d = &defaults.descriptor;
@@ -2726,7 +2726,10 @@ fn s14() -> Result<Value, String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
-        audio::{Endpoint, EndpointInfo, Endpoints, Generation},
+        audio::{
+            Generation,
+            inputs::{Endpoint, EndpointInfo, Endpoints},
+        },
         live::LiveAudioError,
         persistence::{InputConfig, PLAYBACK_INPUT},
     };
