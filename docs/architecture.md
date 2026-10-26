@@ -39,7 +39,7 @@ Workspace
 
 - A module type is a `ModuleFactory` registered in the `Registry` (`extensions.rs`). An instance declares what analysis it needs as a `DataSpec`, has view settings described by descriptors, and draws through `RenderTarget` (`render.rs`).
 - A `DataSpec` is a small graph of nodes: `Channel`, `Fft`, `Tilt`, `Smooth`, `Gain`, `Peak`, `Levels`, `Loudness`. Each output keeps either its latest result or the last few seconds (history).
-- The worker merges every subscription into one graph (`dataflow/engine.rs`). Stateless nodes with identical parameters are shared, so two panels showing the same FFT compute it once; stateful nodes (smoothing, peak hold) belong to their panel unless explicitly shared.
+- The worker merges every subscription into one graph (`dataflow/engine/`). Stateless nodes with identical parameters are shared, so two panels showing the same FFT compute it once; stateful nodes (smoothing, peak hold) belong to their panel unless explicitly shared.
 - Nodes with no subscriber don't run. Changing a panel's settings forks only the nodes that differ.
 
 ## Persistence
