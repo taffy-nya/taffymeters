@@ -53,7 +53,7 @@ pub(crate) use moving::{MoveRequest, WindowTracker};
 #[cfg(windows)]
 pub(crate) use native::on_session_end;
 pub(crate) use pacing::FramePacer;
-use persist::SessionAutosave;
+use persist::Autosave;
 use settings_window::SettingsWindow;
 #[cfg(feature = "automation")]
 pub(crate) use settings_window::{PickerPart, SettingsItem, Tab, swatches};
@@ -469,7 +469,7 @@ pub(crate) struct Workspace {
     store: Option<WorkspaceStore>,
     /// The session file could not be read; saving must not replace it.
     protected: bool,
-    autosave: SessionAutosave,
+    autosave: Autosave,
     desktop: Arc<dyn DesktopProbe + Send + Sync>,
     published_groups: Vec<(WindowId, u64)>,
     theme: ThemeSettings,
@@ -485,8 +485,11 @@ pub(crate) struct Workspace {
     endpoint_lister: source::EndpointLister,
     /// Display time of the next attempt to replace a lost source.
     next_recovery: Option<Duration>,
-    reference_dbfs: Option<f32>,
+    /// dBFS by `reference_key`.
+    reference_dbfs: BTreeMap<String, f32>,
     fps_limit: Option<f32>,
+    /// `local.json` could not be read; saving must not replace it.
+    local_protected: bool,
     notices: Vec<String>,
     notices_shown_until: Duration,
     /// File number of each binding of this workspace (restored or saved).
@@ -528,7 +531,7 @@ impl Workspace {
             preset: None,
             store: None,
             protected: false,
-            autosave: SessionAutosave::default(),
+            autosave: Autosave::default(),
             desktop,
             published_groups: Vec::new(),
             chrome: theme.global_palette(),
@@ -540,8 +543,9 @@ impl Workspace {
             opener: source::system_opener(),
             endpoint_lister: source::system_lister(),
             next_recovery: None,
-            reference_dbfs: None,
+            reference_dbfs: BTreeMap::new(),
             fps_limit: None,
+            local_protected: false,
             notices: Vec::new(),
             binding_numbers: HashMap::new(),
             settings: None,
@@ -914,15 +918,28 @@ impl Workspace {
             return Err(WorkspaceError::Unsupported("a non-finite reference level"));
         }
         let (min, max) = crate::module::REFERENCE_DBFS_RANGE;
-        self.reference_dbfs = dbfs.map(|dbfs| dbfs.clamp(min, max));
+        let key = self.reference_key().to_owned();
+        match dbfs {
+            Some(dbfs) => self.reference_dbfs.insert(key, dbfs.clamp(min, max)),
+            None => self.reference_dbfs.remove(&key),
+        };
         Ok(ActionOutcome::Applied)
     }
 
+    /// Of the running device: loopback reads lower on devices that apply their volume
+    /// in software, so each device keeps its own.
     pub(crate) fn reference_dbfs(&self) -> f32 {
         let (min, max) = crate::module::REFERENCE_DBFS_RANGE;
         self.reference_dbfs
+            .get(self.reference_key())
+            .copied()
             .unwrap_or(crate::module::DEFAULT_REFERENCE_DBFS)
             .clamp(min, max)
+    }
+
+    /// The device ID, or the input kind for inputs without one.
+    pub(super) fn reference_key(&self) -> &str {
+        self.source_device_id().unwrap_or(&self.opened.kind)
     }
 
     fn set_fps_limit(&mut self, fps: Option<f32>) -> Result<ActionOutcome, WorkspaceError> {

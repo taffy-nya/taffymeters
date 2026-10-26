@@ -45,6 +45,7 @@ Workspace
 ## Persistence
 
 - `session.json` in the config directory is saved automatically and restored at startup; presets are separate files saved on request (`persistence/`).
+- `local.json` beside it keeps what belongs to the machine rather than the layout: the chosen input, the frame rate limit and a reference level per audio device. Loading a preset never changes them.
 - A saved module is its type, its `DataSpec` and its view values; window frames are stored relative to the display work area so layouts survive resolution and scaling changes.
 - Unknown module types or invalid settings load as placeholders that keep the original data, so nothing is lost when a file comes from another version.
 
@@ -52,14 +53,14 @@ Workspace
 
 | Path | Contents |
 |---|---|
-| `src/audio/` | Input descriptor, WASAPI capture (loopback and microphones), block transport, source status |
+| `src/audio/` | Input descriptor, block transport, source status; `inputs/` holds WASAPI capture (loopback and microphones) and the default-device watch |
 | `src/dataflow/` | `DataSpec`, node graph engine, FFT, history and level kernels, worker runtime |
 | `src/modules/` | Built-in modules, one directory each, with their styles |
 | `src/module.rs`, `src/render.rs` | Module contract and drawing interface |
 | `src/extensions.rs` | Registry and factories |
 | `src/live.rs` | Opening an input and starting its worker |
 | `src/workspace/` | Workspace, layout, windows, snapping, settings window |
-| `src/persistence/` | Session and preset files, built-in presets |
+| `src/persistence/` | Session, preset and local settings files, built-in presets |
 | `src/theme.rs`, `src/settings/` | Theme colors; UI-independent setting descriptors |
 | `src/main.rs`, `src/instance.rs`, `src/crash.rs` | Startup, one instance per config directory, crash logs |
 | `src/automation/` | Test harness and CLI, only with the `automation` feature |

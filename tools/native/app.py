@@ -181,6 +181,12 @@ class App:
     def write_session(self, fixture):
         (self.config / "session.json").write_text(json.dumps(fixture, indent=2), encoding="utf-8")
 
+    def read_local(self):
+        return json.loads((self.config / "local.json").read_text(encoding="utf-8"))
+
+    def write_local(self, settings):
+        (self.config / "local.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
     def stderr(self):
         self.log.flush()
         return (self.directory / "stderr.log").read_text(encoding="utf-8", errors="replace").strip()

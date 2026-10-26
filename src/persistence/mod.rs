@@ -1,5 +1,8 @@
 //! Sessions and presets share a format containing only logical configuration.
 //! Runtime identities and state are excluded; binding numbers are local to each file.
+//! Settings tied to this machine and its devices live apart in `local.json`.
+
+mod local;
 
 use std::{
     collections::BTreeMap,
@@ -12,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::theme::ThemeSettings;
+
+pub(crate) use local::{LocalLoad, LocalSettings, LocalState};
 
 pub(crate) const FORMAT_VERSION: u32 = 2;
 /// Input kinds; the playback ones are captured through loopback.
@@ -36,14 +41,6 @@ pub(crate) struct WorkspaceFile {
     /// Session origin; omitted from presets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) preset: Option<PresetRef>,
-    #[serde(default)]
-    pub(crate) input: InputConfig,
-    /// Absence follows the build's default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) reference_dbfs: Option<f32>,
-    /// Frames per second; absence follows the build's default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) fps_limit: Option<f32>,
     #[serde(default = "ThemeSettings::dark")]
     pub(crate) theme: ThemeSettings,
     pub(crate) displays: Vec<DisplayFile>,
@@ -182,7 +179,8 @@ impl ModuleFile {
 pub(crate) enum PersistError {
     Io(String, io::Error),
     Parse(String, String),
-    Version(String, u32),
+    /// The version found and the one this build reads.
+    Version(String, u32, u32),
     InvalidName(String),
 }
 
@@ -190,10 +188,10 @@ impl fmt::Display for PersistError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(path, error) => write!(f, "{path}: {error}"),
-            Self::Parse(path, error) => write!(f, "{path} is not a readable workspace: {error}"),
-            Self::Version(path, version) => write!(
+            Self::Parse(path, error) => write!(f, "{path} is unreadable: {error}"),
+            Self::Version(path, found, supported) => write!(
                 f,
-                "{path} uses format version {version}; this build reads version {FORMAT_VERSION}"
+                "{path} uses format version {found}; this build reads version {supported}"
             ),
             Self::InvalidName(name) => write!(f, "invalid preset name: {name:?}"),
         }
@@ -202,19 +200,27 @@ impl fmt::Display for PersistError {
 
 impl Error for PersistError {}
 
-fn parse(label: &str, bytes: &[u8]) -> Result<WorkspaceFile, PersistError> {
+/// The JSON of a file whose `format_version` is the one this build reads.
+fn versioned(label: &str, bytes: &[u8], supported: u32) -> Result<Value, PersistError> {
     let error = |reason: String| PersistError::Parse(label.to_owned(), reason);
     let value: Value = serde_json::from_slice(bytes).map_err(|e| error(e.to_string()))?;
     let version = value
         .get("format_version")
         .and_then(Value::as_u64)
         .ok_or_else(|| error("missing format_version".into()))?;
-    if version != u64::from(FORMAT_VERSION) {
+    if version != u64::from(supported) {
         return Err(PersistError::Version(
             label.to_owned(),
             u32::try_from(version).unwrap_or(u32::MAX),
+            supported,
         ));
     }
+    Ok(value)
+}
+
+fn parse(label: &str, bytes: &[u8]) -> Result<WorkspaceFile, PersistError> {
+    let error = |reason: String| PersistError::Parse(label.to_owned(), reason);
+    let value = versioned(label, bytes, FORMAT_VERSION)?;
     let file: WorkspaceFile = serde_json::from_value(value).map_err(|e| error(e.to_string()))?;
     if file.windows.is_empty() {
         return Err(error("no windows".into()));
@@ -354,31 +360,29 @@ impl WorkspaceStore {
         read(&self.session_path())
     }
 
-    /// The session's input, or the default when there is no readable session.
-    pub(crate) fn session_input(&self) -> InputConfig {
-        self.load_session()
-            .ok()
-            .flatten()
-            .map(|file| file.input)
-            .unwrap_or_default()
-    }
-
     pub(crate) fn save_session(&self, file: &WorkspaceFile) -> Result<(), PersistError> {
         write(&self.session_path(), file)
     }
 }
 
-fn read(path: &Path) -> Result<Option<WorkspaceFile>, PersistError> {
+/// The file's label for messages and its bytes; `None` when it does not exist.
+fn read_bytes(path: &Path) -> Result<Option<(String, Vec<u8>)>, PersistError> {
     let label = path.display().to_string();
     match fs::read(path) {
-        Ok(bytes) => parse(&label, &bytes).map(Some),
+        Ok(bytes) => Ok(Some((label, bytes))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(PersistError::Io(label, error)),
     }
 }
 
+fn read(path: &Path) -> Result<Option<WorkspaceFile>, PersistError> {
+    read_bytes(path)?
+        .map(|(label, bytes)| parse(&label, &bytes))
+        .transpose()
+}
+
 // Replace by rename so an interrupted write cannot truncate the saved file.
-fn write(path: &Path, file: &WorkspaceFile) -> Result<(), PersistError> {
+fn write(path: &Path, file: &impl Serialize) -> Result<(), PersistError> {
     let label = path.display().to_string();
     let io = |error| PersistError::Io(label.clone(), error);
     let directory = path.parent().expect("files live in a directory");
@@ -388,7 +392,7 @@ fn write(path: &Path, file: &WorkspaceFile) -> Result<(), PersistError> {
         .expect("store paths include a file name")
         .to_string_lossy();
     let temporary = directory.join(format!(".{name}.tmp"));
-    let bytes = serde_json::to_vec_pretty(file).expect("a workspace file serializes");
+    let bytes = serde_json::to_vec_pretty(file).expect("saved files serialize");
     fs::write(&temporary, bytes).map_err(io)?;
     fs::rename(&temporary, path).map_err(io)
 }
@@ -427,9 +431,6 @@ mod tests {
         WorkspaceFile {
             format_version: FORMAT_VERSION,
             preset: None,
-            input: InputConfig::default(),
-            reference_dbfs: None,
-            fps_limit: None,
             theme: ThemeSettings::dark(),
             displays: vec![DisplayFile {
                 work_area: [1920.0, 1040.0],
@@ -549,11 +550,11 @@ mod tests {
         fs::write(store.presets().join("Upper.JSON"), b"{}").unwrap();
         assert!(matches!(
             store.load_preset("Future"),
-            Err(PersistError::Version(_, 99))
+            Err(PersistError::Version(_, 99, FORMAT_VERSION))
         ));
         assert!(matches!(
             store.load_preset("Old"),
-            Err(PersistError::Version(_, 1))
+            Err(PersistError::Version(_, 1, FORMAT_VERSION))
         ));
         assert!(matches!(
             store.load_preset("Broken"),

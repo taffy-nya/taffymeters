@@ -26,8 +26,9 @@ use crate::{
     module::{Module, ModuleFrame, ModuleResponse, draw_notice},
     persistence::{
         DEFAULT_PRESET, DisplayFile, DisplayHint, FORMAT_VERSION, InputConfig, LayoutFile,
-        ModuleFile, PersistError, PresetRef, SplitAxis, WindowFile, WorkspaceFile, WorkspaceStore,
-        builtin_preset, builtin_presets, same_name, valid_name,
+        LocalLoad, LocalSettings, LocalState, ModuleFile, PersistError, PresetRef, SplitAxis,
+        WindowFile, WorkspaceFile, WorkspaceStore, builtin_preset, builtin_presets, same_name,
+        valid_name,
     },
     settings::SettingValue,
     theme::{ColorRole, RoleOverrides},
@@ -36,11 +37,67 @@ use crate::{
 pub(crate) const MISSING_MODULE_ID: &str = "taffymeters.missing";
 const AUTOSAVE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The last written value, and a changed one that is written once it stays unchanged
+/// for a check interval.
+struct Settling<T> {
+    written: Option<T>,
+    changed: Option<T>,
+}
+
+impl<T> Default for Settling<T> {
+    fn default() -> Self {
+        Self {
+            written: None,
+            changed: None,
+        }
+    }
+}
+
+enum Settle<T> {
+    Written,
+    Changing,
+    Write(T),
+}
+
+impl<T: PartialEq> Settling<T> {
+    fn check(&mut self, current: T) -> Settle<T> {
+        if self.written.as_ref() == Some(&current) {
+            self.changed = None;
+            return Settle::Written;
+        }
+        if self.changed.as_ref() != Some(&current) {
+            self.changed = Some(current);
+            return Settle::Changing;
+        }
+        self.changed = None;
+        Settle::Write(current)
+    }
+}
+
 #[derive(Default)]
-pub(super) struct SessionAutosave {
-    written: Option<WorkspaceFile>,
-    changed: Option<WorkspaceFile>,
+pub(super) struct Autosave {
+    session: Settling<WorkspaceFile>,
+    local: Settling<LocalSettings>,
     next_check: Duration,
+    /// The session still holds settings migrated to a `local.json` not yet written;
+    /// saving the session would drop them.
+    session_waits_for_local: bool,
+    local_failure_reported: bool,
+}
+
+fn file_problem(name: &str, error: &PersistError) -> String {
+    match error {
+        PersistError::Version(_, found, supported) if found > supported => {
+            format!("{name} file is from a newer version ({found})")
+        }
+        PersistError::Version(_, found, _) => {
+            format!("{name} file is from an older version ({found})")
+        }
+        PersistError::Parse(_, reason) => format!("{name} file unreadable: {reason}"),
+        PersistError::Io(..) | PersistError::InvalidName(_) => {
+            format!("Couldn't read the {} file: {error}", name.to_lowercase())
+        }
+    }
 }
 
 pub(super) struct ModuleConfig {
@@ -98,9 +155,11 @@ fn file_axis(axis: SplitAxis) -> Axis {
 
 impl Workspace {
     /// Unreadable sessions fall back to Default without allowing saves over the original.
+    /// `local` comes from `WorkspaceStore::load_local`; its input opened `live`.
     pub(crate) fn open(
         live: LiveAudio,
         store: WorkspaceStore,
+        local: LocalLoad,
         desktop: Arc<dyn DesktopProbe + Send + Sync>,
     ) -> Result<Self, WorkspaceError> {
         let mut workspace = Self::empty(live, desktop)?;
@@ -111,42 +170,59 @@ impl Workspace {
             Ok(None) => workspace.default_preset()?,
             Err(error) => {
                 workspace.protected = true;
-                let problem = match &error {
-                    PersistError::Version(_, version) if *version > FORMAT_VERSION => {
-                        format!("Session is from a newer version ({version})")
-                    }
-                    PersistError::Version(_, version) => {
-                        format!("Session is from an older version ({version})")
-                    }
-                    PersistError::Parse(_, reason) => format!("Session file unreadable: {reason}"),
-                    PersistError::Io(..) | PersistError::InvalidName(_) => {
-                        format!("Couldn't read the session: {error}")
-                    }
-                };
-                workspace.push_notice(format!("{problem}; opened Default, file left untouched"));
+                workspace.push_notice(format!(
+                    "{}; opened Default, file left untouched",
+                    file_problem("Session", &error)
+                ));
                 workspace.default_preset()?
             }
         };
         workspace.preset = file.preset.clone();
-        // Inputs belong to the session; presets are layouts and leave the input alone.
-        let input = file.input.clone();
         let displays = workspace.displays();
         let current = Self::primary(&displays);
         workspace.restore(file, &displays, current)?;
+        workspace.apply_local(local);
+        Ok(workspace)
+    }
+
+    fn apply_local(&mut self, local: LocalLoad) {
+        let LocalLoad { settings, state } = local;
+        self.fps_limit = settings.fps_limit;
+        self.pacer.set_fps(self.fps_limit());
+        self.reference_dbfs = settings.reference_dbfs;
+        let input = settings.input;
         let supported = endpoint_of(&input).is_some();
         if !supported {
-            workspace.push_notice(format!(
+            self.push_notice(format!(
                 "Input {:?} unavailable; using system audio (saved input kept)",
                 input.kind
             ));
         }
-        workspace.input = input.clone();
-        workspace.set_opened(if supported {
+        self.input = input.clone();
+        self.set_opened(if supported {
             input
         } else {
             InputConfig::default()
         });
-        Ok(workspace)
+        match state {
+            LocalState::Read => self.autosave.local.written = Some(self.saved_local()),
+            LocalState::Migrated { reference_dbfs } => {
+                if let Some(dbfs) = reference_dbfs {
+                    let key = self.reference_key().to_owned();
+                    self.reference_dbfs.insert(key, dbfs);
+                }
+                self.autosave.session_waits_for_local = true;
+                self.save_local();
+            }
+            LocalState::Unreadable(error) => {
+                self.local_protected = true;
+                self.push_notice(format!(
+                    "{}; using the default input, frame rate and reference level, \
+                     file left untouched",
+                    file_problem("Local settings", &error)
+                ));
+            }
+        }
     }
 
     fn default_preset(&self) -> Result<WorkspaceFile, WorkspaceError> {
@@ -255,17 +331,19 @@ impl Workspace {
 
     /// Called on exit, Quit, logoff and before the last window closes.
     pub(crate) fn autosave(&mut self) {
-        if !self.can_save() || self.windows.is_empty() {
-            return;
+        self.save_local();
+        if self.can_save() && !self.windows.is_empty() && !self.autosave.session_waits_for_local {
+            let file = self.saved_file();
+            self.write_session(file);
         }
-        let file = self.saved_file();
-        self.write_session(file);
     }
 
     /// Called once per host pass, after `tick`. Returns the delay until a pass is
     /// needed to finish a pending save.
     pub(crate) fn autosave_when_settled(&mut self) -> Option<Duration> {
-        if !self.can_save() || self.windows.is_empty() {
+        let local = self.can_save_local();
+        let session = self.can_save() && !self.windows.is_empty();
+        if !session && !local {
             return None;
         }
         let now = self.display_time;
@@ -273,18 +351,24 @@ impl Workspace {
             return Some(self.autosave.next_check - now);
         }
         self.autosave.next_check = now + AUTOSAVE_CHECK_INTERVAL;
-        let file = self.saved_file();
-        if self.autosave.written.as_ref() == Some(&file) {
-            self.autosave.changed = None;
-            return None;
+        let mut changing = false;
+        if local {
+            let settings = self.saved_local();
+            match self.autosave.local.check(settings) {
+                Settle::Written => {}
+                Settle::Changing => changing = true,
+                Settle::Write(settings) => changing |= !self.write_local(settings),
+            }
         }
-        if self.autosave.changed.as_ref() != Some(&file) {
-            self.autosave.changed = Some(file);
-            return Some(AUTOSAVE_CHECK_INTERVAL);
+        if session && !self.autosave.session_waits_for_local {
+            let file = self.saved_file();
+            match self.autosave.session.check(file) {
+                Settle::Written => {}
+                Settle::Changing => changing = true,
+                Settle::Write(file) => self.write_session(file),
+            }
         }
-        self.autosave.changed = None;
-        self.write_session(file);
-        None
+        changing.then_some(AUTOSAVE_CHECK_INTERVAL)
     }
 
     fn write_session(&mut self, file: WorkspaceFile) {
@@ -292,7 +376,54 @@ impl Workspace {
         if let Err(error) = store.save_session(&file) {
             self.push_notice(format!("Couldn't save the session: {error}"));
         }
-        self.autosave.written = Some(file);
+        self.autosave.session.written = Some(file);
+    }
+
+    fn can_save_local(&self) -> bool {
+        self.store.is_some() && !self.local_protected
+    }
+
+    fn saved_local(&self) -> LocalSettings {
+        LocalSettings {
+            input: self.input.clone(),
+            fps_limit: self.fps_limit,
+            reference_dbfs: self.reference_dbfs.clone(),
+            ..LocalSettings::default()
+        }
+    }
+
+    /// Writes the local settings unless unchanged since the last successful write.
+    fn save_local(&mut self) {
+        if !self.can_save_local() {
+            return;
+        }
+        let settings = self.saved_local();
+        if self.autosave.local.written.as_ref() != Some(&settings) {
+            self.write_local(settings);
+        }
+    }
+
+    /// A failed write stays pending, so later checks and the exit save retry it; the
+    /// failure is reported once until a write succeeds.
+    fn write_local(&mut self, settings: LocalSettings) -> bool {
+        let store = self
+            .store
+            .as_ref()
+            .expect("can_save_local checked the store");
+        match store.save_local(&settings) {
+            Ok(()) => {
+                self.autosave.local.written = Some(settings);
+                self.autosave.session_waits_for_local = false;
+                self.autosave.local_failure_reported = false;
+                true
+            }
+            Err(error) => {
+                if !std::mem::replace(&mut self.autosave.local_failure_reported, true) {
+                    self.push_notice(format!("Couldn't save the local settings: {error}"));
+                }
+                false
+            }
+        }
     }
 
     fn preset_file(&self, preset: &PresetRef) -> Result<WorkspaceFile, WorkspaceError> {
@@ -338,7 +469,6 @@ impl Workspace {
     fn preset_contents(&mut self) -> WorkspaceFile {
         let mut file = self.saved_file();
         file.preset = None;
-        file.input = InputConfig::default();
         file
     }
 
@@ -407,9 +537,6 @@ impl Workspace {
             ));
         }
         self.refresh_palettes();
-        self.reference_dbfs = file.reference_dbfs;
-        self.fps_limit = file.fps_limit;
-        self.pacer.set_fps(self.fps_limit());
         let saved: Vec<SavedDisplay> = file
             .displays
             .iter()
@@ -733,9 +860,6 @@ impl Workspace {
         WorkspaceFile {
             format_version: FORMAT_VERSION,
             preset: self.preset.clone(),
-            input: self.input.clone(),
-            reference_dbfs: self.reference_dbfs,
-            fps_limit: self.fps_limit,
             theme: self.theme.clone(),
             displays: on
                 .into_iter()

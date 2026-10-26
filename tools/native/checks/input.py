@@ -19,17 +19,17 @@ def run(c):
     c.expect("picker_matches_trace", bool(chosen.get("device")) and state["input"]["running"] == chosen["name"]
              and state["input"]["device"] == chosen["device"], chosen=chosen, input=state["input"])
     app.quit()
-    c.expect("selected_input_saved", app.read_session()["input"] == chosen,
-             saved=app.read_session()["input"], chosen=chosen)
+    c.expect("selected_input_saved", app.read_local()["input"] == chosen,
+             saved=app.read_local()["input"], chosen=chosen)
     restarted = App(c, "restart", config=app.config, input_kind="system")
     state = restarted.state()
     c.expect("restart_keeps_choice", state["input"]["chosen"] == chosen and state["input"]["running"] == chosen["name"], input=state["input"])
     restarted.quit()
-    fixture = restarted.read_session()
+    local = restarted.read_local()
     missing = {"kind": "system_endpoint", "device": "wasapi:{0.0.0.00000000}.{00000000-0000-0000-0000-000000000000}",
                "name": "Native smoke missing endpoint"}
-    fixture["input"] = missing
-    restarted.write_session(fixture)
+    local["input"] = missing
+    restarted.write_local(local)
     fallback = App(c, "missing", config=app.config, input_kind="system")
     state = w.wait(lambda: fallback.state() if fallback.state().get("notices") else None,
                    "unavailable input notice")
@@ -38,5 +38,5 @@ def run(c):
              and state["source"] == "Running", input=state["input"], notices=state["notices"],
              source=state["source"], default_running=default_running)
     fallback.quit()
-    c.expect("missing_choice_preserved", fallback.read_session()["input"] == missing,
-             saved=fallback.read_session()["input"])
+    c.expect("missing_choice_preserved", fallback.read_local()["input"] == missing,
+             saved=fallback.read_local()["input"])

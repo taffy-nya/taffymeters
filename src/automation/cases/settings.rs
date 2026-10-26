@@ -36,7 +36,7 @@ use crate::automation::{
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 17] = [
+pub(super) const CASES: [(&str, Scenario); 18] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -54,6 +54,7 @@ pub(super) const CASES: [(&str, Scenario); 17] = [
     ("S15", s15),
     ("S16", s16),
     ("S17", s17),
+    ("S18", s18),
 ];
 
 impl TempDir {
@@ -69,9 +70,18 @@ impl TempDir {
         self.path().join("session.json")
     }
 
+    fn local(&self) -> PathBuf {
+        self.path().join("local.json")
+    }
+
     fn write_session(&self, file: &Value) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(file).expect("a JSON value serializes");
         write_bytes(&self.session(), &bytes)
+    }
+
+    fn write_local(&self, file: &Value) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(file).expect("a JSON value serializes");
+        write_bytes(&self.local(), &bytes)
     }
 }
 
@@ -82,7 +92,9 @@ fn primary_display() -> Value {
 
 fn reopen(dir: &TempDir) -> Result<(Workspace, ManualInputDriver), String> {
     let (live, driver) = synthetic()?;
-    let ws = Workspace::open(live, dir.store(), FakeDesktop::new()).map_err(|e| e.to_string())?;
+    let store = dir.store();
+    let local = store.load_local();
+    let ws = Workspace::open(live, store, local, FakeDesktop::new()).map_err(|e| e.to_string())?;
     Ok((ws, driver))
 }
 
@@ -1225,21 +1237,28 @@ fn s04() -> Result<Value, String> {
         before == after,
         &format!("restored workspace differs:\nbefore {before}\nafter  {after}"),
     )?;
+    let local = read_json(&dir.local())?;
     check(
-        h.ws.reference_dbfs() == -24.0 && saved_session["reference_dbfs"] == -24.0,
+        h.ws.reference_dbfs() == -24.0 && local["reference_dbfs"]["system_default"] == -24.0,
         &format!(
-            "reference level not restored: {} (file {})",
+            "reference level not restored: {} (local {})",
             h.ws.reference_dbfs(),
-            saved_session["reference_dbfs"]
+            local["reference_dbfs"]
         ),
     )?;
     check(
-        h.ws.fps_limit() == 30.0 && saved_session["fps_limit"] == 30.0,
+        h.ws.fps_limit() == 30.0 && local["fps_limit"] == 30.0,
         &format!(
-            "frame rate limit not restored: {} (file {})",
+            "frame rate limit not restored: {} (local {})",
             h.ws.fps_limit(),
-            saved_session["fps_limit"]
+            local["fps_limit"]
         ),
+    )?;
+    check(
+        ["input", "reference_dbfs", "fps_limit"]
+            .iter()
+            .all(|key| saved_session.get(key).is_none()),
+        "the session kept device settings",
     )?;
     let o = h.ws.observation();
     check(
@@ -1333,7 +1352,7 @@ fn s05() -> Result<Value, String> {
         {"input":1,"kind":"tilt","params":{"db_per_octave":4.5}},
         {"input":2,"kind":"peak","params":{"hold_ms":1000.0,"fall_db_per_second_squared":30.0}}],
         "outputs":[{"node":2,"keep":"latest"},{"node":3,"keep":"latest"}]}});
-    let file = json!({"format_version":2,"input":{"kind":"daw_bridge","pipe":"studio-a"},
+    let file = json!({"format_version":2,
         "theme":{"preset":"dark"},"displays":[primary_display()],
         "windows":[{"display":0,"frame":[120.0,140.0,1020.0,560.0],
             "layout":{"node":"split","axis":"left_right","ratio":0.5,
@@ -1349,6 +1368,7 @@ fn s05() -> Result<Value, String> {
                 "first":{"node":"leaf","module":empty_with_data},
                 "second":{"node":"leaf","module":huge_fft}}}]});
     dir.write_session(&file)?;
+    dir.write_local(&json!({"format_version":1,"input":{"kind":"daw_bridge","pipe":"studio-a"}}))?;
     let (ws, _driver) = reopen(&dir)?;
     let mut h = Harness::new(ws);
     h.frame_all()?;
@@ -1428,7 +1448,7 @@ fn s05() -> Result<Value, String> {
     )?;
     check(
         layout["second"]["first"]["module"]["style"] == "vendor.glow"
-            && saved["input"] == json!({"kind":"daw_bridge","pipe":"studio-a"}),
+            && read_json(&dir.local())?["input"] == json!({"kind":"daw_bridge","pipe":"studio-a"}),
         "unknown style or input was not kept",
     )?;
     let copy = created(action(
@@ -1499,7 +1519,7 @@ fn s05() -> Result<Value, String> {
     let mut invalid_instance = file.clone();
     let invalid_module = json!({"type_id":EMPTY_MODULE_ID,
         "colors":{"primary":"#+1+2+3"}});
-    invalid_instance["input"] = json!({"kind":"system_default"});
+    dir.write_local(&json!({"format_version":1}))?;
     invalid_instance["windows"] = json!([{"display":0,"frame":[120.0,140.0,1020.0,560.0],
         "layout":{"node":"leaf","module":invalid_module}}]);
     dir.write_session(&invalid_instance)?;
@@ -1799,8 +1819,14 @@ fn s07() -> Result<Value, String> {
         primary: true,
     }]);
     let (live, _driver) = synthetic()?;
-    let ws = Workspace::open(live, dir.store(), Arc::<FakeDesktop>::clone(&desktop))
-        .map_err(|e| e.to_string())?;
+    let local = dir.store().load_local();
+    let ws = Workspace::open(
+        live,
+        dir.store(),
+        local,
+        Arc::<FakeDesktop>::clone(&desktop),
+    )
+    .map_err(|e| e.to_string())?;
     let mut scaled = Harness::with_desktop(ws, desktop);
     scaled.frame_all()?;
     let frames: Vec<egui::Rect> = scaled
@@ -2892,8 +2918,8 @@ fn s14() -> Result<Value, String> {
     )
 }
 
-/// A chosen input that fails at startup runs the default device, reports it and stays chosen;
-/// presets neither save nor change the input.
+/// A chosen input that fails at startup runs the default device, reports it and stays
+/// chosen in the local settings; presets neither save nor change the input.
 fn s15() -> Result<Value, String> {
     use crate::{
         audio::Generation,
@@ -2912,9 +2938,8 @@ fn s15() -> Result<Value, String> {
             ("name".to_owned(), json!("Missing speakers")),
         ]),
     };
-    let mut file = read_json(&dir.session())?;
-    file["input"] = serde_json::to_value(&chosen).map_err(|e| e.to_string())?;
-    dir.write_session(&file)?;
+    let chosen_json = serde_json::to_value(&chosen).map_err(|e| e.to_string())?;
+    dir.write_local(&json!({"format_version":1,"input":chosen_json}))?;
     let requests = Mutex::new(Vec::new());
     let opener = |input: &InputConfig, generation| {
         requests
@@ -2927,10 +2952,11 @@ fn s15() -> Result<Value, String> {
             manual_at_generation(generation)
         }
     };
+    let local = dir.store().load_local();
     let (live, unavailable) =
-        open_chosen(&dir.store().session_input(), &opener).map_err(|e| e.to_string())?;
+        open_chosen(&local.settings.input, &opener).map_err(|e| e.to_string())?;
     let mut ws =
-        Workspace::open(live, dir.store(), FakeDesktop::new()).map_err(|e| e.to_string())?;
+        Workspace::open(live, dir.store(), local, FakeDesktop::new()).map_err(|e| e.to_string())?;
     ws.input_unavailable(&unavailable.ok_or("startup fallback omitted the chosen-input error")?);
     check(*requests.lock().map_err(|e| e.to_string())? == [chosen.clone(), InputConfig::default()]
         && *ws.input() == chosen
@@ -2940,9 +2966,8 @@ fn s15() -> Result<Value, String> {
         &format!("startup fallback did not preserve/report the choice: {:?}", ws.observation().notices))?;
     ws.autosave();
     check(
-        read_json(&dir.session())?["input"]
-            == serde_json::to_value(&chosen).map_err(|e| e.to_string())?,
-        "startup fallback overwrote the chosen input in the session",
+        read_json(&dir.local())?["input"] == chosen_json,
+        "startup fallback overwrote the chosen input in the local settings",
     )?;
     action(
         &mut ws,
@@ -2950,9 +2975,12 @@ fn s15() -> Result<Value, String> {
             name: "Input-free".to_owned(),
         },
     )?;
+    let preset = read_json(&dir.preset("Input-free"))?;
     check(
-        read_json(&dir.preset("Input-free"))?["input"] == json!({"kind":"system_default"}),
-        "saved preset leaked the chosen endpoint rather than the default input",
+        ["input", "reference_dbfs", "fps_limit"]
+            .iter()
+            .all(|key| preset.get(key).is_none()),
+        "a saved preset carries device settings",
     )?;
     let descriptor = ws.source_descriptor_for_automation().clone();
     for preset in [builtin("Default"), saved("Input-free")] {
@@ -2963,8 +2991,163 @@ fn s15() -> Result<Value, String> {
         )?;
     }
     Ok(
-        json!({"startup":"chosen fails, default playback opens","choice":"session kept",
-        "preset_input":"default","load_preset":"source unchanged"}),
+        json!({"startup":"chosen fails, default playback opens","choice":"local settings kept",
+        "preset_input":"none","load_preset":"source unchanged"}),
+    )
+}
+
+/// Input, frame rate limit and reference levels live in local.json: a session from before
+/// it migrates once, presets never change them, each device keeps its own reference level,
+/// and an unreadable file is left alone.
+fn s18() -> Result<Value, String> {
+    use crate::{
+        module::DEFAULT_REFERENCE_DBFS,
+        persistence::{CAPTURE_INPUT, InputConfig, PLAYBACK_INPUT},
+    };
+
+    let dir = TempDir::new("s18")?;
+    let (mut seed, _driver) = reopen(&dir)?;
+    seed.autosave();
+    drop(seed);
+    let microphone = json!({"kind":CAPTURE_INPUT,"device":"wasapi:mic","name":"Mic"});
+    let mut session = read_json(&dir.session())?;
+    session["input"] = microphone.clone();
+    session["reference_dbfs"] = json!(-24.0);
+    session["fps_limit"] = json!(30.0);
+    dir.write_session(&session)?;
+    std::fs::remove_file(dir.local()).map_err(|e| format!("{}: {e}", dir.local().display()))?;
+    // A directory where the temporary file goes makes every local.json write fail.
+    let blocker = dir.path().join(".local.json.tmp");
+    std::fs::create_dir(&blocker).map_err(|e| format!("{}: {e}", blocker.display()))?;
+
+    let (ws, _driver) = reopen(&dir)?;
+    let mut h = Harness::new(ws);
+    h.frame(vec![]);
+    h.ws.autosave();
+    let kept = read_json(&dir.session())?;
+    let failures =
+        h.ws.observation()
+            .notices
+            .iter()
+            .filter(|n| n.starts_with("Couldn't save the local settings"))
+            .count();
+    check(
+        !dir.local().exists() && kept["reference_dbfs"] == -24.0 && failures == 1,
+        &format!("an unsaved migration: session {kept}, {failures} failure notices"),
+    )?;
+    std::fs::remove_dir(&blocker).map_err(|e| format!("{}: {e}", blocker.display()))?;
+    h.ws.autosave();
+    let migrated = read_json(&dir.local())?;
+    let input = serde_json::to_value(h.ws.input()).map_err(|e| e.to_string())?;
+    check(
+        migrated["input"] == microphone
+            && migrated["fps_limit"] == 30.0
+            && migrated["reference_dbfs"] == json!({CAPTURE_INPUT: -24.0})
+            && input == microphone
+            && h.ws.fps_limit() == 30.0
+            && h.ws.reference_dbfs() == -24.0,
+        &format!("migration wrote {migrated}; input {input}"),
+    )?;
+    h.ws.autosave();
+    let session = read_json(&dir.session())?;
+    check(
+        ["input", "reference_dbfs", "fps_limit"]
+            .iter()
+            .all(|key| session.get(key).is_none())
+            && read_json(&dir.local())? == migrated,
+        "the session kept the migrated settings or saving changed local.json",
+    )?;
+
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetReferenceLevel { dbfs: Some(-12.0) },
+    )?;
+    action(&mut h.ws, WorkspaceAction::SetFpsLimit { fps: Some(45.0) })?;
+    let mut old_preset = session.clone();
+    old_preset["preset"] = Value::Null;
+    old_preset["input"] = json!({"kind":PLAYBACK_INPUT,"device":"wasapi:other"});
+    old_preset["reference_dbfs"] = json!(-3.0);
+    old_preset["fps_limit"] = json!(120.0);
+    std::fs::create_dir_all(dir.path().join("presets")).map_err(|e| e.to_string())?;
+    write_bytes(
+        &dir.preset("Old device"),
+        &serde_json::to_vec_pretty(&old_preset).map_err(|e| e.to_string())?,
+    )?;
+    for preset in [builtin("Bar - Top"), saved("Old device")] {
+        let name = preset.name().to_owned();
+        action(&mut h.ws, WorkspaceAction::LoadPreset { preset })?;
+        let input = serde_json::to_value(h.ws.input()).map_err(|e| e.to_string())?;
+        check(
+            h.ws.reference_dbfs() == -12.0 && h.ws.fps_limit() == 45.0 && input == microphone,
+            &format!(
+                "{name} changed device settings: reference {}, {} fps, input {input}",
+                h.ws.reference_dbfs(),
+                h.ws.fps_limit()
+            ),
+        )?;
+    }
+
+    h.ws.set_input_opener(Box::new(|input, generation| {
+        let device = input.option("device").unwrap_or_default().to_owned();
+        Ok(manual_at_generation(generation)?.with_device_id_for_automation(&device))
+    }));
+    let fixed = |device: &str| InputConfig {
+        kind: PLAYBACK_INPUT.to_owned(),
+        options: BTreeMap::from([("device".to_owned(), json!(device))]),
+    };
+    let mut levels = Vec::new();
+    for (device, set) in [
+        ("wasapi:speakers", Some(-10.0)),
+        ("wasapi:headphones", None),
+        ("wasapi:speakers", None),
+    ] {
+        action(
+            &mut h.ws,
+            WorkspaceAction::SetInput {
+                input: fixed(device),
+            },
+        )?;
+        levels.push(h.ws.reference_dbfs());
+        if let Some(dbfs) = set {
+            action(
+                &mut h.ws,
+                WorkspaceAction::SetReferenceLevel { dbfs: Some(dbfs) },
+            )?;
+        }
+    }
+    h.ws.autosave();
+    let saved_levels = read_json(&dir.local())?["reference_dbfs"].clone();
+    check(
+        levels == [DEFAULT_REFERENCE_DBFS, DEFAULT_REFERENCE_DBFS, -10.0]
+            && saved_levels == json!({CAPTURE_INPUT: -12.0, "wasapi:speakers": -10.0}),
+        &format!("per-device levels {levels:?}, saved {saved_levels}"),
+    )?;
+    drop(h);
+
+    let unreadable = br#"{"format_version":9}"#;
+    write_bytes(&dir.local(), unreadable)?;
+    let (mut ws, _driver) = reopen(&dir)?;
+    let notices = ws.observation().notices;
+    check(
+        ws.fps_limit() == 60.0
+            && ws.reference_dbfs() == DEFAULT_REFERENCE_DBFS
+            && notices
+                .iter()
+                .any(|n| n.starts_with("Local settings file is from a newer version (9)")),
+        &format!(
+            "unreadable local.json: {} fps, notices {notices:?}",
+            ws.fps_limit()
+        ),
+    )?;
+    action(&mut ws, WorkspaceAction::SetFpsLimit { fps: Some(50.0) })?;
+    ws.autosave();
+    check(
+        read_bytes(&dir.local())? == unreadable,
+        "an unreadable local.json was overwritten",
+    )?;
+    Ok(
+        json!({"migration":"session fields moved once","presets":"leave device settings",
+        "reference":"per device","unreadable":"protected"}),
     )
 }
 

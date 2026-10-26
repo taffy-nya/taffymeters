@@ -84,7 +84,8 @@ fn main() {
     };
     crash::install(root.clone());
     let store = persistence::WorkspaceStore::new(root);
-    let (live, unavailable) = live::open_chosen(&store.session_input(), &live::open_system)
+    let local = store.load_local();
+    let (live, unavailable) = live::open_chosen(&local.settings.input, &live::open_system)
         .unwrap_or_else(|error| exit_with_error(&error.to_string()));
     let descriptor = Arc::clone(live.reader().descriptor());
     eprintln!(
@@ -95,7 +96,7 @@ fn main() {
         descriptor.channel_layout
     );
     let desktop = Arc::new(workspace::NativeDesktop);
-    let mut workspace = workspace::Workspace::open(live, store, desktop)
+    let mut workspace = workspace::Workspace::open(live, store, local, desktop)
         .unwrap_or_else(|error| exit_with_error(&format!("couldn't open the workspace: {error}")));
     if let Some(error) = unavailable {
         workspace.input_unavailable(&error);

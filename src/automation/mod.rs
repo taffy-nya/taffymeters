@@ -89,6 +89,7 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 .transpose()
                 .map_err(runtime)?;
             let store = value_of("--config-dir").map(WorkspaceStore::new);
+            let local = store.as_ref().map(WorkspaceStore::load_local);
             let mut unavailable = None;
             let live = match values[0].as_str() {
                 "synthetic" => {
@@ -97,11 +98,11 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 "sweep" => {
                     LiveAudio::open_realtime(LiveAudioConfig::default(), SyntheticConfig::sweep())
                 }
-                // Like the product: a saved session chooses the system input.
+                // Like the product: the local settings choose the system input.
                 "system" => {
-                    let chosen = store
+                    let chosen = local
                         .as_ref()
-                        .map(WorkspaceStore::session_input)
+                        .map(|local| local.settings.input.clone())
                         .unwrap_or_default();
                     crate::live::open_chosen(&chosen, &crate::live::open_system).map(
                         |(live, failure)| {
@@ -113,8 +114,10 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
                 _ => return Err(usage("--input must be synthetic, sweep or system".into())),
             }
             .map_err(|e| runtime(e.to_string()))?;
-            let mut workspace = match store {
-                Some(store) => Workspace::open(live, store, Arc::new(NativeDesktop)),
+            let mut workspace = match store.zip(local) {
+                Some((store, local)) => {
+                    Workspace::open(live, store, local, Arc::new(NativeDesktop))
+                }
                 None => Workspace::new(live, false),
             }
             .map_err(|e| runtime(e.to_string()))?;
