@@ -1,7 +1,16 @@
-use std::{error::Error, fmt, sync::Arc};
+use std::{
+    error::Error,
+    fmt, io,
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
 use cpal::{
-    DeviceId, FromSample, Sample, SampleFormat, SizedSample, Stream,
+    DeviceId, FromSample, HostId, Sample, SampleFormat, SizedSample, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
@@ -50,7 +59,7 @@ pub(crate) fn list_endpoints() -> Endpoints {
             .iter()
             .filter_map(|device| {
                 Some(EndpointInfo {
-                    endpoint: fixed(device.id().ok()?.to_string()),
+                    endpoint: fixed(device_id(device)?),
                     name: device_name(device),
                 })
             })
@@ -84,12 +93,42 @@ fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unnamed device".to_owned())
 }
 
+/// `cpal::DeviceId` text. cpal 0.17.3's `Device::id` never frees the string
+/// `IMMDevice::GetId` allocates (about 130 bytes a call, measured), which the endpoint
+/// poll would leak every second.
+fn device_id(device: &cpal::Device) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let cpal::platform::DeviceInner::Wasapi(device) = device.as_inner();
+        // SAFETY: `GetId` returns a CoTaskMemAlloc'd, NUL-terminated string the caller owns;
+        // it is read once and freed once.
+        let id = unsafe {
+            let raw = device.immdevice().GetId().ok()?;
+            let id = raw.to_string();
+            windows_sys::Win32::System::Com::CoTaskMemFree(raw.0.cast());
+            id.ok()?
+        };
+        Some(DeviceId(HostId::Wasapi, id).to_string())
+    }
+    #[cfg(not(windows))]
+    device.id().ok().map(|id| id.to_string())
+}
+
+/// An active endpoint by its `cpal::DeviceId` text; unplugged devices are not listed.
+fn active_device(host: &cpal::Host, id: &str) -> Option<cpal::Device> {
+    host.devices()
+        .ok()?
+        .find(|device| device_id(device).as_deref() == Some(id))
+}
+
 pub(crate) struct OpenSystemInput {
     device: cpal::Device,
     stream_config: cpal::StreamConfig,
     sample_format: SampleFormat,
     descriptor: Arc<AudioDescriptor>,
     name: String,
+    /// `cpal::DeviceId` text of the opened device; absent when the host gives none.
+    device_id: Option<String>,
     /// Captured through loopback rather than as a recording device.
     playback: bool,
 }
@@ -145,11 +184,7 @@ impl OpenSystemInput {
             Endpoint::DefaultPlayback => host.default_output_device(),
             Endpoint::DefaultCapture => host.default_input_device(),
             Endpoint::Playback(id) | Endpoint::Capture(id) => {
-                let parsed: DeviceId = id.parse().map_err(|_| SystemInputError::UnknownDevice)?;
-                Some(
-                    host.device_by_id(&parsed)
-                        .ok_or(SystemInputError::UnknownDevice)?,
-                )
+                Some(active_device(&host, id).ok_or(SystemInputError::UnknownDevice)?)
             }
         }
         .ok_or(SystemInputError::NoDevice)?;
@@ -177,6 +212,7 @@ impl OpenSystemInput {
         let stream_config = supported.into();
         Ok(Self {
             name: device_name(&device),
+            device_id: device_id(&device),
             playback: endpoint.is_playback(),
             device,
             stream_config,
@@ -187,6 +223,10 @@ impl OpenSystemInput {
 
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    pub(crate) fn device_id(&self) -> Option<&str> {
+        self.device_id.as_deref()
     }
 
     pub(crate) fn descriptor(&self) -> &Arc<AudioDescriptor> {
@@ -271,5 +311,143 @@ impl SystemCapture {
 impl Drop for SystemCapture {
     fn drop(&mut self) {
         self.telemetry.set_state(SourceState::Stopped);
+    }
+}
+
+/// A default switch shows within a second; polling the two defaults costs about 0.1 ms
+/// of CPU (measured), and enumerating the devices for a watched one under 1.2 ms.
+const ENDPOINT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Default endpoints, and whether the watched device is active, as of the last poll.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EndpointState {
+    pub(crate) default_playback: Option<String>,
+    pub(crate) default_capture: Option<String>,
+    /// The device asked about and whether it was active.
+    pub(crate) watched: Option<(String, bool)>,
+}
+
+/// Receives the watched device ID; runs on the watch thread, or wherever a manual
+/// watch is polled.
+pub(crate) type EndpointProbe = Box<dyn FnMut(Option<&str>) -> EndpointState + Send>;
+/// Called after the state changes; must be cheap and nonblocking.
+pub(crate) type EndpointWaker = Arc<dyn Fn() + Send + Sync>;
+
+fn probe_system_endpoints(watched: Option<&str>) -> EndpointState {
+    let host = cpal::default_host();
+    EndpointState {
+        default_playback: host.default_output_device().as_ref().and_then(device_id),
+        default_capture: host.default_input_device().as_ref().and_then(device_id),
+        watched: watched.map(|device| (device.to_owned(), active_device(&host, device).is_some())),
+    }
+}
+
+fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
+    value.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+struct WatchShared {
+    probe: Mutex<EndpointProbe>,
+    watched: Mutex<Option<String>>,
+    state: Mutex<EndpointState>,
+    version: AtomicU64,
+    waker: Mutex<Option<EndpointWaker>>,
+    stop: AtomicBool,
+}
+
+impl WatchShared {
+    fn poll(&self) {
+        let watched = lock(&self.watched).clone();
+        let state = (lock(&self.probe))(watched.as_deref());
+        let mut current = lock(&self.state);
+        if *current == state {
+            return;
+        }
+        *current = state;
+        drop(current);
+        self.version.fetch_add(1, Ordering::Release);
+        let waker = lock(&self.waker).clone();
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
+}
+
+/// Default endpoints and one watched device, polled on a thread (`system`) or only when
+/// asked (`manual`). Readers compare `version` before taking the state.
+pub(crate) struct EndpointWatch {
+    shared: Arc<WatchShared>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl EndpointWatch {
+    pub(crate) fn manual(probe: EndpointProbe) -> Self {
+        Self {
+            shared: Arc::new(WatchShared {
+                probe: Mutex::new(probe),
+                watched: Mutex::new(None),
+                state: Mutex::new(EndpointState::default()),
+                version: AtomicU64::new(0),
+                waker: Mutex::new(None),
+                stop: AtomicBool::new(false),
+            }),
+            thread: None,
+        }
+    }
+
+    pub(crate) fn system() -> io::Result<Self> {
+        let mut watch = Self::manual(Box::new(probe_system_endpoints));
+        let shared = Arc::clone(&watch.shared);
+        let thread = thread::Builder::new()
+            .name("taffymeters-endpoints".to_owned())
+            .spawn(move || {
+                while !shared.stop.load(Ordering::Acquire) {
+                    shared.poll();
+                    thread::park_timeout(ENDPOINT_POLL_INTERVAL);
+                }
+            })?;
+        watch.thread = Some(thread);
+        Ok(watch)
+    }
+
+    pub(crate) fn version(&self) -> u64 {
+        self.shared.version.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn state(&self) -> EndpointState {
+        lock(&self.shared.state).clone()
+    }
+
+    /// Polls again at once when the watched device changes.
+    pub(crate) fn watch(&self, device: Option<&str>) {
+        let mut watched = lock(&self.shared.watched);
+        if watched.as_deref() == device {
+            return;
+        }
+        *watched = device.map(str::to_owned);
+        drop(watched);
+        self.poll_now();
+    }
+
+    /// Wakes the thread, or polls on the caller's thread when manual.
+    pub(crate) fn poll_now(&self) {
+        match &self.thread {
+            Some(thread) => thread.thread().unpark(),
+            None => self.shared.poll(),
+        }
+    }
+
+    pub(crate) fn set_waker(&self, waker: Option<EndpointWaker>) {
+        *lock(&self.shared.waker) = waker;
+    }
+}
+
+impl Drop for EndpointWatch {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
     }
 }

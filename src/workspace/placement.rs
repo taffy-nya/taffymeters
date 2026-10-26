@@ -254,6 +254,7 @@ impl Workspace {
             self.set_control_error("detach canceled: the new window did not open".into());
         }
         self.recover_lost_source();
+        self.follow_endpoints();
     }
 
     /// `press` is window-local logical points. Use the OS loop for maximized windows

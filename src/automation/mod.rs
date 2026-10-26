@@ -121,6 +121,9 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
             if let Some(error) = unavailable {
                 workspace.input_unavailable(&error);
             }
+            if values[0] == "system" {
+                workspace.watch_system_endpoints();
+            }
             let mut app = App::new(workspace);
             if let Some(trace) = trace {
                 app = app.with_trace(trace);

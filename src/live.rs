@@ -49,6 +49,8 @@ pub struct LiveAudio {
     telemetry: Arc<SourceTelemetry>,
     paused: bool,
     name: String,
+    /// The system device being captured, as `cpal::DeviceId` text.
+    device_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -131,6 +133,7 @@ impl LiveAudio {
             .map_err(|error| LiveAudioError::Input(error.to_string()))?;
         let descriptor = Arc::clone(system_input.descriptor());
         let name = system_input.name().to_owned();
+        let device_id = system_input.device_id().map(str::to_owned);
         let telemetry = Arc::new(SourceTelemetry::new());
         // Capture endpoints keep delivering silence; only loopback stops.
         let (capture_endpoint, dataflow, handle) = Self::create_transport(
@@ -143,14 +146,16 @@ impl LiveAudio {
             .start(capture_endpoint, Arc::clone(&telemetry))
             .map_err(|error| LiveAudioError::Input(error.to_string()))?;
 
-        Ok(Self::from_parts(
+        let mut live = Self::from_parts(
             InputDriver::System(capture),
             dataflow,
             handle,
             descriptor,
             telemetry,
             name,
-        ))
+        );
+        live.device_id = device_id;
+        Ok(live)
     }
 
     #[cfg(feature = "automation")]
@@ -264,12 +269,24 @@ impl LiveAudio {
             telemetry,
             paused: false,
             name,
+            device_id: None,
         }
     }
 
     /// Device or source name shown to the user.
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    pub(crate) fn device_id(&self) -> Option<&str> {
+        self.device_id.as_deref()
+    }
+
+    /// Stands in for the system device a synthetic source pretends to capture.
+    #[cfg(feature = "automation")]
+    pub(crate) fn with_device_id_for_automation(mut self, device_id: &str) -> Self {
+        self.device_id = Some(device_id.to_owned());
+        self
     }
 
     /// Reports the loss the way a failing system stream does.

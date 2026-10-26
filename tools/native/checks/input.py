@@ -16,8 +16,8 @@ def run(c):
                     "first playback endpoint selected")
     state = w.wait(lambda: app.state() if app.state().get("input", {}).get("running") == chosen.get("name") else None,
                    "selected endpoint running")
-    c.expect("picker_matches_trace", bool(chosen.get("device")) and state["input"]["running"] == chosen["name"],
-             chosen=chosen, input=state["input"])
+    c.expect("picker_matches_trace", bool(chosen.get("device")) and state["input"]["running"] == chosen["name"]
+             and state["input"]["device"] == chosen["device"], chosen=chosen, input=state["input"])
     app.quit()
     c.expect("selected_input_saved", app.read_session()["input"] == chosen,
              saved=app.read_session()["input"], chosen=chosen)

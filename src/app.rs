@@ -53,17 +53,33 @@ impl App {
     }
 
     /// Coalesces data wake-ups to one per host pass, paced by the frame-rate limit; none
-    /// while all Workspace windows are minimized.
+    /// while all Workspace windows are minimized. Endpoint changes always wake the host.
     pub(crate) fn install_waker(&self, ctx: &egui::Context) {
-        let ctx = ctx.clone();
-        let pending = Arc::clone(&self.wake_pending);
-        let shown = Arc::clone(&self.any_window_shown);
-        let pacer = Arc::clone(&self.pacer);
-        lock(&self.workspace).set_publication_waker(Some(Box::new(move || {
-            if shown.load(Ordering::Relaxed) && !pending.swap(true, Ordering::AcqRel) {
+        let wake = |ctx: &egui::Context, pending: &AtomicBool, pacer: &FramePacer| {
+            if !pending.swap(true, Ordering::AcqRel) {
                 let delay = pacer.request_delay(Instant::now(), Duration::ZERO);
                 ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
             }
+        };
+        let (data_ctx, pending, shown, pacer) = (
+            ctx.clone(),
+            Arc::clone(&self.wake_pending),
+            Arc::clone(&self.any_window_shown),
+            Arc::clone(&self.pacer),
+        );
+        let (endpoint_ctx, endpoint_pending, endpoint_pacer) = (
+            ctx.clone(),
+            Arc::clone(&self.wake_pending),
+            Arc::clone(&self.pacer),
+        );
+        let mut workspace = lock(&self.workspace);
+        workspace.set_publication_waker(Some(Box::new(move || {
+            if shown.load(Ordering::Relaxed) {
+                wake(&data_ctx, &pending, &pacer);
+            }
+        })));
+        workspace.set_endpoint_waker(Some(Arc::new(move || {
+            wake(&endpoint_ctx, &endpoint_pending, &endpoint_pacer);
         })));
     }
 
@@ -134,7 +150,14 @@ impl eframe::App for App {
         workspace.tick(self.started_at.elapsed());
         if workspace.windows().is_empty() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
-        } else if let Some(delay) = workspace.autosave_when_settled() {
+        } else if let Some(delay) = [
+            workspace.autosave_when_settled(),
+            workspace.endpoint_retry_delay(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        {
             let delay = self.pacer.request_delay(Instant::now(), delay);
             ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
         }
@@ -192,6 +215,7 @@ impl eframe::App for App {
         let mut workspace = lock(&self.workspace);
         workspace.autosave();
         workspace.set_publication_waker(None);
+        workspace.set_endpoint_waker(None);
         workspace.shutdown();
     }
 }

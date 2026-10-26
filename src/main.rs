@@ -100,6 +100,7 @@ fn main() {
     if let Some(error) = unavailable {
         workspace.input_unavailable(&error);
     }
+    workspace.watch_system_endpoints();
     if let Err(error) = run_window(app::App::new(workspace)) {
         exit_with_error(&format!("couldn't open the window: {error}"));
     }

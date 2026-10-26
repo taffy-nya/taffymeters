@@ -133,13 +133,19 @@ impl Workspace {
         let displays = workspace.displays();
         let current = Self::primary(&displays);
         workspace.restore(file, &displays, current)?;
-        if endpoint_of(&input).is_none() {
+        let supported = endpoint_of(&input).is_some();
+        if !supported {
             workspace.push_notice(format!(
                 "Input {:?} unavailable; using system audio (saved input kept)",
                 input.kind
             ));
         }
-        workspace.input = input;
+        workspace.input = input.clone();
+        workspace.set_opened(if supported {
+            input
+        } else {
+            InputConfig::default()
+        });
         Ok(workspace)
     }
 

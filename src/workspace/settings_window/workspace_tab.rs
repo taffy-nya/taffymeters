@@ -23,6 +23,7 @@ use crate::{
     workspace::{
         Workspace, WorkspaceAction,
         pacing::{DEFAULT_FPS_LIMIT, FPS_LIMIT_RANGE},
+        source::input_label,
         window::Controls,
     },
 };
@@ -339,20 +340,4 @@ fn endpoint_input(info: &EndpointInfo) -> InputConfig {
 /// Names can change with drivers; the kind and device ID identify an input.
 fn same_input(a: &InputConfig, b: &InputConfig) -> bool {
     a.kind == b.kind && a.option(DEVICE_OPTION) == b.option(DEVICE_OPTION)
-}
-
-/// A headset shows one name for its playback and microphone endpoints.
-fn input_label(input: &InputConfig) -> String {
-    let name = || {
-        input
-            .option(NAME_OPTION)
-            .or_else(|| input.option(DEVICE_OPTION))
-            .unwrap_or(&input.kind)
-    };
-    match input.kind.as_str() {
-        DEFAULT_PLAYBACK_INPUT => "Default playback".to_owned(),
-        DEFAULT_CAPTURE_INPUT => "Default microphone".to_owned(),
-        CAPTURE_INPUT => format!("Microphone: {}", name()),
-        _ => name().to_owned(),
-    }
 }

@@ -36,7 +36,7 @@ use crate::automation::{
 
 use super::Scenario;
 
-pub(super) const CASES: [(&str, Scenario); 16] = [
+pub(super) const CASES: [(&str, Scenario); 17] = [
     ("S01", s01),
     ("S02", s02),
     ("S03", s03),
@@ -53,6 +53,7 @@ pub(super) const CASES: [(&str, Scenario); 16] = [
     ("S14", s14),
     ("S15", s15),
     ("S16", s16),
+    ("S17", s17),
 ];
 
 impl TempDir {
@@ -3114,5 +3115,225 @@ fn s16() -> Result<Value, String> {
         json!({"spectrogram":{"notch_db":notch_db,"limits_db":[-24,24],"restored_db":gain_db},
         "spectrum":{"bottom_db":bottom_db,"range_db":zoomed_db,"peak":true,"readout":true},
         "analysis":"unchanged","session":"restored"}),
+    )
+}
+
+/// A default input follows the system default device and a fixed one does not; a chosen
+/// device that disappears during a fallback is switched back to when it returns, with
+/// retries while it fails to open.
+fn s17() -> Result<Value, String> {
+    use std::sync::{
+        PoisonError,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use crate::{
+        audio::{
+            SourceState,
+            inputs::{EndpointState, EndpointWatch},
+        },
+        persistence::{DEFAULT_PLAYBACK_INPUT, InputConfig, PLAYBACK_INPUT},
+    };
+
+    struct FakeEndpoints {
+        default_playback: String,
+        active: Vec<&'static str>,
+    }
+    const SPEAKERS: &str = "wasapi:speakers";
+    const HEADPHONES: &str = "wasapi:headphones";
+    const HDMI: &str = "wasapi:hdmi";
+    let endpoints = Arc::new(Mutex::new(FakeEndpoints {
+        default_playback: SPEAKERS.to_owned(),
+        active: vec![SPEAKERS, HEADPHONES, HDMI],
+    }));
+    let set_endpoints = |default: &str, active: &[&'static str]| {
+        let mut fake = endpoints.lock().unwrap_or_else(PoisonError::into_inner);
+        fake.default_playback = default.to_owned();
+        fake.active = active.to_vec();
+    };
+    let polled = Arc::clone(&endpoints);
+    let watch = EndpointWatch::manual(Box::new(move |watched| {
+        let fake = polled.lock().unwrap_or_else(PoisonError::into_inner);
+        EndpointState {
+            default_playback: Some(fake.default_playback.clone()),
+            default_capture: None,
+            watched: watched.map(|device| (device.to_owned(), fake.active.contains(&device))),
+        }
+    }));
+
+    let (ws, _driver) = workspace()?;
+    let mut h = Harness::new(ws);
+    let requests = Arc::new(Mutex::new(Vec::<InputConfig>::new()));
+    let refuse = Arc::new(AtomicBool::new(false));
+    let (seen, refused, current) = (
+        Arc::clone(&requests),
+        Arc::clone(&refuse),
+        Arc::clone(&endpoints),
+    );
+    h.ws.set_input_opener(Box::new(move |input, generation| {
+        seen.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(input.clone());
+        if refused.load(Ordering::Relaxed) {
+            return Err(LiveAudioError::Input("device not ready".to_owned()));
+        }
+        let device = match input.kind.as_str() {
+            DEFAULT_PLAYBACK_INPUT => current
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .default_playback
+                .clone(),
+            _ => input.option("device").unwrap_or_default().to_owned(),
+        };
+        Ok(manual_at_generation(generation)?.with_device_id_for_automation(&device))
+    }));
+    h.ws.set_endpoint_watch(watch);
+    let taken = |requests: &Mutex<Vec<InputConfig>>| {
+        std::mem::take(&mut *requests.lock().unwrap_or_else(PoisonError::into_inner))
+    };
+    let default = InputConfig::default();
+    let speakers = InputConfig {
+        kind: PLAYBACK_INPUT.to_owned(),
+        options: BTreeMap::from([
+            ("device".to_owned(), json!(SPEAKERS)),
+            ("name".to_owned(), json!("Speakers")),
+        ]),
+    };
+    let generation = |h: &Harness| h.ws.source_descriptor_for_automation().generation.0;
+    let device = |h: &Harness| h.ws.source_device_id().unwrap_or_default().to_owned();
+    let notices = |h: &Harness| h.ws.observation().notices;
+    let state = |h: &Harness| h.ws.observation().source_status.state;
+    let step = |h: &mut Harness, seconds: f32| {
+        h.ws.poll_endpoints_for_automation();
+        h.display_time += Duration::from_secs_f32(seconds);
+        h.frame(vec![]);
+    };
+
+    h.frame(vec![]);
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetInput {
+            input: default.clone(),
+        },
+    )?;
+    action(&mut h.ws, WorkspaceAction::TogglePause)?;
+    step(&mut h, 0.1);
+    taken(&requests);
+    check(
+        (generation(&h), device(&h).as_str()) == (2, SPEAKERS),
+        &format!("default input runs {} at {}", device(&h), generation(&h)),
+    )?;
+    step(&mut h, 3.0);
+    check(
+        taken(&requests).is_empty() && generation(&h) == 2,
+        "an unchanged default reopened the input",
+    )?;
+
+    set_endpoints(HEADPHONES, &[SPEAKERS, HEADPHONES, HDMI]);
+    step(&mut h, 0.1);
+    check(
+        taken(&requests) == [default.clone()]
+            && (generation(&h), device(&h).as_str()) == (3, HEADPHONES)
+            && *h.ws.input() == default
+            && state(&h) == SourceState::Paused
+            && notices(&h).is_empty(),
+        &format!(
+            "default moved to headphones: running {} at {}, {:?}, notices {:?}",
+            device(&h),
+            generation(&h),
+            state(&h),
+            notices(&h)
+        ),
+    )?;
+
+    action(
+        &mut h.ws,
+        WorkspaceAction::SetInput {
+            input: speakers.clone(),
+        },
+    )?;
+    taken(&requests);
+    set_endpoints(HDMI, &[SPEAKERS, HEADPHONES, HDMI]);
+    step(&mut h, 0.1);
+    check(
+        taken(&requests).is_empty() && (generation(&h), device(&h).as_str()) == (4, SPEAKERS),
+        &format!(
+            "fixed speakers followed the default: running {} at {}",
+            device(&h),
+            generation(&h)
+        ),
+    )?;
+
+    set_endpoints(HEADPHONES, &[HEADPHONES, HDMI]);
+    h.ws.lose_device_for_automation();
+    step(&mut h, 0.1);
+    step(&mut h, 0.1);
+    check(
+        taken(&requests) == [default.clone()]
+            && (generation(&h), device(&h).as_str()) == (5, HEADPHONES)
+            && *h.ws.input() == speakers,
+        &format!(
+            "lost speakers: running {} at {}, input {:?}",
+            device(&h),
+            generation(&h),
+            h.ws.input()
+        ),
+    )?;
+    set_endpoints(HDMI, &[HEADPHONES, HDMI]);
+    step(&mut h, 0.1);
+    check(
+        taken(&requests) == [default.clone()] && device(&h) == HDMI,
+        &format!("the fallback did not follow the default: {}", device(&h)),
+    )?;
+
+    refuse.store(true, Ordering::Relaxed);
+    set_endpoints(HDMI, &[SPEAKERS, HEADPHONES, HDMI]);
+    step(&mut h, 0.1);
+    let refused_once = taken(&requests);
+    step(&mut h, 1.0);
+    let too_soon = taken(&requests);
+    let wake_in = h.ws.endpoint_retry_delay();
+    let reported = notices(&h)
+        .iter()
+        .filter(|n| n.starts_with("Couldn't open Speakers"))
+        .count();
+    check(
+        refused_once == [speakers.clone()]
+            && too_soon.is_empty()
+            && reported == 1
+            && wake_in == Some(Duration::from_secs(1)),
+        &format!(
+            "returning speakers that fail: tried {refused_once:?}, then {too_soon:?}, \
+             {reported} failure notices, host wake in {wake_in:?}"
+        ),
+    )?;
+    refuse.store(false, Ordering::Relaxed);
+    step(&mut h, 1.1);
+    check(
+        taken(&requests) == [speakers.clone()]
+            && (generation(&h), device(&h).as_str()) == (7, SPEAKERS)
+            && *h.ws.input() == speakers
+            && state(&h) == SourceState::Paused
+            && notices(&h)
+                .iter()
+                .any(|n| n == "Input Synthetic is back; switched back"),
+        &format!(
+            "switch back: running {} at {}, {:?}, notices {:?}",
+            device(&h),
+            generation(&h),
+            state(&h),
+            notices(&h)
+        ),
+    )?;
+    set_endpoints(HEADPHONES, &[SPEAKERS, HEADPHONES, HDMI]);
+    step(&mut h, 3.0);
+    check(
+        taken(&requests).is_empty() && generation(&h) == 7,
+        "the restored fixed device followed the default or kept retrying",
+    )?;
+    h.ws.check_ownership()?;
+    Ok(
+        json!({"default":"follows","fixed":"stays","fallback":"follows the default",
+        "return":"switched back after a failed attempt","retry_seconds":2,"paused":"kept"}),
     )
 }

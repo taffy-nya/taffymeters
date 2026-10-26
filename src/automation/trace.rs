@@ -151,6 +151,7 @@ impl Trace {
             "input": {
                 "chosen": workspace.input(),
                 "running": workspace.source_name(),
+                "device": workspace.source_device_id(),
                 "sample_rate_hz": workspace.source_descriptor_for_automation().sample_rate_hz,
                 "channels": workspace.source_descriptor_for_automation().channel_count,
                 "generation": workspace.source_descriptor_for_automation().generation.0,

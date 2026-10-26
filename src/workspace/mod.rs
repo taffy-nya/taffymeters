@@ -476,6 +476,9 @@ pub(crate) struct Workspace {
     chrome: Palette,
     /// The chosen input; the running source may differ when it could not be opened.
     input: InputConfig,
+    /// The input the running source was opened with: a default while falling back.
+    opened: InputConfig,
+    follow: source::EndpointFollow,
     /// Reinstalled on every source the workspace switches to.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
     opener: source::InputOpener,
@@ -531,6 +534,8 @@ impl Workspace {
             chrome: theme.global_palette(),
             theme,
             input: InputConfig::default(),
+            opened: InputConfig::default(),
+            follow: source::EndpointFollow::inert(),
             waker: None,
             opener: source::system_opener(),
             endpoint_lister: source::system_lister(),
