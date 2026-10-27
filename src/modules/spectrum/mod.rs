@@ -378,13 +378,22 @@ impl Module for SpectrumModule {
             peak_dbfs: peak.map(|peak| peak.bins_dbfs.as_slice()),
         };
         let nyquist = self.reader.descriptor().sample_rate_hz as f32 * 0.5;
-        self.view.max_frequency_hz = self.view.max_frequency_hz.min(nyquist);
-        let plot = frame.rect;
-        Self::update_range(&mut self.view, &frame, plot, nyquist);
-        let coordinates = SpectrumCoordinates {
-            min_dbfs: frame.reference_dbfs + self.view.min_dbfs,
-            max_dbfs: frame.reference_dbfs + self.view.max_dbfs,
+        // Clamped for display only: a lower-rate input must not shrink the saved range.
+        let mut shown = SpectrumCoordinates {
+            max_frequency_hz: self.view.max_frequency_hz.min(nyquist),
             ..self.view
+        };
+        let before = shown.max_frequency_hz;
+        let plot = frame.rect;
+        Self::update_range(&mut shown, &frame, plot, nyquist);
+        if shown.max_frequency_hz != before {
+            self.view.max_frequency_hz = shown.max_frequency_hz;
+        }
+        self.view.max_dbfs = shown.max_dbfs;
+        let coordinates = SpectrumCoordinates {
+            min_dbfs: frame.reference_dbfs + shown.min_dbfs,
+            max_dbfs: frame.reference_dbfs + shown.max_dbfs,
+            ..shown
         };
         self.style.draw(
             SpectrumStyleContext {
@@ -839,6 +848,38 @@ mod tests {
         module.draw(frame_at(&mut target, &palette, inside, 0.0));
         assert_eq!(target.polylines.len(), 2, "curve and peak curve");
         assert_eq!(target.texts.len(), 1, "the cursor readout");
+    }
+
+    #[test]
+    fn a_lower_rate_input_limits_the_shown_range_without_changing_the_setting() {
+        let mut fixture = PcmFixture::with_rate(16_000, 2);
+        let mut registry = Registry::default();
+        register(&mut registry).unwrap();
+        let mut module = SpectrumModuleFactory
+            .create_instance(&fixture.services, &registry, None)
+            .unwrap();
+        module
+            .set_view_setting(SHOW_READOUT_KEY, &SettingValue::Bool(true))
+            .unwrap();
+        fixture.feed(&vec![0.1; 16_384 * 2]);
+        main_at(&module, 1, 16_384);
+
+        let palette = crate::theme::Palette::default();
+        let mut target = RecordingTarget::default();
+        let right_edge = Some(Point { x: 799.9, y: 200.0 });
+        module.draw(frame_at(&mut target, &palette, right_edge, 0.0));
+        let text = &target.texts[0].text;
+        let shown: f32 = text["cursor ".len()..text.find(" Hz").unwrap()]
+            .parse()
+            .unwrap();
+        assert!((7_900.0..=8_000.0).contains(&shown), "{shown} Hz");
+        let saved = module
+            .view_settings()
+            .into_iter()
+            .find(|setting| setting.key == MAX_FREQUENCY_KEY)
+            .unwrap()
+            .value;
+        assert_eq!(saved, SettingValue::Number(20_000.0));
     }
 
     #[test]

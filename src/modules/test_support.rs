@@ -120,13 +120,18 @@ pub(crate) struct PcmFixture {
 
 impl PcmFixture {
     pub(crate) fn new(channels: u16) -> Self {
+        Self::with_rate(48_000, channels)
+    }
+
+    pub(crate) fn with_rate(sample_rate_hz: u32, channels: u16) -> Self {
         let layout = match channels {
             1 => ChannelLayout::Mono,
             2 => ChannelLayout::Stereo,
             _ => ChannelLayout::UnknownDiscrete,
         };
         let descriptor = Arc::new(
-            AudioDescriptor::new(SourceId(1), Generation(1), 48_000, channels, layout).unwrap(),
+            AudioDescriptor::new(SourceId(1), Generation(1), sample_rate_hz, channels, layout)
+                .unwrap(),
         );
         let telemetry = Arc::new(SourceTelemetry::new());
         let (mut capture, endpoint) = create_block_transport(

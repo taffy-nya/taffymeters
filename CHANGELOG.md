@@ -19,6 +19,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Loading a preset no longer resets the reference level and frame rate limit.
+- Switching to a low-sample-rate input no longer permanently lowers a Spectrum's maximum frequency.
 
 ## [0.2.0] - 2026-10-24
 
