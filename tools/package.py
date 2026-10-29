@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tomllib
@@ -26,6 +27,28 @@ TARGET = "x86_64-pc-windows-msvc"
 # Font licenses shipped next to the fonts epaint embeds; its SPDX expression omits Hack's
 # and emoji-icon-font's.
 FONT_LICENSES = {"epaint_default_fonts": ["fonts/Hack-Regular.txt", "fonts/emoji-icon-font-mit-license.txt"]}
+# Fonts whose license files carry no copyright line; OFL 1.1 and the Ubuntu Font Licence
+# require the notice, which these fonts keep only in their name table.
+FONT_COPYRIGHTS = {"epaint_default_fonts": ["fonts/NotoEmoji-Regular.ttf", "fonts/Ubuntu-Light.ttf"]}
+
+
+def font_copyright(path):
+    """The copyright string (name ID 0) of a TrueType font."""
+    data = path.read_bytes()
+    (tables,) = struct.unpack_from(">H", data, 4)
+    for index in range(tables):
+        tag, _, offset, _ = struct.unpack_from(">4sIII", data, 12 + 16 * index)
+        if tag != b"name":
+            continue
+        _, count, strings = struct.unpack_from(">HHH", data, offset)
+        for record in range(count):
+            platform, _, _, name_id, length, start = struct.unpack_from(
+                ">HHHHHH", data, offset + 6 + 12 * record)
+            if name_id == 0:
+                raw = data[offset + strings + start:offset + strings + start + length]
+                # Platforms 0 (Unicode) and 3 (Windows) store UTF-16BE; 1 (Macintosh) Roman.
+                return raw.decode("utf-16-be" if platform in (0, 3) else "mac-roman").strip()
+    fail(f"{path} has no copyright string")
 
 
 def fail(message):
@@ -80,15 +103,24 @@ def third_party_licenses(out):
          "--output-file", str(path), "tools/about.hbs"])
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--locked",
                                "--filter-platform", TARGET], capture_output=True).stdout)
+
+    def directory(name, setting):
+        package = next((p for p in metadata["packages"] if p["name"] == name), None)
+        if package is None:
+            fail(f"{name} is no longer a dependency; update {setting}")
+        return package["version"], Path(package["manifest_path"]).parent
+
     with path.open("a", encoding="utf-8", newline="\n") as file:
-        for name, files in FONT_LICENSES.items():
-            package = next((p for p in metadata["packages"] if p["name"] == name), None)
-            if package is None:
-                fail(f"{name} is no longer a dependency; update FONT_LICENSES")
-            directory = Path(package["manifest_path"]).parent
+        for name, files in FONT_COPYRIGHTS.items():
+            version, root = directory(name, "FONT_COPYRIGHTS")
+            file.write(f"\n{'=' * 80}\n{name} {version}: copyright notices of the embedded fonts\n\n")
             for relative in files:
-                file.write(f"\n{'=' * 80}\n{name} {package['version']}: {relative}\n\n")
-                file.write((directory / relative).read_text(encoding="utf-8").strip() + "\n")
+                file.write(f"{relative}: {font_copyright(root / relative)}\n")
+        for name, files in FONT_LICENSES.items():
+            version, root = directory(name, "FONT_LICENSES")
+            for relative in files:
+                file.write(f"\n{'=' * 80}\n{name} {version}: {relative}\n\n")
+                file.write((root / relative).read_text(encoding="utf-8").strip() + "\n")
     return path
 
 

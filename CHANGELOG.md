@@ -20,6 +20,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 - Loading a preset no longer resets the reference level and frame rate limit.
 - Switching to a low-sample-rate input no longer permanently lowers a Spectrum's maximum frequency.
+- `THIRD_PARTY_LICENSES.txt` in release packages carries every dependency's copyright notice, including those of the embedded fonts, instead of template placeholders.
 
 ## [0.2.0] - 2026-10-24
 

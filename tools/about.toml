@@ -1,8 +1,10 @@
 # cargo-about configuration for THIRD_PARTY_LICENSES.txt; run through tools/package.py.
-# Order is preference: for "A OR B" the first accepted license here is used.
+# Order is preference: for "A OR B" the first accepted license here is used. Apache-2.0
+# comes before MIT because many dual-licensed crates ship no license file, and the
+# fallback MIT text has no copyright line where Apache's needs none.
 accepted = [
-    "MIT",
     "Apache-2.0",
+    "MIT",
     "Zlib",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -19,3 +21,25 @@ targets = ["x86_64-pc-windows-msvc"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 private = { ignore = true }
+
+# Crates whose packaged license files cargo-about does not recognize; the checksums pin
+# the files so a changed license drops the clarification and fails the build.
+[dpi.clarify]
+license = "Apache-2.0 AND MIT"
+
+[[dpi.clarify.files]]
+path = "LICENSE"
+license = "Apache-2.0"
+checksum = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+
+[[dpi.clarify.files]]
+path = "LICENSE-LIBM-MIT"
+license = "MIT"
+checksum = "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997"
+
+[libm.clarify]
+license = "MIT"
+
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
