@@ -8,11 +8,11 @@ SPECTRUM = "taffymeters.spectrum"
 FRAME = [100.0, 100.0, 900.0, 500.0]  # 800x400 outer; the runner also sets it natively.
 
 
-def spectrum(channel="mono_average", tilt=4.5):
-    """Default Spectrum (Curve style, FFT 2048/512, stateful Peak) with a channel and Tilt."""
+def spectrum(channel="mono_average", tilt=4.5, window=2048, hop=512):
+    """Default Spectrum (Curve style, FFT 2048/512 unless given, stateful Peak) with a channel and Tilt."""
     return {"type_id": SPECTRUM, "data": {"nodes": [
         {"input": None, "kind": "channel", "params": channel},
-        {"input": 0, "kind": "fft", "params": {"window_size": 2048, "hop_size": 512, "floor_dbfs": -160.0}},
+        {"input": 0, "kind": "fft", "params": {"window_size": window, "hop_size": hop, "floor_dbfs": -160.0}},
         {"input": 1, "kind": "tilt", "params": {"db_per_octave": tilt}},
         {"input": 2, "kind": "peak", "params": {"hold_ms": 1000.0, "fall_db_per_second_squared": 30.0}}],
         "outputs": [{"node": 2, "keep": "latest"}, {"node": 3, "keep": "latest"}]}}
@@ -52,6 +52,24 @@ SCENARIOS = {
     "single": {
         "session": session(window(leaf(spectrum()))),
         "baseline": "single", "duration": 10.0, "segments": [(0.0, "visible", None)],
+        "plots": 1, "windows": 1,
+    },
+    # Oldest-sample latency experiment (7-1 task 8): only an FFT result landing on a
+    # capture block's end covers every arrived frame. With 480-frame blocks that needs
+    # hop | 480 and window % hop == 0; 2048/480 never lands there.
+    "single-w2048h480": {
+        "session": session(window(leaf(spectrum(window=2048, hop=480)))),
+        "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
+        "plots": 1, "windows": 1,
+    },
+    "single-w1920h480": {
+        "session": session(window(leaf(spectrum(window=1920, hop=480)))),
+        "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
+        "plots": 1, "windows": 1,
+    },
+    "single-w2048h32": {
+        "session": session(window(leaf(spectrum(window=2048, hop=32)))),
+        "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
         "plots": 1, "windows": 1,
     },
     "shared": {
