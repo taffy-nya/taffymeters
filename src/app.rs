@@ -26,6 +26,8 @@ pub(crate) struct App {
     any_window_shown: Arc<AtomicBool>,
     #[cfg(feature = "automation")]
     trace: SharedTrace,
+    #[cfg(feature = "perf-trace")]
+    perf: Option<crate::perf::PerfTrace>,
 }
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -43,7 +45,15 @@ impl App {
             any_window_shown: Arc::new(AtomicBool::new(true)),
             #[cfg(feature = "automation")]
             trace: None,
+            #[cfg(feature = "perf-trace")]
+            perf: None,
         }
+    }
+
+    #[cfg(feature = "perf-trace")]
+    pub(crate) fn with_perf(mut self, perf: crate::perf::PerfTrace) -> Self {
+        self.perf = Some(perf);
+        self
     }
 
     #[cfg(feature = "automation")]
@@ -142,6 +152,8 @@ fn window_pass(
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "perf-trace")]
+        let perf_started = crate::perf::now();
         let predicted = ctx.input(|input| input.predicted_dt);
         let predicted = Duration::try_from_secs_f32(predicted).unwrap_or_default();
         // Before `ui` clears the wake flag: a wake-up in between must see this pass's start.
@@ -161,26 +173,41 @@ impl eframe::App for App {
             let delay = self.pacer.request_delay(Instant::now(), delay);
             ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
         }
+        #[cfg(feature = "perf-trace")]
+        if let Some(perf) = &mut self.perf {
+            perf.logic(perf_started);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "perf-trace")]
+        let perf_pass = crate::perf::UiPass::begin();
         let ctx = ui.ctx().clone();
         self.wake_pending.store(false, Ordering::Release);
         let windows = lock(&self.workspace).windows();
         let mut shown = false;
         for window in windows {
             let window_id = window.id;
+            #[cfg(feature = "perf-trace")]
+            let (call_started, body_before) = (crate::perf::now(), perf_pass.body_so_far());
             shown |=
                 ctx.show_viewport_immediate(window_id.viewport_id(), window.builder, |ui, _| {
-                    window_pass(
+                    #[cfg(feature = "perf-trace")]
+                    let body_started = crate::perf::now();
+                    let drawn = window_pass(
                         &self.workspace,
                         window_id,
                         ui,
                         self.started_at,
                         #[cfg(feature = "automation")]
                         &self.trace,
-                    )
+                    );
+                    #[cfg(feature = "perf-trace")]
+                    perf_pass.body(body_started, drawn, ui);
+                    drawn
                 });
+            #[cfg(feature = "perf-trace")]
+            perf_pass.viewport(call_started, body_before);
         }
         let settings = {
             let workspace = lock(&self.workspace);
@@ -189,7 +216,11 @@ impl eframe::App for App {
                 .zip(workspace.settings_viewport_id())
         };
         if let Some((builder, viewport_id)) = settings {
+            #[cfg(feature = "perf-trace")]
+            let (call_started, body_before) = (crate::perf::now(), perf_pass.body_so_far());
             ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
+                #[cfg(feature = "perf-trace")]
+                let body_started = crate::perf::now();
                 let mut workspace = lock(&self.workspace);
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
                     let _ = workspace.apply_action(WorkspaceAction::CloseSettings);
@@ -206,9 +237,18 @@ impl eframe::App for App {
                     }
                     trace.state(&workspace);
                 }
+                #[cfg(feature = "perf-trace")]
+                perf_pass.body(body_started, false, ui);
             });
+            #[cfg(feature = "perf-trace")]
+            perf_pass.viewport(call_started, body_before);
         }
         self.any_window_shown.store(shown, Ordering::Release);
+        #[cfg(feature = "perf-trace")]
+        if let Some(perf) = &mut self.perf {
+            let ended = crate::perf::now();
+            perf.end(perf_pass, ended);
+        }
     }
 
     fn on_exit(&mut self) {
@@ -217,5 +257,12 @@ impl eframe::App for App {
         workspace.set_publication_waker(None);
         workspace.set_endpoint_waker(None);
         workspace.shutdown();
+        #[cfg(feature = "perf-trace")]
+        if let Some(perf) = &self.perf {
+            match perf.write() {
+                Ok(path) => eprintln!("perf trace: {}", path.display()),
+                Err(error) => eprintln!("perf trace not written: {error}"),
+            }
+        }
     }
 }

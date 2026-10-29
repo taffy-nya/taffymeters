@@ -23,6 +23,8 @@ unseparated_literal_suffix = "warn"
 
 [features]
 automation = ["dep:image", "dep:sha2", "windows-sys/Win32_System_WindowsProgramming"]
+# Bounded timing hooks for tools/perf/; not for release builds.
+perf-trace = ["windows-sys/Win32_System_Performance", "windows-sys/Win32_System_WindowsProgramming"]
 
 [dependencies]
 arc-swap = "1.7.1"

@@ -204,6 +204,8 @@ impl DataReader {
                 && !slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, frame))
             {
                 *slot = Some(Arc::clone(frame));
+                #[cfg(feature = "perf-trace")]
+                crate::perf::read(frame.processed_through_frame);
             }
         }
         true
@@ -217,12 +219,17 @@ impl DataReader {
             return route.frozen.get(output.index()).cloned().flatten();
         }
         let output = route.outputs.get(output.index())?;
-        store.rings[output.ring]
+        let frame = store.rings[output.ring]
             .as_ref()?
             .frames
             .back()
             .filter(|frame| frame.processed_through_frame > output.start_frame)
-            .cloned()
+            .cloned();
+        #[cfg(feature = "perf-trace")]
+        if let Some(frame) = &frame {
+            crate::perf::read(frame.processed_through_frame);
+        }
+        frame
     }
 
     /// Returns false without changing `view` if the subscription is closed or paused,
@@ -264,6 +271,8 @@ impl DataReader {
                     frame: Arc::clone(frame),
                     gap_before,
                 });
+                #[cfg(feature = "perf-trace")]
+                crate::perf::read(frame.processed_through_frame);
             }
         }
         drop(store);

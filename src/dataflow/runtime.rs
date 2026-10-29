@@ -297,6 +297,8 @@ impl Dataflow {
         telemetry: Arc<SourceTelemetry>,
         fill_silence: bool,
     ) -> io::Result<(Self, DataflowHandle)> {
+        #[cfg(feature = "perf-trace")]
+        crate::perf::worker_started();
         let silence = fill_silence.then(|| {
             super::silence::SilenceFill::new(
                 Arc::clone(&telemetry),
@@ -321,14 +323,14 @@ impl Dataflow {
         let processed_through_frame = Arc::new(AtomicU64::new(0));
         #[cfg(any(test, feature = "automation"))]
         let worker_frontier = Arc::clone(&processed_through_frame);
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(any(test, feature = "automation", feature = "perf-trace"))]
         let probe = Arc::new(crate::probe::WorkerProbe::default());
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(any(test, feature = "automation", feature = "perf-trace"))]
         let worker_probe = Arc::clone(&probe);
         let worker = thread::Builder::new()
             .name("taffymeters-dataflow".to_owned())
             .spawn(move || {
-                #[cfg(any(test, feature = "automation"))]
+                #[cfg(any(test, feature = "automation", feature = "perf-trace"))]
                 let _counted = worker_probe.count_this_thread();
                 let wake = || {
                     if let Some(waker) = worker_waker.load().as_ref() {
@@ -345,9 +347,11 @@ impl Dataflow {
                     wake: &wake,
                     #[cfg(any(test, feature = "automation"))]
                     processed_frontier: worker_frontier,
+                    #[cfg(feature = "perf-trace")]
+                    probe: &worker_probe,
                 });
             })?;
-        #[cfg(any(test, feature = "automation"))]
+        #[cfg(any(test, feature = "automation", feature = "perf-trace"))]
         probe.attach(&worker);
         let handle = DataflowHandle {
             commands: command_sender,
@@ -545,6 +549,8 @@ struct Worker<'a> {
     wake: &'a dyn Fn(),
     #[cfg(any(test, feature = "automation"))]
     processed_frontier: Arc<AtomicU64>,
+    #[cfg(feature = "perf-trace")]
+    probe: &'a crate::probe::WorkerProbe,
 }
 
 fn run_worker(worker: Worker<'_>) {
@@ -558,6 +564,8 @@ fn run_worker(worker: Worker<'_>) {
         wake,
         #[cfg(any(test, feature = "automation"))]
         processed_frontier,
+        #[cfg(feature = "perf-trace")]
+        probe,
     } = worker;
     let published = || metrics.publications.load(Ordering::Relaxed);
     while !stop.load(Ordering::Acquire) {
@@ -598,10 +606,14 @@ fn run_worker(worker: Worker<'_>) {
         if published() != before_commands {
             wake();
         }
+        #[cfg(feature = "perf-trace")]
+        crate::perf::worker_counters(|| (metrics.snapshot(), probe.sample()));
         if let Some(mut block) = endpoint.try_pop() {
             if let Some(silence) = &mut silence {
                 silence.captured(&mut block, Instant::now());
             }
+            #[cfg(feature = "perf-trace")]
+            crate::perf::popped(&block);
             #[cfg(any(test, feature = "automation"))]
             let block_end = u64::try_from(block.frame_count)
                 .ok()
@@ -621,6 +633,8 @@ fn run_worker(worker: Worker<'_>) {
             .and_then(|silence| silence.due(Instant::now()))
         {
             let before = published();
+            #[cfg(feature = "perf-trace")]
+            crate::perf::popped(block);
             engine.process_block(block);
             if published() != before {
                 wake();

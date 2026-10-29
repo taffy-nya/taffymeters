@@ -739,6 +739,8 @@ impl Workspace {
                 (0.0, 1.0)
             };
             let mut renderer = EguiRenderTarget::new(ui.painter_at(leaf_rect));
+            #[cfg(feature = "perf-trace")]
+            crate::perf::plot(leaf_rect.width(), leaf_rect.height());
             if let Some(entry) = self.modules.get_mut(&leaf) {
                 let response = entry.module.draw(ModuleFrame {
                     rect: to_render_rect(leaf_rect),

@@ -1,4 +1,4 @@
-//! Test/automation-only allocation and CPU-time probes for the analysis worker.
+//! Test, automation and perf-trace allocation and CPU-time probes.
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -97,7 +97,7 @@ impl WorkerProbe {
 }
 
 /// Thread-affine: its drop must restore the counter on the thread that installed it.
-struct Restore {
+pub(crate) struct Restore {
     previous: *const AtomicU64,
 }
 
@@ -112,6 +112,12 @@ fn install(counter: &AtomicU64) -> Restore {
     Restore {
         previous: COUNTER.with(|current| current.replace(counter)),
     }
+}
+
+/// Counts this thread's allocations into `counter` until the guard drops.
+#[cfg(feature = "perf-trace")]
+pub(crate) fn count_allocations_into(counter: &'static AtomicU64) -> Restore {
+    install(counter)
 }
 
 /// Field order removes the thread-local pointer before releasing its owner.
@@ -130,17 +136,17 @@ pub(crate) fn allocations_during(action: impl FnOnce()) -> u64 {
     counter.load(Ordering::Relaxed)
 }
 
-#[cfg(all(windows, feature = "automation"))]
+#[cfg(all(windows, any(feature = "automation", feature = "perf-trace")))]
 struct ThreadCpu(windows_sys::Win32::Foundation::HANDLE);
 
 // SAFETY: a duplicated thread handle may be used from any thread.
-#[cfg(all(windows, feature = "automation"))]
+#[cfg(all(windows, any(feature = "automation", feature = "perf-trace")))]
 unsafe impl Send for ThreadCpu {}
 // SAFETY: the handle is only passed to thread-time queries, which may run concurrently.
-#[cfg(all(windows, feature = "automation"))]
+#[cfg(all(windows, any(feature = "automation", feature = "perf-trace")))]
 unsafe impl Sync for ThreadCpu {}
 
-#[cfg(all(windows, feature = "automation"))]
+#[cfg(all(windows, any(feature = "automation", feature = "perf-trace")))]
 impl ThreadCpu {
     fn of(thread: &JoinHandle<()>) -> Option<Self> {
         use std::os::windows::io::AsRawHandle;
@@ -197,7 +203,7 @@ impl ThreadCpu {
     }
 }
 
-#[cfg(all(windows, feature = "automation"))]
+#[cfg(all(windows, any(feature = "automation", feature = "perf-trace")))]
 impl Drop for ThreadCpu {
     fn drop(&mut self) {
         // SAFETY: the handle was duplicated for this value and is closed once.
@@ -205,10 +211,10 @@ impl Drop for ThreadCpu {
     }
 }
 
-#[cfg(not(all(windows, feature = "automation")))]
+#[cfg(not(all(windows, any(feature = "automation", feature = "perf-trace"))))]
 struct ThreadCpu;
 
-#[cfg(not(all(windows, feature = "automation")))]
+#[cfg(not(all(windows, any(feature = "automation", feature = "perf-trace"))))]
 impl ThreadCpu {
     fn of(_thread: &JoinHandle<()>) -> Option<Self> {
         None

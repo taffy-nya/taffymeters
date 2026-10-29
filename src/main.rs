@@ -32,8 +32,10 @@ mod icon;
 #[cfg(windows)]
 mod instance;
 mod live;
+#[cfg(feature = "perf-trace")]
+mod perf;
 mod persistence;
-#[cfg(any(test, feature = "automation"))]
+#[cfg(any(test, feature = "automation", feature = "perf-trace"))]
 mod probe;
 mod workspace;
 
@@ -50,7 +52,8 @@ fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg_attr(not(feature = "perf-trace"), allow(unused_mut))]
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args
         .first()
         .is_some_and(|argument| argument == "--automation")
@@ -63,6 +66,14 @@ fn main() {
             std::process::exit(1);
         }
     }
+    #[cfg(feature = "perf-trace")]
+    let perf = match perf::take_arg(&mut args) {
+        Ok(dir) => dir.map(|dir| {
+            perf::enable();
+            perf::PerfTrace::new(dir)
+        }),
+        Err(error) => exit_with_error(&error),
+    };
     let root = match parse_config_dir(&args) {
         Ok(Some(root)) => root,
         Ok(None) => persistence::WorkspaceStore::default_root()
@@ -102,7 +113,13 @@ fn main() {
         workspace.input_unavailable(&error);
     }
     workspace.watch_system_endpoints();
-    if let Err(error) = run_window(app::App::new(workspace)) {
+    #[cfg_attr(not(feature = "perf-trace"), allow(unused_mut))]
+    let mut app = app::App::new(workspace);
+    #[cfg(feature = "perf-trace")]
+    if let Some(perf) = perf {
+        app = app.with_perf(perf);
+    }
+    if let Err(error) = run_window(app) {
         exit_with_error(&format!("couldn't open the window: {error}"));
     }
 }

@@ -13,6 +13,9 @@ pub(crate) struct AudioBlock {
     pub(crate) start_frame: u64,
     pub(crate) continuity: u64,
     pub(crate) frame_count: usize,
+    /// QPC ticks at the entry of the callback that filled this block; 0 for silence.
+    #[cfg(feature = "perf-trace")]
+    pub(crate) callback_ticks: u64,
     samples: Box<[f32]>,
 }
 
@@ -23,6 +26,8 @@ impl AudioBlock {
             start_frame: 0,
             continuity: 0,
             frame_count: 0,
+            #[cfg(feature = "perf-trace")]
+            callback_ticks: 0,
             samples: vec![0.0; sample_capacity].into_boxed_slice(),
         }
     }
@@ -131,6 +136,10 @@ impl CaptureEndpoint {
         f32: cpal::FromSample<T>,
     {
         let complete_frames = data.len() / self.channels;
+        #[cfg(feature = "perf-trace")]
+        let _counting = crate::probe::count_allocations_into(&crate::perf::CALLBACK_ALLOCATIONS);
+        #[cfg(feature = "perf-trace")]
+        let callback_ticks = crate::perf::callback_begin(complete_frames);
         let remainder = data.len() % self.channels;
         if remainder != 0 {
             self.telemetry.add_invalid_samples(remainder as u64);
@@ -146,6 +155,8 @@ impl CaptureEndpoint {
 
             let Some(mut block) = self.free.try_pop() else {
                 self.telemetry.add_dropped_block();
+                #[cfg(feature = "perf-trace")]
+                crate::perf::dropped_block();
                 frame_offset += frame_count;
                 continue;
             };
@@ -154,6 +165,10 @@ impl CaptureEndpoint {
             block.start_frame = start_frame;
             block.continuity = self.telemetry.continuity();
             block.frame_count = frame_count;
+            #[cfg(feature = "perf-trace")]
+            {
+                block.callback_ticks = callback_ticks;
+            }
             let sample_offset = frame_offset * self.channels;
             let sample_count = frame_count * self.channels;
             let source = &data[sample_offset..sample_offset + sample_count];
@@ -175,6 +190,8 @@ impl CaptureEndpoint {
             if self.ready.try_push(block).is_err() {
                 // The paired free queue guarantees room; never wait in the callback if that fails.
                 self.telemetry.add_dropped_block();
+                #[cfg(feature = "perf-trace")]
+                crate::perf::dropped_block();
             }
             frame_offset += frame_count;
         }
@@ -184,6 +201,8 @@ impl CaptureEndpoint {
         {
             worker.unpark();
         }
+        #[cfg(feature = "perf-trace")]
+        crate::perf::callback_end(callback_ticks);
     }
 }
 

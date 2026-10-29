@@ -45,6 +45,20 @@ python tools/check.py [--headless | --native] [--only snap,lock] [--audio] [--ci
 
 Without a selector it runs the headless tests, then the native groups in `tools/native/checks/` against a debug automation build. Native checks open real windows and take over the mouse and keyboard after a five-second warning; `--audio` also plays a test tone. Results and screenshots of failures go to `target/checks/<time>/`.
 
+## Performance measurement
+
+The non-default `perf-trace` feature adds bounded timing hooks (audio callback, analysis worker, UI pass) to the normal product; `--perf-trace <dir>` writes `<dir>/perf.json` on exit. Timestamps are raw `QueryPerformanceCounter` ticks.
+
+```text
+cargo build --release --locked --features perf-trace --target-dir target/perf-trace
+python tools/perf/run.py --output <new dir> --build new=new:<perf-trace exe> [--build new-off=new-off:<plain exe>] \
+    [--scenarios single,shared,different,lifecycle] [--rounds 5]
+python tools/perf/summarize.py <run dir>
+python tools/perf/churn.py --exe <automation exe> --output <new dir>
+```
+
+`run.py` plays a looping 440/880 Hz tone on the default playback device for the whole session (the app captures it through loopback), opens each scenario from a fresh `--config-dir`, and moves, resizes, minimizes and closes the windows itself; keep the desktop otherwise idle. `--build old=old:<exe>` also drives the pre-rewrite probe used as the comparison baseline. `churn.py` repeatedly splits, closes and opens windows through the settings window with real input and checks that live objects return to their starting counts.
+
 ## Releasing
 
 1. Set the version in `Cargo.toml`, move the `[Unreleased]` notes in `CHANGELOG.md` into a dated section for it, and commit.
