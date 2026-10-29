@@ -11,7 +11,7 @@ mod workspace_tab;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use eframe::egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
+use egui::{self, Pos2, RichText, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::{
     audio::inputs::Endpoints,
@@ -527,8 +527,8 @@ impl Workspace {
         for command in settings.commands.drain(..) {
             ctx.send_viewport_cmd(command);
         }
-        // The Workspace windows draw the open tab's outline from this; they ran
-        // before this pass, so a change needs another host pass.
+        // The Workspace windows draw the open tab's outline from this; they ran in an
+        // earlier pass, so a change needs another.
         let highlight = match settings.tab {
             Tab::Window => window.map(|window| Highlight::Window {
                 window,
@@ -546,7 +546,7 @@ impl Workspace {
             let _ = self.apply_action(action);
         }
         if repaint || windows_before != self.windows.len() || self.settings.is_none() {
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            self.request_pass_now(true);
         }
     }
 }

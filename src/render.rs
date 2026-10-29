@@ -321,12 +321,12 @@ pub trait RenderTarget {
 }
 
 pub struct EguiRenderTarget<'a> {
-    painter: eframe::egui::Painter,
+    painter: egui::Painter,
     marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> EguiRenderTarget<'a> {
-    pub fn new(painter: eframe::egui::Painter) -> Self {
+    pub fn new(painter: egui::Painter) -> Self {
         Self {
             painter,
             marker: std::marker::PhantomData,
@@ -341,13 +341,13 @@ impl RenderTarget for EguiRenderTarget<'_> {
         }
         let points = points
             .iter()
-            .map(|point| eframe::egui::pos2(point.x, point.y))
+            .map(|point| egui::pos2(point.x, point.y))
             .collect();
         self.painter
             .with_clip_rect(to_egui_rect(clip))
-            .add(eframe::egui::Shape::line(
+            .add(egui::Shape::line(
                 points,
-                eframe::egui::Stroke::new(stroke.width, to_egui_color(stroke.color)),
+                egui::Stroke::new(stroke.width, to_egui_color(stroke.color)),
             ));
     }
 
@@ -356,7 +356,7 @@ impl RenderTarget for EguiRenderTarget<'_> {
             return;
         }
         // Axis-aligned fills need no feathering; one mesh keeps dense views from becoming CPU bound.
-        let mut mesh = eframe::egui::Mesh::default();
+        let mut mesh = egui::Mesh::default();
         mesh.reserve_vertices(rects.len() * 4);
         mesh.reserve_triangles(rects.len() * 2);
         for colored in rects {
@@ -364,14 +364,14 @@ impl RenderTarget for EguiRenderTarget<'_> {
         }
         self.painter
             .with_clip_rect(to_egui_rect(clip))
-            .add(eframe::egui::Shape::mesh(mesh));
+            .add(egui::Shape::mesh(mesh));
     }
 
     fn circles(&mut self, clip: Rect, circles: &[Circle]) {
         let painter = self.painter.with_clip_rect(to_egui_rect(clip));
         for circle in circles {
             painter.circle_filled(
-                eframe::egui::pos2(circle.center.x, circle.center.y),
+                egui::pos2(circle.center.x, circle.center.y),
                 circle.radius,
                 to_egui_color(circle.color),
             );
@@ -380,10 +380,10 @@ impl RenderTarget for EguiRenderTarget<'_> {
 
     fn text(&mut self, clip: Rect, position: Point, text: &str, style: TextStyle) {
         self.painter.with_clip_rect(to_egui_rect(clip)).text(
-            eframe::egui::pos2(position.x, position.y),
-            eframe::egui::Align2::LEFT_TOP,
+            egui::pos2(position.x, position.y),
+            egui::Align2::LEFT_TOP,
             text,
-            eframe::egui::FontId::monospace(style.size),
+            egui::FontId::monospace(style.size),
             to_egui_color(style.color),
         );
     }
@@ -398,9 +398,7 @@ impl RenderTarget for EguiRenderTarget<'_> {
     ) {
         use std::sync::{Arc, Mutex, PoisonError};
 
-        use eframe::egui::{
-            Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Vertex, pos2,
-        };
+        use egui::{Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Vertex, pos2};
         let (width, height) = (image.width(), image.height());
         if width == 0 || height == 0 {
             return;
@@ -499,20 +497,20 @@ struct ImageCache {
 }
 
 struct CachedImage {
-    texture: eframe::egui::TextureHandle,
+    texture: egui::TextureHandle,
     revision: u64,
     last_pass: u64,
 }
 
-fn to_egui_rect(rect: Rect) -> eframe::egui::Rect {
-    eframe::egui::Rect::from_min_max(
-        eframe::egui::pos2(rect.min.x, rect.min.y),
-        eframe::egui::pos2(rect.max.x, rect.max.y),
+fn to_egui_rect(rect: Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(rect.min.x, rect.min.y),
+        egui::pos2(rect.max.x, rect.max.y),
     )
 }
 
-fn to_egui_color(color: Color) -> eframe::egui::Color32 {
-    eframe::egui::Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
+fn to_egui_color(color: Color) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.red, color.green, color.blue, color.alpha)
 }
 
 #[cfg(test)]

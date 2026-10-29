@@ -1,7 +1,7 @@
 //! egui's picker hard-codes its numeric row and keeps its sliders private, so the
 //! picker is drawn here: RGBA and hex fields over the same plane and bars.
 
-use eframe::egui::{
+use egui::{
     self, Color32, DragValue, Id, Key, Mesh, PopupCloseBehavior, Rect, Response, Sense, Shape,
     Stroke, StrokeKind, TextEdit, Ui, Vec2,
     color_picker::show_color_at,

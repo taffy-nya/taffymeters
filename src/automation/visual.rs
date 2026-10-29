@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::{egui, egui_wgpu, wgpu};
+use egui_wgpu::wgpu;
 use image::{ImageFormat, ImageReader};
 use serde::Serialize;
 

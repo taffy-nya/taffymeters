@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand};
+use egui::{self, Pos2, Rect, Vec2, ViewportCommand};
 
 use super::{
     ActionOutcome, DETACH_TIMEOUT, EMPTY_WINDOW_MIN_SIZE, INITIAL_WINDOW_SIZE, WindowId,

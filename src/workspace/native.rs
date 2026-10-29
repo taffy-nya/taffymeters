@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
+use egui::{Pos2, Rect, Vec2, pos2, vec2};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
@@ -94,7 +94,7 @@ thread_local! {
     static SESSION_END: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
 
-/// winit ignores WM_ENDSESSION, so eframe never calls `on_exit` at logoff or shutdown.
+/// winit ignores WM_ENDSESSION, so the event loop never reaches its exit at logoff or shutdown.
 pub(crate) fn on_session_end(hook: Box<dyn FnOnce()>) {
     SESSION_END.set(Some(hook));
 }

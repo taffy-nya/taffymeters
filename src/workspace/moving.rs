@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use eframe::egui::{Pos2, Rect, Vec2};
+use egui::{Pos2, Rect, Vec2};
 
 use super::{
     WindowId,
@@ -265,7 +265,7 @@ impl WindowTracker {
 
 #[cfg(test)]
 mod tests {
-    use eframe::egui::{pos2, vec2};
+    use egui::{pos2, vec2};
 
     use super::*;
 

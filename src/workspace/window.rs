@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{
+use egui::{
     self, Align2, Color32, CursorIcon, FontId, Id, PointerButton, Rect, Response, Sense, Stroke,
     Vec2, ViewportCommand, pos2,
 };
@@ -427,16 +427,12 @@ impl Workspace {
             } else {
                 delay.saturating_sub(pass_started.elapsed())
             };
-            // Windows are drawn inside the host (root) viewport's pass: schedule that.
-            ctx.request_repaint_after_for(
-                self.pacer.request_delay(Instant::now(), at_least),
-                egui::ViewportId::ROOT,
-            );
+            self.request_pass(at_least, false);
         }
         let windows_after: Vec<WindowId> = self.windows.keys().copied().collect();
         if windows_before != windows_after || settings_before != self.settings.is_some() {
-            // The host (root) pass owns native viewport creation and removal.
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            // The host creates and removes native windows between passes.
+            self.request_pass_now(true);
         }
         // Detach deadlines and source status can change without data or input to wake the UI.
         let pending_detach = self
@@ -444,12 +440,10 @@ impl Workspace {
             .values()
             .any(|window| window.pending_detach.is_some() && !window.opened);
         if pending_detach || self.source_status().state != SourceState::Running {
-            let delay = self.pacer.request_delay(Instant::now(), STATE_POLL);
-            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
+            self.request_pass(STATE_POLL, true);
         }
         if let Some(change) = self.badge_change_in() {
-            let delay = self.pacer.request_delay(Instant::now(), change);
-            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
+            self.request_pass(change, false);
         }
         self.send_window_commands(window_id, &ctx);
         true
@@ -501,7 +495,7 @@ impl Workspace {
             )
         });
         if self.observe_placement(window_id, outer, pixels_per_point, maximized, minimized) {
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            self.request_pass_now(true);
         }
         self.publish_groups();
         let window = self

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::egui::{FullOutput, Shape};
+use egui::{FullOutput, Shape};
 use serde_json::Value;
 
 use crate::{

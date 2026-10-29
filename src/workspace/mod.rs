@@ -22,10 +22,10 @@ use std::{
     error::Error,
     fmt,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, vec2};
+use egui::{self, Pos2, Rect, Vec2, ViewportCommand, vec2};
 
 use crate::{
     LiveAudio,
@@ -78,7 +78,7 @@ pub(crate) struct WindowId(pub(crate) u64);
 pub(crate) const FIRST_WINDOW: WindowId = WindowId(1);
 
 impl WindowId {
-    /// Every Workspace window is a child viewport of egui's hidden host root.
+    /// Each native window runs its passes under this ID in the shared egui Context.
     pub(crate) fn viewport_id(self) -> egui::ViewportId {
         egui::ViewportId::from_hash_of(("taffymeters.window", self.0))
     }
@@ -446,6 +446,21 @@ impl WindowState {
     }
 }
 
+/// When the native host should run its next batch of Workspace window passes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct PassRequest {
+    pub(crate) at: Option<Instant>,
+    /// The settings window shows something that changed and needs a pass too.
+    pub(crate) settings: bool,
+}
+
+impl PassRequest {
+    fn merge(&mut self, at: Instant, settings: bool) {
+        self.at = Some(self.at.map_or(at, |current| current.min(at)));
+        self.settings |= settings;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct WindowSummary {
     pub(crate) id: WindowId,
@@ -498,6 +513,7 @@ pub(crate) struct Workspace {
     settings_openings: u64,
     /// Latest display time of any pass (see `tick`).
     display_time: Duration,
+    pass_request: PassRequest,
     /// Declared last: the source and worker stop only after every Module dropped.
     live: Option<LiveAudio>,
 }
@@ -551,6 +567,7 @@ impl Workspace {
             settings: None,
             settings_openings: 0,
             display_time: Duration::ZERO,
+            pass_request: PassRequest::default(),
             live: Some(live),
         })
     }
@@ -962,6 +979,21 @@ impl Workspace {
 
     pub(crate) fn frame_pacer(&self) -> &Arc<FramePacer> {
         &self.pacer
+    }
+
+    /// A pass paced by the frame-rate limit, at least `at_least` from now.
+    pub(crate) fn request_pass(&mut self, at_least: Duration, settings: bool) {
+        let at = self.pacer.next_pass_at(Instant::now(), at_least);
+        self.pass_request.merge(at, settings);
+    }
+
+    /// An unpaced pass as soon as possible, as for input.
+    pub(crate) fn request_pass_now(&mut self, settings: bool) {
+        self.pass_request.merge(Instant::now(), settings);
+    }
+
+    pub(crate) fn take_pass_request(&mut self) -> PassRequest {
+        std::mem::take(&mut self.pass_request)
     }
 
     fn quit(&mut self) -> Result<ActionOutcome, WorkspaceError> {

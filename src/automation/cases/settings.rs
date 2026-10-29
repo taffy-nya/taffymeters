@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use eframe::egui::{self, Event, ViewportCommand, pos2, vec2};
+use egui::{self, Event, ViewportCommand, pos2, vec2};
 use serde_json::{Value, json};
 
 use crate::{

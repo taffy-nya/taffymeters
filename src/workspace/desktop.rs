@@ -1,7 +1,7 @@
 //! Desktop geometry uses physical pixels, converted at each window's DPI boundary.
 //! Saved frames instead use display-local logical points relative to the work area.
 
-use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
+use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 use super::{WindowId, moving::MoveRequest};
 

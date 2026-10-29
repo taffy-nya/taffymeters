@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use eframe::egui::{Rect, pos2, vec2};
+use egui::{Rect, pos2, vec2};
 
 use super::{
     ActionOutcome, EMPTY_WINDOW_MIN_SIZE, ModuleEntry, ModuleInstanceId, SplitId, WindowId,
@@ -611,7 +611,7 @@ impl Workspace {
         &mut self,
         file: &WindowFile,
         layout: Layout,
-        min_size: eframe::egui::Vec2,
+        min_size: egui::Vec2,
         outer: Rect,
         scale: f32,
         groups: &mut HashMap<u32, u64>,

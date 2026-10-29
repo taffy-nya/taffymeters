@@ -1,5 +1,3 @@
-use eframe::egui;
-
 use super::{
     SettingsItem,
     widgets::{Number, card, card_with_reset, choice, color_row, differs, number_row, row},

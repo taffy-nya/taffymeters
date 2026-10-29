@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use eframe::egui::{Pos2, Rect, Vec2};
+use egui::{Pos2, Rect, Vec2};
 
 use super::{Axis, ModuleInstanceId, SplitId, WindowId, Workspace};
 use crate::{

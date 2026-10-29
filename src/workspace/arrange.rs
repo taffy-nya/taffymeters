@@ -1,4 +1,4 @@
-use eframe::egui::{Rect, Vec2};
+use egui::{Rect, Vec2};
 
 use super::{
     ActionOutcome, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget, PendingDetach, Side, SplitId,

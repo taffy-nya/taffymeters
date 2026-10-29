@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use eframe::egui::{self, Align, Layout, RichText};
+use egui::{self, Align, Layout, RichText};
 use serde_json::Value;
 
 use super::{

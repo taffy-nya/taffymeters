@@ -5,7 +5,6 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use eframe::{egui_wgpu, wgpu};
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
@@ -40,16 +39,6 @@ mod probe;
 mod workspace;
 
 pub use live::{LiveAudio, LiveAudioConfig};
-
-fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
-    let mut options = egui_wgpu::WgpuConfiguration::default();
-    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
-        setup.instance_descriptor.backends = wgpu::Backends::DX12;
-        setup.power_preference = wgpu::PowerPreference::LowPower;
-    }
-    options.desired_maximum_frame_latency = Some(1);
-    options
-}
 
 fn main() {
     #[cfg_attr(not(feature = "perf-trace"), allow(unused_mut))]
@@ -157,26 +146,8 @@ fn parse_config_dir(args: &[String]) -> Result<Option<PathBuf>, String> {
     }
 }
 
-fn run_window(app: app::App) -> eframe::Result<()> {
-    let viewport = app::App::host_builder();
-    let options = eframe::NativeOptions {
-        renderer: eframe::Renderer::Wgpu,
-        wgpu_options: low_power_wgpu_options(),
-        viewport,
-        ..Default::default()
-    };
-    eframe::run_native(
-        "taffymeters",
-        options,
-        Box::new(move |creation_context| {
-            app.install_waker(&creation_context.egui_ctx);
-            #[cfg(windows)]
-            fonts::install_fallbacks(&creation_context.egui_ctx);
-            #[cfg(windows)]
-            app.save_on_session_end();
-            Ok(Box::new(app))
-        }),
-    )
+fn run_window(app: app::App) -> Result<(), String> {
+    app::run(app)
 }
 
 #[cfg(test)]

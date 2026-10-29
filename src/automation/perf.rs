@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use eframe::egui::vec2;
+use egui::vec2;
 use serde_json::{Value, json};
 
 use crate::{

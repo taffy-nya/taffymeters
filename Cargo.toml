@@ -29,7 +29,10 @@ perf-trace = ["windows-sys/Win32_System_Performance", "windows-sys/Win32_System_
 [dependencies]
 arc-swap = "1.7.1"
 cpal = "0.17.3"
-eframe = "0.34.1"
+egui = "0.34.1"
+egui-wgpu = { version = "0.34.1", features = ["winit"] }
+egui-winit = { version = "0.34.1", default-features = false, features = ["accesskit", "clipboard", "links"] }
+pollster = "0.4"
 ringbuf = "0.4.8"
 rustfft = "6.4.1"
 serde = { version = "1.0.228", features = ["derive"] }

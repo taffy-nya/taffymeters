@@ -2,7 +2,7 @@
 
 use std::{error::Error, fmt};
 
-use eframe::egui::{Pos2, Rect, Vec2, pos2};
+use egui::{Pos2, Rect, Vec2, pos2};
 
 use super::ModuleInstanceId;
 

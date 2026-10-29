@@ -4,8 +4,8 @@ use std::{env, fs, path::Path};
 
 const ICON: &str = "assets/taffymeters.ico";
 const RESOURCE: &str = "assets/taffymeters.rc";
-/// 128 covers the big system icon (`SM_CXICON`, 32 px at 100% scaling) up to 400%.
-const RGBA_SIZES: [u32; 2] = [128, 32];
+/// egui-winit sets only the small system icon on its windows (32 px at 200% scaling).
+const RGBA_SIZES: [u32; 1] = [32];
 
 fn main() {
     println!("cargo:rerun-if-changed={ICON}");

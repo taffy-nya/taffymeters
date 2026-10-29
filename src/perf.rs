@@ -318,9 +318,9 @@ struct Row {
     /// `logic` entry, the start of the host pass.
     start: u64,
     logic_ticks: u64,
-    /// Host and viewport closure bodies, without eframe's nested viewport painting.
+    /// Window and settings pass bodies, without the host's egui run, tessellation and painting.
     ui_ticks: u64,
-    /// Nested viewport tessellation, submission and present inside the host pass.
+    /// The rest of each window's pass: egui run, tessellation, submission and present.
     render_ticks: u64,
     windows_drawn: u32,
     content_points: [f32; 2],
@@ -340,7 +340,7 @@ struct Row {
     newly_shown_frames: u64,
 }
 
-/// UI-thread state for one host pass; Cells let viewport closures add to it.
+/// UI-thread state for one host pass (a batch of window passes).
 pub(crate) struct UiPass {
     started: u64,
     published: u64,
@@ -371,8 +371,8 @@ impl UiPass {
         }
     }
 
-    /// Closure body of one viewport; `drawn` marks a Workspace window that painted.
-    pub(crate) fn body(&self, started: u64, drawn: bool, ui: &eframe::egui::Ui) {
+    /// Body of one window's pass; `drawn` marks a Workspace window that painted.
+    pub(crate) fn body(&self, started: u64, drawn: bool, ui: &egui::Ui) {
         self.body_ticks
             .set(self.body_ticks.get() + now().saturating_sub(started));
         if drawn {
@@ -385,7 +385,7 @@ impl UiPass {
         }
     }
 
-    /// After `show_viewport_immediate` returns: everything but the body was eframe's.
+    /// After a window's pass and paint: everything but the body was host work.
     pub(crate) fn viewport(&self, call_started: u64, body_before: u64) {
         let call = now().saturating_sub(call_started);
         let body = self.body_ticks.get() - body_before;

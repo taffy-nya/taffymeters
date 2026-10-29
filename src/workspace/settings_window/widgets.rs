@@ -1,4 +1,4 @@
-use eframe::egui::{self, Align, Layout, RichText, Stroke, vec2};
+use egui::{self, Align, Layout, RichText, Stroke, vec2};
 
 use super::{SettingsItem, color_picker::color_picker, swatches};
 use crate::{

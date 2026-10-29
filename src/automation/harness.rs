@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use eframe::egui::{self, Event, PointerButton, Pos2, Rect, Vec2, ViewportCommand, pos2, vec2};
+use egui::{self, Event, PointerButton, Pos2, Rect, Vec2, ViewportCommand, pos2, vec2};
 
 use crate::workspace::{
     ControlKey, ControlTarget, DesktopProbe, Display, FIRST_WINDOW, INITIAL_WINDOW_SIZE,

@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use eframe::egui::{Context, FontData, FontDefinitions, FontFamily};
+use egui::{Context, FontData, FontDefinitions, FontFamily};
 use windows_sys::Win32::{
     Foundation::CloseHandle,
     Globalization::GetUserDefaultUILanguage,

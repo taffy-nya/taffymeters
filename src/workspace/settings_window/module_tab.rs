@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use eframe::egui::{self, RichText};
+use egui::{self, RichText};
 
 use super::{
     SettingsItem,
