@@ -8,13 +8,13 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- With a Default input, capture follows the system default device (e.g. when headphones are plugged in).
-- A chosen device that was unplugged is switched back to when it returns.
+- With a Default playback or microphone input, capture follows the system default device (e.g. when headphones are plugged in).
+- A chosen device that was unplugged is switched back to when it returns; until then the default device stands in, and a notice says so.
 - The reference level is remembered per audio device.
 
 ### Changed
 
-- The input, frame rate limit and reference levels are stored in `local.json`, apart from the session and presets; existing sessions are migrated.
+- The input, frame rate limit and reference levels are machine settings stored in `local.json`, apart from the session; presets no longer carry them. Existing sessions are migrated once.
 
 ### Fixed
 

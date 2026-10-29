@@ -9,7 +9,7 @@ A lightweight, customizable real-time audio visualizer for Windows, inspired by 
 
 ## Features
 
-- Visualize system audio or microphone input
+- Visualize system audio or microphone input; follows the system default device, or stays on the one you pick
 - Spectrum, Spectrogram, Oscilloscope, Waveform, Stereometer, Level Meter and Loudness Meter
 - Split windows into panels, open as many windows as you like, move panels between them
 - Windows snap to each other and to screen edges, move as a group, stay on top or lock in place
@@ -39,7 +39,8 @@ Requires 64-bit Windows 10 or 11 with a Direct3D 12 capable GPU.
 ## Settings and files
 
 Settings are kept in `%APPDATA%\taffymeters`; use `--config-dir <dir>` to keep them elsewhere, e.g. next to a portable copy.
-To start over, load the Default preset in Settings › Workspace, or delete the folder while the app is closed.
+Presets store only the layout, not the input, frame rate limit or reference level.
+To start over, delete the folder while the app is closed.
 
 ## Building
 
@@ -53,7 +54,6 @@ See the [development guide](docs/development.md) and the [architecture overview]
 
 ## Known limitations
 
-- Doesn't follow changes of the system default audio device; pick the new device in Settings › Workspace.
 - Multi-monitor setups with mixed display scaling are untested.
 
 ## License
