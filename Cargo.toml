@@ -30,8 +30,10 @@ perf-trace = ["windows-sys/Win32_System_Performance", "windows-sys/Win32_System_
 arc-swap = "1.7.1"
 cpal = "0.17.3"
 egui = "0.34.1"
-egui-wgpu = { version = "0.34.1", features = ["winit"] }
+egui-wgpu = { version = "0.34.1", default-features = false, features = ["winit"] }
 egui-winit = { version = "0.34.1", default-features = false, features = ["accesskit", "clipboard", "links"] }
+# Only the backend the app requests (DX12); the defaults also compile Vulkan, GLES and Metal.
+wgpu = { version = "29.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 pollster = "0.4"
 ringbuf = "0.4.8"
 rustfft = "6.4.1"

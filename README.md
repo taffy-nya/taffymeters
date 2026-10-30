@@ -20,7 +20,7 @@ A lightweight, customizable real-time audio visualizer for Windows, inspired by 
 ## Download
 
 Download the zip from [Releases](https://github.com/taffy-nya/taffymeters/releases), unzip and run `taffymeters.exe`.
-Requires 64-bit Windows 10 or 11 with a Direct3D 12 capable GPU.
+Requires 64-bit Windows 10 or 11 with a Direct3D 12 capable GPU. Without one, Windows' software renderer (WARP) may be used if available, with no guarantee of smooth drawing.
 
 ## Usage
 

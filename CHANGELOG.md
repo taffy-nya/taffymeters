@@ -16,6 +16,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 - The input, frame rate limit and reference levels are machine settings stored in `local.json`, apart from the session; presets no longer carry them. Existing sessions are migrated once.
 - Windows are drawn by the app's own window loop instead of eframe, without a hidden host window: about a third less CPU with one window, and resizing redraws the window at its new size instead of briefly stretching the old frame.
+- The exe includes only the graphics backend the app uses (Direct3D 12), about 0.9 MB smaller.
 
 ### Fixed
 
