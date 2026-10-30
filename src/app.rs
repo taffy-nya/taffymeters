@@ -169,6 +169,7 @@ pub(crate) fn run(app: App) -> Result<(), String> {
         windows_at: Some(now),
         settings_at: Some(now),
         error: None,
+        buttons_down: 0,
     };
     event_loop
         .run_app(&mut host)
@@ -230,6 +231,8 @@ struct Host {
     /// When the settings window's next pass is due.
     settings_at: Option<Instant>,
     error: Option<String>,
+    /// Mouse buttons held over Workspace windows; motion then is a drag.
+    buttons_down: u32,
 }
 
 fn earliest(current: &mut Option<Instant>, at: Instant) {
@@ -568,10 +571,12 @@ impl Host {
         drawn
     }
 
-    /// Input wakes its own window's kind; Workspace input can change what settings shows.
-    fn wake(&mut self, target: Target) {
+    /// Input wakes its own window's kind, and the settings window when `settings`.
+    fn wake(&mut self, target: Target, settings: bool) {
         let now = Instant::now();
-        earliest(&mut self.settings_at, now);
+        if settings {
+            earliest(&mut self.settings_at, now);
+        }
         if let Target::Workspace(_) = target {
             earliest(&mut self.windows_at, now);
         }
@@ -610,6 +615,14 @@ impl ApplicationHandler<AppEvent> for Host {
             }
             WindowEvent::CloseRequested => native.info.events.push(ViewportEvent::Close),
             WindowEvent::Occluded(occluded) => native.info.occluded = Some(*occluded),
+            WindowEvent::MouseInput { state, .. } => {
+                self.buttons_down = if state.is_pressed() {
+                    self.buttons_down + 1
+                } else {
+                    self.buttons_down.saturating_sub(1)
+                };
+            }
+            WindowEvent::Focused(false) => self.buttons_down = 0,
             _ => {}
         }
         let response = native.state.on_window_event(&native.window, &event);
@@ -619,7 +632,19 @@ impl ApplicationHandler<AppEvent> for Host {
                 WindowEvent::CloseRequested | WindowEvent::RedrawRequested
             );
         if wants_pass || redraw_now {
-            self.wake(target);
+            // Workspace input wakes settings too (a click retargets it, the wheel changes a
+            // range), but plain pointer motion changes nothing it shows and would rebuild it
+            // at the mouse rate. Should settings ever show hover state, the Workspace asks for
+            // a settings pass when that state changes (`request_pass_now(true)`).
+            let motion = matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
+            );
+            let settings =
+                !matches!(target, Target::Workspace(_)) || !motion || self.buttons_down > 0;
+            self.wake(target, settings);
         }
         if redraw_now {
             // Draw at the new size before returning, or DWM stretches the old frame.
