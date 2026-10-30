@@ -55,6 +55,7 @@ See the [development guide](docs/development.md) and the [architecture overview]
 ## Known limitations
 
 - Multi-monitor setups with mixed display scaling are untested.
+- No screen reader support.
 
 ## License
 
