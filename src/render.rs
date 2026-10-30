@@ -398,7 +398,9 @@ impl RenderTarget for EguiRenderTarget<'_> {
     ) {
         use std::sync::{Arc, Mutex, PoisonError};
 
-        use egui::{Color32, ColorImage, Id, Mesh, Shape, TextureOptions, epaint::Vertex, pos2};
+        use egui::{
+            Color32, ColorImage, Id, Mesh, Pos2, Shape, TextureOptions, epaint::Vertex, pos2,
+        };
         let (width, height) = (image.width(), image.height());
         if width == 0 || height == 0 {
             return;
@@ -456,12 +458,13 @@ impl RenderTarget for EguiRenderTarget<'_> {
         entry.last_pass = pass;
         let texture = entry.texture.id();
         image.mark_uploaded();
-        // Sample texel centers so the ring seam and outer rows do not blend with their neighbors.
+        // Sample texel centers so the outer rows do not blend with their neighbors. The ring's
+        // seam splits the mesh instead of relying on a wrapping sample: egui-wgpu's predictable
+        // filtering (the offscreen visual checks) clamps texel coordinates whatever the wrap mode.
         let (w, h) = (width as f32, height as f32);
         let u0 = (first_column % width) as f32 / w + 0.5 / w;
         let (u1, v0, v1) = (u0 + 1.0 - 1.0 / w, 0.5 / h, 1.0 - 0.5 / h);
-        let mut mesh = Mesh::with_texture(texture);
-        let positions = [
+        let corners = [
             rect.min,
             Point {
                 x: rect.max.x,
@@ -473,15 +476,39 @@ impl RenderTarget for EguiRenderTarget<'_> {
             },
             rect.max,
         ];
-        for (position, (time, cross)) in positions.into_iter().zip(flow.corners()) {
-            mesh.vertices.push(Vertex {
-                pos: pos2(position.x, position.y),
-                uv: pos2(u0 + (u1 - u0) * time, v0 + (v1 - v0) * cross),
-                color: Color32::WHITE,
-            });
+        let (mut origin, mut newest, mut far) = (Pos2::ZERO, Pos2::ZERO, Pos2::ZERO);
+        for (corner, flow_corner) in corners.into_iter().zip(flow.corners()) {
+            let corner = pos2(corner.x, corner.y);
+            match flow_corner {
+                (0.0, 0.0) => origin = corner,
+                (1.0, 0.0) => newest = corner,
+                (0.0, 1.0) => far = corner,
+                _ => {}
+            }
         }
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(2, 1, 3);
+        let (along, across) = (newest - origin, far - origin);
+        let mut mesh = Mesh::with_texture(texture);
+        let mut quad = |from: f32, to: f32, u_from: f32, u_to: f32| {
+            let base = mesh.vertices.len() as u32;
+            for (time, u) in [(from, u_from), (to, u_to)] {
+                for (cross, v) in [(0.0, v0), (1.0, v1)] {
+                    mesh.vertices.push(Vertex {
+                        pos: origin + along * time + across * cross,
+                        uv: pos2(u, v),
+                        color: Color32::WHITE,
+                    });
+                }
+            }
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base + 2, base + 1, base + 3);
+        };
+        if u1 <= 1.0 {
+            quad(0.0, 1.0, u0, u1);
+        } else {
+            let seam = (1.0 - u0) / (u1 - u0);
+            quad(0.0, seam, u0, 1.0);
+            quad(seam, 1.0, 0.0, u1 - 1.0);
+        }
         self.painter
             .with_clip_rect(to_egui_rect(clip))
             .add(Shape::mesh(mesh));
