@@ -7,7 +7,8 @@
 
 Plays the protocol's looping -36 dBFS 440/880 Hz WAV on the default playback device
 for the whole session, so loopback receives it; never changes the volume. Owns the
-desktop: windows are moved, resized, minimized and closed through Win32. Builds of
+desktop: windows are moved, resized, minimized and closed through Win32, and the
+settings scenario right-clicks and moves the real cursor. Builds of
 kind `new` get `--perf-trace`; `new-off` is the plain product; `old`/`old-off` are the
 phase-0 probe with PHASE0_TRACE on/off. Each round runs every scenario once per build,
 alternating the build order between rounds. Raw files only; see summarize.py.
@@ -197,6 +198,30 @@ def app_windows(pid, kind):
     return [hwnd for hwnd, info in found.items() if "taffymeters phase0" in info["title"].lower()]
 
 
+def settings_window(pid):
+    return next((hwnd for hwnd, info in win.windows(pid).items()
+                 if info["title"] == "Taffymeters settings"), None)
+
+
+def open_settings(pid, primary):
+    """Right-click the Spectrum, then move the settings window clear of it and park the cursor."""
+    win.click(win.center(primary), right=True)
+    settings = win.wait(lambda: settings_window(pid), "settings window", timeout=5)
+    left, top, right, _ = win.rect(primary)
+    win.move(settings, right + 20, top)
+    win.u.SetCursorPos(20, 20)
+    return settings
+
+
+def hover(primary, until):
+    """Circles the cursor over the window at about 100 Hz until `until` (perf_counter)."""
+    x, y = win.center(primary)
+    while time.perf_counter() < until:
+        angle = time.perf_counter() * 2 * math.pi
+        win.u.SetCursorPos(round(x + 100 * math.cos(angle)), round(y + 60 * math.sin(angle)))
+        time.sleep(0.01)
+
+
 def window_state(hwnd):
     return {"rect": win.rect(hwnd) if win.u.IsWindow(hwnd) else None,
             "visible": bool(win.u.IsWindowVisible(hwnd)), "iconic": bool(win.u.IsIconic(hwnd))}
@@ -276,13 +301,14 @@ def run_one(args, build, scenario_name, repetition, out):
         start = time.perf_counter()
         result["measurement_start_qpc"] = qpc()
         segments = list(scenario["segments"])
-        current, last_resize, resizes = None, -1, 0
+        current, last_resize, resizes, hovering, settings = None, -1, 0, False, None
         while proc.poll() is None:
             elapsed = time.perf_counter() - start
             if elapsed >= duration:
                 break
             while segments and elapsed >= segments[0][0]:
                 _, current, action = segments.pop(0)
+                hovering = action == "hover"
                 before = qpc()
                 if action == "minimize":
                     win.u.ShowWindow(primary, SW_MINIMIZE)
@@ -296,6 +322,14 @@ def run_one(args, build, scenario_name, repetition, out):
                     set_logical_size(primary, 800, 400)
                 elif action == "close":
                     win.close(primary)
+                elif action == "open-settings":
+                    settings = open_settings(proc.pid, primary)
+                elif action == "minimize-settings":
+                    win.u.SetCursorPos(20, 20)
+                    win.u.ShowWindow(settings, SW_MINIMIZE)
+                elif action == "pause":
+                    win.u.SetForegroundWindow(primary)
+                    win.keys(0x20)  # Space
                 result["events"].append({"qpc": before, "done_qpc": qpc(), "elapsed": elapsed,
                                          "segment": current, "action": action,
                                          "window": window_state(primary)})
@@ -318,7 +352,10 @@ def run_one(args, build, scenario_name, repetition, out):
             row = sample(handle)
             row["segment"] = current
             result["samples"].append(row)
-            time.sleep(0.2)
+            if hovering:
+                hover(primary, time.perf_counter() + 0.2)
+            else:
+                time.sleep(0.2)
         result["measurement_end_qpc"] = qpc()
         # The product only closes when told to; the probe closes on its own clock.
         exited_early = kind.startswith("new") and proc.poll() is not None

@@ -121,6 +121,25 @@ SCENARIOS = {
         "segments": [(0.0, "visible", None), (10.0, "closed", "close")],
         "plots": 2, "windows": 2,
     },
+    # 7-1 task 3: the settings window closed, open (Module tab) and minimized; the hover
+    # segments move the cursor over the Spectrum, as Workspace input also rebuilds settings.
+    "settings": {
+        "session": session(window(leaf(spectrum()))),
+        "baseline": None, "duration": 25.0,
+        "segments": [(0.0, "visible", None), (5.0, "hover", "hover"),
+                     (10.0, "settings", "open-settings"), (15.0, "settings-hover", "hover"),
+                     (20.0, "settings-min", "minimize-settings")],
+        "plots": 1, "windows": 1,
+    },
+    # Paused (Space): no data wakes anything; while the source is not running the open
+    # settings window is rebuilt every 250 ms to show its status.
+    "settings-paused": {
+        "session": session(window(leaf(spectrum()))),
+        "baseline": None, "duration": 15.0,
+        "segments": [(0.0, "visible", None), (5.0, "paused", "pause"),
+                     (10.0, "paused-settings", "open-settings")],
+        "plots": 1, "windows": 1,
+    },
     # Source alive, zero analysis: one empty window.
     "zero-analysis": {
         "session": session({"display": 0, "frame": FRAME}),
