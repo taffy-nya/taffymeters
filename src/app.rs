@@ -162,6 +162,7 @@ pub(crate) fn run(app: App) -> Result<(), String> {
         app,
         ctx,
         painter: None,
+        textures: egui::TexturesDelta::default(),
         windows: BTreeMap::new(),
         by_native: HashMap::new(),
         failed: BTreeSet::new(),
@@ -218,6 +219,8 @@ struct Host {
     ctx: egui::Context,
     /// Created with the first window: the adapter must suit a real surface.
     painter: Option<Painter>,
+    /// Texture changes from a pass that painted nothing; applied with the next paint.
+    textures: egui::TexturesDelta,
     windows: BTreeMap<Target, NativeWindow>,
     by_native: HashMap<NativeId, Target>,
     /// Viewports whose native window could not be created; not retried every batch.
@@ -354,6 +357,7 @@ impl Host {
             .chain(settings.as_ref().map(|(id, _)| (Target::Settings, *id)))
             .collect();
         let by_native = &mut self.by_native;
+        let before = self.windows.len();
         self.windows.retain(|target, native| {
             let kept = keep.get(target) == Some(&native.viewport);
             if !kept {
@@ -361,6 +365,14 @@ impl Host {
             }
             kept
         });
+        if self.windows.len() != before {
+            let live: Vec<_> = wanted
+                .iter()
+                .map(|summary| (summary.id.viewport_id(), summary.builder.clone()))
+                .chain(settings.clone())
+                .collect();
+            self.release_closed_viewports(&live);
+        }
         if let Some(painter) = &mut self.painter {
             let active: ViewportIdSet = self
                 .windows
@@ -384,6 +396,24 @@ impl Host {
             return Err("no window could be opened".to_owned());
         }
         Ok(())
+    }
+
+    /// egui forgets a viewport (its memory and input) only at the end of a ROOT pass that did
+    /// not show it. The windows never run a ROOT pass, so one runs here that shows just the
+    /// live viewports. Its `max_texture_side` must match the windows': a different value
+    /// recreates the shared fonts.
+    fn release_closed_viewports(&mut self, live: &[(ViewportId, ViewportBuilder)]) {
+        let input = egui::RawInput {
+            max_texture_side: self.painter.as_ref().and_then(Painter::max_texture_side),
+            ..Default::default()
+        };
+        let output = self.ctx.run_ui(input, |ui| {
+            for (viewport, builder) in live {
+                ui.ctx()
+                    .show_viewport_deferred(*viewport, builder.clone(), |_, _| {});
+            }
+        });
+        self.textures.append(output.textures_delta);
     }
 
     fn open(
@@ -449,6 +479,7 @@ impl Host {
             app,
             ctx,
             painter,
+            textures,
             windows,
             ..
         } = self;
@@ -518,16 +549,17 @@ impl Host {
             };
             native.state.egui_input_mut().events.extend(event);
         }
+        textures.append(output.textures_delta);
         // A minimized window shows nothing, but texture changes must still reach the
         // shared renderer.
-        if native.info.minimized != Some(true) || !output.textures_delta.is_empty() {
+        if native.info.minimized != Some(true) || !textures.is_empty() {
             let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
             painter.paint_and_update_textures(
                 native.viewport,
                 output.pixels_per_point,
                 [0.0; 4],
                 &primitives,
-                &output.textures_delta,
+                &std::mem::take(textures),
                 Vec::new(),
             );
         }
