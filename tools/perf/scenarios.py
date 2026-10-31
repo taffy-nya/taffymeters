@@ -215,4 +215,64 @@ SCENARIOS["settle-mixed"] = {
     "segments": [(0.0, "visible", None), (5.0, "silence", "stimulus-stop")],
 }
 
+
+def bar_bottom():
+    """The builtin "Bar - Bottom" preset as the user runs it: every module in one full-width
+    strip, the two Waveforms keeping 0.5 s, Level and Spectrum showing their Peaks."""
+    pcm = lambda seconds: {"nodes": [], "outputs": [
+        {"keep": "latest" if seconds is None else {"seconds": seconds}, "node": None}]}
+    waveform = lambda channel: module(
+        "waveform", data=pcm(0.5), view={
+            "channel": {"channel": channel}, "flow": {"choice": "left"},
+            "scale": {"number": 1.0}, "visible_seconds": {"number": 0.5}})
+    spectrogram = module("spectrogram", data={"nodes": spectrum()["data"]["nodes"][:3],
+                                              "outputs": [{"keep": {"seconds": 8.0}, "node": 2}]},
+                         view={"flow": {"choice": "up"}, "gain_db": {"number": 0.0},
+                               "visible_seconds": {"number": 6.0}})
+    level = module("level_meter", data={"nodes": [
+        {"input": None, "kind": "levels"},
+        {"input": 0, "kind": "peak", "params": {"fall_db_per_second_squared": 30.0, "hold_ms": 2000.0}}],
+        "outputs": [{"keep": "latest", "node": 0}, {"keep": "latest", "node": 1}]},
+        view={"show_peak": {"bool": True}})
+    loudness = module("loudness_meter", data={"nodes": [{"input": None, "kind": "loudness"}],
+                                              "outputs": [{"keep": "latest", "node": 0}]})
+    curve = {**spectrum(), "style": "taffymeters.spectrum.line", "view": {
+        "bottom_db": {"number": -90.0}, "max_frequency_hz": {"number": 20000.0},
+        "range_db": {"number": 90.0}, "show_peak": {"bool": True}, "show_readout": {"bool": False}}}
+    return split("left_right", leaf(spectrogram), split(
+        "left_right", leaf(module("oscilloscope", data=pcm(None), style="taffymeters.oscilloscope.line",
+                                  view={"channel": {"channel": "mono_average"}, "scale": {"number": 1.0},
+                                        "show_guide": {"bool": False}})),
+        split("left_right", split("top_bottom", leaf(waveform("left")), leaf(waveform("right"))),
+              split("left_right", leaf(level), split(
+                  "left_right", leaf(loudness), split(
+                      "left_right", leaf(module("stereometer", data=pcm(None), view={
+                          "scale": {"number": 1.0}, "show_guides": {"bool": False}})),
+                      leaf(curve), 0.19444443), 0.02702703), 0.05128205), 0.33898306), 0.24358974),
+        0.13333333)
+
+
+BAR_FRAME = [0.0, 800.0, 1440.0, 912.0]
+# 7-1 task 10: daily use with music (assets/README.md), restarted per run. daily-bar is the
+# user's strip; daily-heavy adds a large 2x2 window with Peaks, then moves the pointer and
+# opens settings, so it exceeds ordinary use. Both keep their session frames.
+SCENARIOS["daily-bar"] = {
+    "session": session(window(bar_bottom(), BAR_FRAME)),
+    "baseline": None, "duration": 20.0, "segments": [(0.0, "visible", None)],
+    "plots": 8, "windows": 1, "stimulus": "music", "size": None,
+}
+SCENARIOS["daily-heavy"] = {
+    "session": session(
+        window(quad({**spectrum(), "style": "taffymeters.spectrum.bars", "view": {"show_peak": {"bool": True}}},
+                    module("spectrogram"), module("waveform"),
+                    {**spectrum("left"), "style": "taffymeters.spectrum.pixel",
+                     "view": {"show_peak": {"bool": True}}}),
+               [100.0, 100.0, 1100.0, 660.0]),
+        window(bar_bottom(), BAR_FRAME)),
+    "baseline": None, "duration": 30.0,
+    "segments": [(0.0, "visible", None), (15.0, "hover", "hover"),
+                 (20.0, "settings", "open-settings"), (25.0, "settings-hover", "hover")],
+    "plots": 12, "windows": 2, "stimulus": "music", "size": None,
+}
+
 LOCAL = {"format_version": 1, "input": {"kind": "system_default"}}

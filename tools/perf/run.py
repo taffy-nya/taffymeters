@@ -192,6 +192,25 @@ def stimulus(path):
         output.writeframes(pcm.tobytes())
 
 
+MUSIC = Path(__file__).with_name("assets") / "关注塔菲谢谢喵-永雏塔菲.m4a"
+
+
+def music(path):
+    """Decode the measurement music (assets/README.md) to the PCM16 WAV winsound plays."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(MUSIC), "-ar", "48000", "-ac", "2",
+                    "-c:a", "pcm_s16le", str(path)], check=True)
+
+
+def scenario_stimulus(args, scenario):
+    return args.output / ("music.wav" if scenario.get("stimulus") == "music" else "stimulus.wav")
+
+
+def scenario_size(primary, scenario):
+    """Scenarios with `size: None` keep their session frames; the rest use 800x400."""
+    if scenario.get("size", (800, 400)) is not None:
+        set_logical_size(primary, *scenario.get("size", (800, 400)))
+
+
 def app_windows(pid, kind):
     """Workspace windows in id order (product) or the single probe window (baseline)."""
     found = win.windows(pid)
@@ -208,10 +227,11 @@ def settings_window(pid):
 
 
 def open_settings(pid, primary):
-    """Right-click the Spectrum, then move the settings window clear of it and park the cursor."""
-    win.click(win.center(primary), right=True)
+    """Right-click the first module (the window's top-left quarter: a split window's center is
+    a divider), then move the settings window clear of it and park the cursor."""
+    left, top, right, bottom = win.rect(primary)
+    win.click((left + (right - left) // 4, top + (bottom - top) // 4), right=True)
     settings = win.wait(lambda: settings_window(pid), "settings window", timeout=5)
-    left, top, right, _ = win.rect(primary)
     win.move(settings, right + 20, top)
     win.u.SetCursorPos(20, 20)
     return settings
@@ -271,6 +291,9 @@ def run_one(args, build, scenario_name, repetition, out):
                    PHASE0_WARMUP=str(args.warmup), PHASE0_OUTPUT=str(run_dir / "instrument.json"),
                    PHASE0_MAX_SAMPLES="8192", PHASE0_TRACE="off" if kind == "old-off" else "on")
     busy = system_busy(1.0)
+    if scenario.get("stimulus") == "music":
+        # Restarted per run, so every build hears the same passage at the same time.
+        play(scenario_stimulus(args, scenario))
     launched_qpc = qpc()
     stdout, stderr = open(run_dir / "stdout.log", "wb"), open(run_dir / "stderr.log", "wb")
     proc = subprocess.Popen(argv, env=env, cwd=Path(exe).parent, stdout=stdout, stderr=stderr)
@@ -295,7 +318,7 @@ def run_one(args, build, scenario_name, repetition, out):
         result["ready_qpc"] = qpc()
         primary = hwnds[0]
         result["dpi"] = win.u.GetDpiForWindow(primary)
-        set_logical_size(primary, 800, 400)
+        scenario_size(primary, scenario)
         win.u.SetCursorPos(20, 20)
         result["initial_windows"] = [window_state(h) for h in hwnds]
         time.sleep(args.warmup)
@@ -318,12 +341,12 @@ def run_one(args, build, scenario_name, repetition, out):
                     win.u.ShowWindow(primary, SW_MINIMIZE)
                 elif action == "restore":
                     win.u.ShowWindow(primary, SW_RESTORE)
-                    set_logical_size(primary, 800, 400)
+                    scenario_size(primary, scenario)
                 elif action == "hide":
                     win.u.ShowWindow(primary, SW_HIDE)
                 elif action == "show":
                     win.u.ShowWindow(primary, SW_SHOWNOACTIVATE)
-                    set_logical_size(primary, 800, 400)
+                    scenario_size(primary, scenario)
                 elif action == "close":
                     win.close(primary)
                 elif action == "open-settings":
@@ -338,7 +361,7 @@ def run_one(args, build, scenario_name, repetition, out):
                     # Loopback then delivers no packets at all, as in real silence.
                     winsound.PlaySound(None, 0)
                 elif action == "stimulus-start":
-                    play(args.output / "stimulus.wav")
+                    play(scenario_stimulus(args, scenario))
                 result["events"].append({"qpc": before, "done_qpc": qpc(), "elapsed": elapsed,
                                          "segment": current, "action": action,
                                          "window": window_state(primary)})
@@ -395,7 +418,8 @@ def run_one(args, build, scenario_name, repetition, out):
                 proc.wait(timeout=10)
         result["exit_code"] = proc.returncode
     finally:
-        if any(action == "stimulus-stop" for _, _, action in scenario["segments"]):
+        if scenario.get("stimulus") == "music" or any(
+                action == "stimulus-stop" for _, _, action in scenario["segments"]):
             play(args.output / "stimulus.wav")
         if handle:
             k.CloseHandle(handle)
@@ -450,10 +474,13 @@ def main():
             "machine_busy_percent_before": system_busy(5.0), "top_processes_before": top_processes(),
         },
         "stimulus": {"sample_rate": 48000, "channels_hz": [440, 880], "peak_dbfs": -36,
-                     "route": "winsound default render endpoint -> WASAPI loopback"},
+                     "route": "winsound default render endpoint -> WASAPI loopback",
+                     "music": {"file": MUSIC.name, "sha256": sha256(MUSIC)}},
     }
     wav = args.output / "stimulus.wav"
     stimulus(wav)
+    if any(SCENARIOS[s].get("stimulus") == "music" for s in scenarios):
+        music(args.output / "music.wav")
     runs = []
     try:
         play(wav)
