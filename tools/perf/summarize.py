@@ -106,6 +106,9 @@ def counter_rates(perf, start, end):
         "subscriptions": gauge("subscriptions"), "active_channel_nodes": gauge("active_channel_nodes"),
         "active_fft_nodes": gauge("active_fft_nodes"), "active_spectrum_nodes": gauge("active_spectrum_nodes"),
         "active_level_nodes": gauge("active_level_nodes"),
+        # Absent from traces recorded before the resource columns were added.
+        "nodes": gauge("nodes") if "nodes" in names else None,
+        "rings": gauge("rings") if "rings" in names else None,
     }
 
 

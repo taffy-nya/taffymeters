@@ -20,12 +20,13 @@ use crate::{audio::AudioBlock, dataflow::RuntimeMetrics, diagnostics::probe::Wor
 /// WASAPI period. Memory is committed up front, so larger tables would inflate private bytes.
 const ROW_CAPACITY: usize = 8_192;
 const POP_CAPACITY: usize = 8_192;
-/// Four counter samples per second for the same two minutes.
-const COUNTER_CAPACITY: usize = 512;
+/// Four counter samples per second for 34 minutes: the 30-minute run reads its resource
+/// gauges from here after the row table is full (about 1.3 MiB, committed up front).
+const COUNTER_CAPACITY: usize = 8_192;
 /// The largest measurement layout (daily-heavy) holds twelve plots; more count as overflow.
 const PLOTS_PER_ROW: usize = 16;
 const POP_COLUMNS: [&str; 4] = ["start_frame", "frames", "callback", "pop"];
-const COUNTER_COLUMNS: [&str; 16] = [
+const COUNTER_COLUMNS: [&str; 18] = [
     "qpc",
     "worker_cpu_ns",
     "worker_allocations",
@@ -42,6 +43,8 @@ const COUNTER_COLUMNS: [&str; 16] = [
     "active_fft_nodes",
     "active_spectrum_nodes",
     "active_level_nodes",
+    "nodes",
+    "rings",
 ];
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -61,7 +64,7 @@ static POPPED_THROUGH: AtomicU64 = AtomicU64::new(0);
 static SOURCE_REPLACED: AtomicBool = AtomicBool::new(false);
 static COUNTERS_SAMPLED_AT: AtomicU64 = AtomicU64::new(0);
 static POPS: OnceLock<Table<4>> = OnceLock::new();
-static COUNTERS: OnceLock<Table<16>> = OnceLock::new();
+static COUNTERS: OnceLock<Table<{ COUNTER_COLUMNS.len() }>> = OnceLock::new();
 
 thread_local! {
     static PLOTS: Cell<([[f32; 2]; PLOTS_PER_ROW], usize)> =
@@ -260,6 +263,8 @@ pub(crate) fn worker_counters(sample: impl FnOnce() -> (RuntimeMetrics, WorkerSa
         metrics.active_fft_nodes,
         metrics.active_spectrum_nodes,
         metrics.active_level_nodes,
+        metrics.nodes,
+        metrics.rings,
     ]);
 }
 
@@ -480,8 +485,8 @@ impl PerfTrace {
             pop_columns: [&'static str; 4],
             pops: Vec<[u64; 4]>,
             /// Cumulative except the trailing gauges; `worker_cpu_ns` is `u64::MAX` when unknown.
-            counter_columns: [&'static str; 16],
-            counters: Vec<[u64; 16]>,
+            counter_columns: [&'static str; COUNTER_COLUMNS.len()],
+            counters: Vec<[u64; COUNTER_COLUMNS.len()]>,
         }
         let (pops, pops_overflow, pops_bytes) = POPS.get().map_or((Vec::new(), 0, 0), |t| {
             (t.snapshot(), t.overflow.load(Ordering::Relaxed), t.bytes())
