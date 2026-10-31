@@ -19,6 +19,8 @@ pub struct ModuleServices {
 
 pub struct ModuleFrame<'a> {
     pub rect: Rect,
+    /// Of the window being drawn; images match its physical pixels.
+    pub pixels_per_point: f32,
     pub monotonic_time: Duration,
     pub pointer: Option<Point>,
     /// Scroll distance in logical points.

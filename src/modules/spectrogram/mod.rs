@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     audio::{SourceReader, SourceState},
     dataflow::{
@@ -13,7 +15,7 @@ use crate::{
     plotting::{ColumnRing, ViewClock, spectrum_dbfs_between},
     render::{Color, Flow},
     settings::{SettingKind, SettingValue, ViewSetting, unit},
-    snapshot::{DataReader, HistoryView},
+    snapshot::{DataReader, Frame, HistoryView},
     theme::ColorRole,
 };
 
@@ -74,7 +76,6 @@ impl ModuleFactory for SpectrogramFactory {
             picture: ColumnRing::default(),
             picture_key: None,
             rows: Vec::new(),
-            column: Vec::new(),
             written_through: 0,
             clock: ViewClock::default(),
         };
@@ -116,11 +117,10 @@ struct SpectrogramModule {
     visible_seconds: f32,
     gain_db: f32,
     flow: Flow,
-    picture: ColumnRing,
+    picture: ColumnRing<Arc<Frame>>,
     picture_key: Option<PictureKey>,
     /// Inclusive frequency bounds in Hz for each row, highest frequencies first.
     rows: Vec<(f32, f32)>,
-    column: Vec<Color>,
     /// Exclusive source-frame frontier of the newest result in the picture.
     written_through: u64,
     clock: ViewClock,
@@ -252,16 +252,29 @@ impl Module for SpectrogramModule {
         let max_frequency = (sample_rate * 0.5).min(20_000.0);
         let key = PictureKey {
             columns: window_frames.div_ceil(hop).max(1) as usize,
-            rows: self.flow.extents(frame.rect).1.round().max(1.0) as usize,
+            rows: (self.flow.extents(frame.rect).1 * frame.pixels_per_point)
+                .round()
+                .max(1.0) as usize,
             hop,
             max_frequency_bits: max_frequency.to_bits(),
             top_bits: (frame.reference_dbfs - self.gain_db).to_bits(),
             colors: [ColorRole::Low, ColorRole::Mid, ColorRole::High]
                 .map(|role| frame.palette.color(role)),
         };
-        if self.picture_key != Some(key) || window_end < self.written_through {
-            self.picture_key = Some(key);
-            self.picture.reset(key.columns, key.rows);
+        let projection_changed = self
+            .picture_key
+            .is_none_or(|old| old.columns != key.columns || old.hop != key.hop)
+            || window_end < self.written_through;
+        let invalidate = self.picture_key != Some(key);
+        let rows_changed = self.picture_key.is_none_or(|old| {
+            old.rows != key.rows || old.max_frequency_bits != key.max_frequency_bits
+        });
+        self.picture_key = Some(key);
+        if projection_changed {
+            self.picture.reset(key.columns);
+            self.written_through = window_end.saturating_sub(window_frames + hop);
+        }
+        if rows_changed {
             self.rows.clear();
             self.rows.extend((0..key.rows).map(|row| {
                 let at = |fraction: f32| {
@@ -271,32 +284,36 @@ impl Module for SpectrogramModule {
                 let bottom = 1.0 - (row + 1) as f32 / key.rows as f32;
                 (at(bottom), at(top))
             }));
-            self.written_through = window_end.saturating_sub(window_frames + hop);
         }
         let start = history
             .partition_point(|entry| entry.frame.processed_through_frame <= self.written_through);
         let top_dbfs = frame.reference_dbfs - self.gain_db;
         for entry in &history[start..] {
-            let Some(data) = entry.frame.spectrum() else {
+            if entry.frame.spectrum().is_none() {
                 continue;
-            };
+            }
             let column = self
                 .clock
                 .frontier_position(entry.frame.processed_through_frame)
                 / hop;
-            self.column.clear();
-            self.column.extend(self.rows.iter().map(|&(low, high)| {
-                let Some(dbfs) = spectrum_dbfs_between(&data.bins_dbfs, data.fft.bin_hz, low, high)
-                else {
-                    return Color::rgba(0, 0, 0, 0);
-                };
-                frame.palette.heat((dbfs - top_dbfs) / LEVEL_SPAN_DB + 1.0)
-            }));
             // Repeat wider hops across skipped columns, but leave History gaps blank.
-            self.picture.write(column, &self.column, !entry.gap_before);
+            self.picture
+                .write(column, Arc::clone(&entry.frame), !entry.gap_before);
             self.written_through = entry.frame.processed_through_frame;
         }
         self.picture.advance(now_end / hop);
+        self.picture
+            .rasterize(key.rows, invalidate, |entry, pixels| {
+                let data = entry
+                    .spectrum()
+                    .expect("only spectrum frames enter the ring");
+                for (pixel, &(low, high)) in pixels.iter_mut().zip(&self.rows) {
+                    *pixel = spectrum_dbfs_between(&data.bins_dbfs, data.fft.bin_hz, low, high)
+                        .map_or(Color::rgba(0, 0, 0, 0), |dbfs| {
+                            frame.palette.heat((dbfs - top_dbfs) / LEVEL_SPAN_DB + 1.0)
+                        });
+                }
+            });
         self.picture
             .draw(frame.renderer, frame.rect, frame.rect, self.flow);
         ModuleResponse {
@@ -314,7 +331,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::modules::test_support::{PcmFixture, RecordingTarget, TEST_RECT, draw};
+    use crate::modules::test_support::{PcmFixture, RecordingTarget, TEST_RECT, draw, draw_at};
 
     fn tone(start: usize, frames: usize) -> Vec<f32> {
         (start..start + frames)
@@ -325,6 +342,42 @@ mod tests {
     fn row_of(frequency_hz: f32, rows: usize) -> usize {
         let fraction = (frequency_hz / MIN_FREQUENCY_HZ).ln() / (20_000.0 / MIN_FREQUENCY_HZ).ln();
         ((1.0 - fraction) * rows as f32) as usize
+    }
+
+    #[test]
+    fn physical_rows_and_gain_reuse_spectra_without_new_fft() {
+        let mut fixture = PcmFixture::new(1);
+        let mut module = SpectrogramFactory
+            .create(&fixture.services, &Registry::default(), None)
+            .unwrap();
+        fixture.feed(&tone(0, 4_096));
+        let evaluations = fixture.services.dataflow.metrics().fft_evaluations;
+        let mut target = RecordingTarget::default();
+        for flow in Flow::ALL {
+            module
+                .set_view_setting("flow", &SettingValue::Choice(flow.id().to_owned()))
+                .unwrap();
+            for ppp in [1.0, 1.25, 1.5, 2.0, 1.0] {
+                draw_at(module.as_mut(), &mut target, Duration::ZERO, TEST_RECT, ppp);
+                let image = target.images.pop().unwrap();
+                assert_eq!(image.width, 563);
+                assert_eq!(
+                    image.height,
+                    (flow.extents(TEST_RECT).1 * ppp).round() as usize
+                );
+                assert!(image.columns.iter().flatten().any(|pixel| pixel.alpha > 0));
+                draw_at(module.as_mut(), &mut target, Duration::ZERO, TEST_RECT, ppp);
+                assert!(target.images.pop().unwrap().changed.is_empty());
+            }
+        }
+        module
+            .set_view_setting("gain_db", &SettingValue::Number(12.0))
+            .unwrap();
+        draw_at(module.as_mut(), &mut target, Duration::ZERO, TEST_RECT, 2.0);
+        assert_eq!(
+            fixture.services.dataflow.metrics().fft_evaluations,
+            evaluations
+        );
     }
 
     #[test]

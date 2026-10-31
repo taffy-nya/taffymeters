@@ -67,7 +67,6 @@ impl ModuleFactory for WaveformFactory {
             envelope: WaveformEnvelope::default(),
             picture: ColumnRing::default(),
             picture_key: None,
-            column: Vec::new(),
             clock: ViewClock::default(),
         };
         module.seconds = module.seconds.min(module.visible_range().1);
@@ -95,10 +94,10 @@ struct WaveformModule {
     y_scale: f32,
     flow: Flow,
     envelope: WaveformEnvelope,
-    /// Completed bins are rasterized once; the filling bin can change on each publication.
-    picture: ColumnRing,
+    /// `(minimum, maximum)` of each bin before gain. Completed bins are written once; the
+    /// filling bin can change on each publication.
+    picture: ColumnRing<(f32, f32)>,
     picture_key: Option<PictureKey>,
-    column: Vec<Color>,
     clock: ViewClock,
 }
 
@@ -125,7 +124,7 @@ impl WaveformModule {
 /// Cache absolute source-frame bins so draws only fold in newly published samples.
 #[derive(Default)]
 struct WaveformEnvelope {
-    key: Option<(u64, ChannelSelection, SourceId, Generation)>,
+    key: Option<(u64, u64, ChannelSelection, SourceId, Generation)>,
     /// Exclusive source-frame frontier already folded in.
     through: u64,
     /// `(bin, min, max)`, bins ascending; bins without samples are absent (gaps).
@@ -197,7 +196,7 @@ impl Module for WaveformModule {
             return ModuleResponse::default();
         };
         let (along, across) = self.flow.extents(frame.rect);
-        let columns = along.floor().max(1.0) as u64;
+        let columns = (along * frame.pixels_per_point).floor().max(1.0) as u64;
         let span_frames = ((self.seconds * descriptor.sample_rate_hz as f32) as u64).max(1);
         let frames_per_bin = (span_frames / columns).max(1);
         let paused = self.source.source_status().state == SourceState::Paused;
@@ -209,6 +208,7 @@ impl Module for WaveformModule {
         );
         let key = (
             frames_per_bin,
+            columns,
             self.channel,
             descriptor.source_id,
             descriptor.generation,
@@ -265,35 +265,36 @@ impl Module for WaveformModule {
         let gain = self.y_scale * reference_gain(frame.reference_dbfs);
         let picture_key = PictureKey {
             columns: columns as usize,
-            rows: across.round().max(1.0) as usize,
+            rows: (across * frame.pixels_per_point).round().max(1.0) as usize,
             frames_per_bin,
             gain_bits: gain.to_bits(),
             colors: [ColorRole::Low, ColorRole::Mid, ColorRole::High]
                 .map(|role| frame.palette.color(role)),
         };
-        if rebuild || self.picture_key != Some(picture_key) {
-            self.picture_key = Some(picture_key);
-            self.picture.reset(picture_key.columns, picture_key.rows);
+        let invalidate = self.picture_key != Some(picture_key);
+        self.picture_key = Some(picture_key);
+        if rebuild {
+            self.picture.reset(picture_key.columns);
             changed_from = Some(0);
         }
         if let Some(from) = changed_from {
             let start = envelope.bins.partition_point(|(bin, _, _)| *bin < from);
             for &(bin, minimum, maximum) in envelope.bins.range(start..) {
-                rasterize_column(
-                    &mut self.column,
-                    picture_key.rows,
-                    minimum * gain,
-                    maximum * gain,
-                    frame.palette,
-                );
                 // Quantize inserted silence to whole columns so settled bins do not shimmer.
                 let shift = self.clock.position(bin * frames_per_bin) - bin * frames_per_bin;
                 self.picture
-                    .write(bin + shift / frames_per_bin, &self.column, false);
+                    .write(bin + shift / frames_per_bin, (minimum, maximum), false);
             }
         }
         let shift = now_end - newest;
         self.picture.advance(last_bin + shift / frames_per_bin);
+        self.picture.rasterize(
+            picture_key.rows,
+            invalidate,
+            |&(minimum, maximum), pixels| {
+                rasterize_column(pixels, minimum * gain, maximum * gain, frame.palette);
+            },
+        );
         self.picture
             .draw(frame.renderer, frame.rect, frame.rect, self.flow);
         ModuleResponse {
@@ -309,21 +310,19 @@ impl Module for WaveformModule {
 /// Scaled samples ±1 map to the edges; the bar spans at least one row before clipping.
 /// Partial row coverage avoids steps under bilinear filtering.
 fn rasterize_column(
-    pixels: &mut Vec<Color>,
-    rows: usize,
+    pixels: &mut [Color],
     minimum: f32,
     maximum: f32,
     palette: &crate::theme::Palette,
 ) {
-    let half = rows as f32 * 0.5;
+    let half = pixels.len() as f32 * 0.5;
     let top = half - maximum.clamp(-1.0, 1.0) * half;
     let bottom = (half - minimum.clamp(-1.0, 1.0) * half).max(top + 1.0);
     let color = palette.level(maximum.abs().max(minimum.abs()).clamp(0.0, 1.0));
-    pixels.clear();
-    pixels.extend((0..rows).map(|row| {
+    for (row, pixel) in pixels.iter_mut().enumerate() {
         let coverage = (bottom.min(row as f32 + 1.0) - top.max(row as f32)).clamp(0.0, 1.0);
-        color.with_alpha((f32::from(color.alpha) * coverage).round() as u8)
-    }));
+        *pixel = color.with_alpha((f32::from(color.alpha) * coverage).round() as u8);
+    }
 }
 
 #[cfg(test)]
@@ -334,8 +333,10 @@ mod tests {
     use crate::{
         dataflow::SOURCE,
         modules::test_support::{
-            BLOCK_FRAMES, PcmFixture, RecordedImage, RecordingTarget, TEST_RECT, draw, repeat_frame,
+            BLOCK_FRAMES, PcmFixture, RecordedImage, RecordingTarget, TEST_RECT, draw, draw_at,
+            repeat_frame,
         },
+        render::{Point, Rect},
         settings::SettingKind,
     };
 
@@ -392,6 +393,69 @@ mod tests {
         let mut target = RecordingTarget::default();
         draw(module, &mut target, Duration::from_millis(millis));
         target.images.pop().expect("the picture is drawn")
+    }
+
+    #[test]
+    fn physical_dpi_changes_and_presentation_edits_keep_incremental_data() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        fixture.feed(&repeat_frame(&[0.5, -0.3], BLOCK_FRAMES));
+        let mut target = RecordingTarget::default();
+        for flow in Flow::ALL {
+            module
+                .set_view_setting("flow", &SettingValue::Choice(flow.id().to_owned()))
+                .unwrap();
+            for ppp in [1.0, 1.25, 1.5, 2.0, 1.0] {
+                draw_at(module.as_mut(), &mut target, Duration::ZERO, TEST_RECT, ppp);
+                let image = target.images.pop().unwrap();
+                let (along, across) = flow.extents(TEST_RECT);
+                assert_eq!(
+                    (image.width, image.height),
+                    (
+                        (along * ppp).floor() as usize,
+                        (across * ppp).round() as usize
+                    )
+                );
+                assert!(!bars(&image).is_empty());
+                draw_at(module.as_mut(), &mut target, Duration::ZERO, TEST_RECT, ppp);
+                assert!(target.images.pop().unwrap().changed.is_empty());
+            }
+        }
+        draw_at(
+            module.as_mut(),
+            &mut target,
+            Duration::from_secs(20),
+            TEST_RECT,
+            1.0,
+        );
+        module
+            .set_view_setting("scale", &SettingValue::Number(2.0))
+            .unwrap();
+        draw_at(
+            module.as_mut(),
+            &mut target,
+            Duration::from_secs(20),
+            TEST_RECT,
+            2.0,
+        );
+        assert!(bars(&target.images.pop().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn growing_capacity_with_same_bin_width_rebuilds_the_left_edge() {
+        let mut fixture = PcmFixture::new(2);
+        let mut module = waveform(&fixture, None);
+        set_visible_time(module.as_mut(), 4.0);
+        fixture.feed(&repeat_frame(&[0.5, 0.5], 240_000));
+        let mut target = RecordingTarget::default();
+        for width in [799.0, 800.0] {
+            let rect = Rect {
+                min: Point { x: 0.0, y: 0.0 },
+                max: Point { x: width, y: 120.0 },
+            };
+            draw_at(module.as_mut(), &mut target, Duration::ZERO, rect, 1.0);
+            assert_eq!(bars(&target.images.pop().unwrap()).len(), width as usize);
+        }
     }
 
     #[test]

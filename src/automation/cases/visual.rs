@@ -12,7 +12,10 @@ use crate::{
         },
         visual,
     },
-    modules::{EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTRUM_MODULE_ID, WAVEFORM_MODULE_ID},
+    modules::{
+        EMPTY_MODULE_ID, LEVEL_METER_MODULE_ID, SPECTROGRAM_MODULE_ID, SPECTRUM_MODULE_ID,
+        WAVEFORM_MODULE_ID,
+    },
     workspace::{FIRST_WINDOW, Side, Workspace, WorkspaceAction},
 };
 
@@ -361,7 +364,7 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
             crate::modules::OSCILLOSCOPE_MODULE_ID,
             None,
         ),
-        ("spectrogram", crate::modules::SPECTROGRAM_MODULE_ID, None),
+        ("spectrogram", SPECTROGRAM_MODULE_ID, None),
         ("waveform", WAVEFORM_MODULE_ID, None),
         ("stereometer", crate::modules::STEREOMETER_MODULE_ID, None),
         ("level-meter", LEVEL_METER_MODULE_ID, None),
@@ -455,6 +458,24 @@ pub(in crate::automation) fn visual(report: &mut Report, output: &Path, baseline
             Err(e) => Case::fail("V03", "2x DPI frame", e),
         },
     );
+    for (id, module) in [
+        ("waveform-2x", WAVEFORM_MODULE_ID),
+        ("spectrogram-2x", SPECTROGRAM_MODULE_ID),
+    ] {
+        report.cases.push(
+            match image_case(
+                &mut renderer,
+                id,
+                single_module(module, None),
+                2.0,
+                &images,
+                baseline,
+            ) {
+                Ok((case, _)) => case,
+                Err(error) => Case::fail(id, "2x DPI frame", error),
+            },
+        );
+    }
     for (id, dpi) in [("workspace-layout", 1.0), ("workspace-layout-2x", 2.0)] {
         report.cases.push(
             match image_case(&mut renderer, id, workspace_layout, dpi, &images, baseline) {

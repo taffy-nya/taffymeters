@@ -692,6 +692,7 @@ mod tests {
         scroll_delta_y: f32,
     ) -> ModuleFrame<'a> {
         ModuleFrame {
+            pixels_per_point: 1.0,
             rect: Rect {
                 min: Point { x: 0.0, y: 0.0 },
                 max: Point { x: 800.0, y: 400.0 },
@@ -1014,6 +1015,7 @@ mod tests {
             for module in [&mut *source[0], &mut *destination[0]] {
                 module.draw(ModuleFrame {
                     rect,
+                    pixels_per_point: 1.0,
                     monotonic_time: Duration::from_secs(1),
                     pointer: None,
                     scroll_delta_y: 0.0,

@@ -418,16 +418,29 @@ impl RenderTarget for EguiRenderTarget<'_> {
         let options = TextureOptions::LINEAR_REPEAT;
         let entry = match cache.entries.get_mut(&image.id()) {
             Some(entry) if entry.revision == image.revision() => {
-                for &x in image.changed_columns() {
-                    let column = ColorImage::new(
-                        [1, height],
-                        image
-                            .column(x)
-                            .iter()
-                            .map(|&color| to_egui_color(color))
-                            .collect(),
+                // One upload per run of adjacent columns: a fast-scrolling image changes
+                // hundreds per pass, and each upload has a fixed cost in egui and wgpu.
+                let mut changed = image.changed_columns().to_vec();
+                changed.sort_unstable();
+                let mut start = 0;
+                while start < changed.len() {
+                    let mut end = start + 1;
+                    while end < changed.len() && changed[end] == changed[end - 1] + 1 {
+                        end += 1;
+                    }
+                    let (first, run) = (changed[start], end - start);
+                    let mut pixels = Vec::with_capacity(run * height);
+                    for y in 0..height {
+                        pixels.extend(
+                            (first..first + run).map(|x| to_egui_color(image.column(x)[y])),
+                        );
+                    }
+                    entry.texture.set_partial(
+                        [first, 0],
+                        ColorImage::new([run, height], pixels),
+                        options,
                     );
-                    entry.texture.set_partial([x, 0], column, options);
+                    start = end;
                 }
                 entry
             }

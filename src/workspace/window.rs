@@ -738,6 +738,7 @@ impl Workspace {
             if let Some(entry) = self.modules.get_mut(&leaf) {
                 let response = entry.module.draw(ModuleFrame {
                     rect: to_render_rect(leaf_rect),
+                    pixels_per_point: ui.ctx().pixels_per_point(),
                     monotonic_time: display_time,
                     pointer: pointer.map(|position| Point {
                         x: position.x,

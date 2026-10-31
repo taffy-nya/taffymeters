@@ -96,37 +96,55 @@ pub fn spectrum_dbfs_between(bins: &[f32], bin_hz: f32, low_hz: f32, high_hz: f3
     spectrum_dbfs_at(bins, bin_hz, (low_hz * high_hz).sqrt())
 }
 
-/// Absolute source-time columns map to fixed image slots, avoiding resampling shimmer.
-/// Unwritten slots stay transparent, with the newest column at the edge opposite the flow.
-#[derive(Default)]
-pub struct ColumnRing {
-    image: Image,
+/// Absolute source-time columns map to fixed slots, avoiding resampling shimmer; a slot holds
+/// the column's data, and its pixels are rasterized when written or when the presentation
+/// changes. Unwritten slots stay transparent, with the newest column at the edge opposite the
+/// flow.
+pub struct ColumnRing<T> {
+    data: Vec<Option<T>>,
+    /// Slots whose pixels no longer match their data.
+    dirty: Vec<usize>,
+    marked: Vec<bool>,
     newest: Option<u64>,
+    image: Image,
 }
 
-impl ColumnRing {
-    pub fn reset(&mut self, columns: usize, rows: usize) {
-        self.image.resize(columns.max(1), rows.max(1));
+impl<T> Default for ColumnRing<T> {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            dirty: Vec::new(),
+            marked: Vec::new(),
+            newest: None,
+            image: Image::default(),
+        }
+    }
+}
+
+impl<T: Clone> ColumnRing<T> {
+    pub fn reset(&mut self, columns: usize) {
+        let columns = columns.max(1);
+        self.data.clear();
+        self.data.resize_with(columns, || None);
+        self.dirty.clear();
+        self.marked.clear();
+        self.marked.resize(columns, false);
         self.newest = None;
+        self.image.resize(columns, self.image.height().max(1));
     }
 
-    pub fn columns(&self) -> usize {
-        self.image.width()
+    fn mark(&mut self, slot: usize) {
+        if !self.marked[slot] {
+            self.marked[slot] = true;
+            self.dirty.push(slot);
+        }
     }
 
-    pub fn rows(&self) -> usize {
-        self.image.height()
-    }
-
-    pub fn newest(&self) -> Option<u64> {
-        self.newest
-    }
-
-    /// `pixels` are top-first. `fill_skipped` repeats a result covering several columns' time;
-    /// otherwise skipped columns are cleared.
-    pub fn write(&mut self, column: u64, pixels: &[Color], fill_skipped: bool) {
-        let columns = self.image.width() as u64;
-        // A column older than the picture holds would overwrite a newer one.
+    /// `fill_skipped` repeats a value covering several columns' time; otherwise skipped
+    /// columns are cleared.
+    pub fn write(&mut self, column: u64, value: T, fill_skipped: bool) {
+        let columns = self.data.len() as u64;
+        // A column older than the ring holds would overwrite a newer one.
         if self
             .newest
             .is_some_and(|newest| column.saturating_add(columns) <= newest)
@@ -138,17 +156,14 @@ impl ColumnRing {
         {
             let first = (newest + 1).max(column.saturating_sub(columns - 1));
             for skipped in first..column {
-                let target = self.image.column_mut((skipped % columns) as usize);
-                if fill_skipped {
-                    target.copy_from_slice(pixels);
-                } else {
-                    target.fill(Color::rgba(0, 0, 0, 0));
-                }
+                let slot = (skipped % columns) as usize;
+                self.data[slot] = fill_skipped.then(|| value.clone());
+                self.mark(slot);
             }
         }
-        self.image
-            .column_mut((column % columns) as usize)
-            .copy_from_slice(pixels);
+        let slot = (column % columns) as usize;
+        self.data[slot] = Some(value);
+        self.mark(slot);
         self.newest = Some(self.newest.map_or(column, |newest| newest.max(column)));
     }
 
@@ -157,26 +172,56 @@ impl ColumnRing {
         let Some(newest) = self.newest.filter(|&newest| column > newest) else {
             return;
         };
-        let columns = self.image.width() as u64;
+        let columns = self.data.len() as u64;
         let first = (newest + 1).max(column.saturating_sub(columns - 1));
         for passed in first..=column {
-            self.image
-                .column_mut((passed % columns) as usize)
-                .fill(Color::rgba(0, 0, 0, 0));
+            let slot = (passed % columns) as usize;
+            self.data[slot] = None;
+            self.mark(slot);
         }
         self.newest = Some(column);
+    }
+
+    /// Rasterizes changed columns into `rows` top-first pixels; every column when `rows` or
+    /// `presentation_changed` says the pixels of unchanged data are stale.
+    pub fn rasterize(
+        &mut self,
+        rows: usize,
+        presentation_changed: bool,
+        mut rasterize: impl FnMut(&T, &mut [Color]),
+    ) {
+        let rows = rows.max(1);
+        let resized = self.image.height() != rows;
+        if resized {
+            self.image.resize(self.data.len(), rows);
+        }
+        if resized || presentation_changed {
+            for slot in 0..self.data.len() {
+                if self.data[slot].is_some() {
+                    self.mark(slot);
+                }
+            }
+        }
+        for &slot in &self.dirty {
+            let pixels = self.image.column_mut(slot);
+            match &self.data[slot] {
+                Some(value) => rasterize(value, pixels),
+                None => pixels.fill(Color::rgba(0, 0, 0, 0)),
+            }
+            self.marked[slot] = false;
+        }
+        self.dirty.clear();
     }
 
     pub fn draw(&mut self, renderer: &mut dyn RenderTarget, clip: Rect, rect: Rect, flow: Flow) {
         let Some(newest) = self.newest else {
             return;
         };
-        let columns = self.image.width() as u64;
         renderer.scrolling_image(
             clip,
             rect,
             &mut self.image,
-            ((newest + 1) % columns) as usize,
+            ((newest + 1) % self.data.len() as u64) as usize,
             flow,
         );
     }
@@ -284,6 +329,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn presentation_changes_reuse_data_and_silence_cannot_resurrect_it() {
+        let mut data = ColumnRing::default();
+        data.reset(4);
+        data.write(1, 17_u8, false);
+        data.write(2, 29, false);
+        let mut calls = 0;
+        data.rasterize(2, false, |&value, pixels| {
+            calls += 1;
+            pixels.fill(Color::rgb(value, 0, 0));
+        });
+        assert_eq!(calls, 2);
+        data.rasterize(2, false, |_, _| {
+            panic!("unchanged columns are not rasterized")
+        });
+        data.rasterize(4, false, |&value, pixels| {
+            pixels.fill(Color::rgb(0, value, 0));
+        });
+        assert_eq!(data.image.height(), 4);
+        assert_eq!(data.image.column(1), [Color::rgb(0, 17, 0); 4]);
+        data.advance(3);
+        data.rasterize(4, true, |&value, pixels| {
+            pixels.fill(Color::rgb(0, 0, value));
+        });
+        assert_eq!(data.image.column(3), [Color::rgba(0, 0, 0, 0); 4]);
+        data.advance(8);
+        data.rasterize(8, true, |_, _| panic!("silence cleared retained payloads"));
+        assert!((0..4).all(|slot| data.image.column(slot).iter().all(|pixel| pixel.alpha == 0)));
+    }
+
+    #[test]
+    fn clearing_or_resetting_data_ring_releases_shared_payloads() {
+        use std::sync::Arc;
+        let value = Arc::new(3_u8);
+        let weak = Arc::downgrade(&value);
+        let mut data = ColumnRing::default();
+        data.reset(4);
+        data.write(1, Arc::clone(&value), false);
+        data.write(3, Arc::clone(&value), true);
+        drop(value);
+        data.advance(7);
+        assert!(weak.upgrade().is_none());
+        data.write(8, Arc::new(7), false);
+        data.reset(2);
+        assert!(data.data.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn column_ring_keeps_the_newest_column_at_its_edge_and_fills_or_clears_skipped_columns() {
         use crate::modules::test_support::RecordingTarget;
         let color = |value: u8| [Color::rgb(value, 0, 0); 2];
@@ -292,16 +384,17 @@ mod tests {
             max: Point { x: 40.0, y: 20.0 },
         };
         let mut ring = ColumnRing::default();
-        ring.reset(4, 2);
+        ring.reset(4);
         let mut target = RecordingTarget::default();
-        let mut drawn = |ring: &mut ColumnRing| {
+        let mut drawn = |ring: &mut ColumnRing<[Color; 2]>| {
+            ring.rasterize(2, false, |value, pixels| pixels.copy_from_slice(value));
             ring.draw(&mut target, rect, rect, Flow::Left);
             target.images.pop().unwrap()
         };
 
         // Start before the ring fills to catch content incorrectly anchored at the oldest edge.
-        ring.write(1, &color(1), true);
-        ring.write(2, &color(2), true);
+        ring.write(1, color(1), true);
+        ring.write(2, color(2), true);
         let started = drawn(&mut ring);
         assert_eq!(started.first_column, 3);
         assert_eq!(started.changed, vec![1, 2]);
@@ -309,7 +402,7 @@ mod tests {
         assert_eq!(started.columns[0], [Color::rgba(0, 0, 0, 0); 2]);
 
         // One result spans three columns, crossing the ring boundary.
-        ring.write(5, &color(5), true);
+        ring.write(5, color(5), true);
         let full = drawn(&mut ring);
         assert_eq!(full.first_column, 2);
         assert_eq!(full.columns[3], color(5));
@@ -317,7 +410,7 @@ mod tests {
         assert_eq!(full.columns[1], color(5));
         assert_eq!(full.columns[2], color(2));
 
-        ring.write(8, &color(8), false);
+        ring.write(8, color(8), false);
         let gapped = drawn(&mut ring);
         assert_eq!(gapped.first_column, 1);
         assert_eq!(gapped.columns[2], [Color::rgba(0, 0, 0, 0); 2]);

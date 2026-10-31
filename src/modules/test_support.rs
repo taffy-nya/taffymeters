@@ -188,8 +188,19 @@ pub(crate) fn draw(
     target: &mut RecordingTarget,
     monotonic_time: Duration,
 ) -> ModuleResponse {
+    draw_at(module, target, monotonic_time, TEST_RECT, 1.0)
+}
+
+pub(crate) fn draw_at(
+    module: &mut dyn Module,
+    target: &mut RecordingTarget,
+    monotonic_time: Duration,
+    rect: Rect,
+    pixels_per_point: f32,
+) -> ModuleResponse {
     module.draw(ModuleFrame {
-        rect: TEST_RECT,
+        rect,
+        pixels_per_point,
         monotonic_time,
         pointer: None,
         scroll_delta_y: 0.0,
