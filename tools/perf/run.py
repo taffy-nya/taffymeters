@@ -274,6 +274,8 @@ def run_one(args, build, scenario_name, repetition, out):
     duration = scenario["duration"]
     if duration == 10.0 and args.duration is not None:
         duration = args.duration
+    # A scenario may need longer than the protocol's 3 s, e.g. to fill its History first.
+    warmup = max(args.warmup, scenario.get("warmup", 0.0))
     env = dict(os.environ)
     argv = [str(exe)]
     if kind.startswith("new"):
@@ -288,7 +290,7 @@ def run_one(args, build, scenario_name, repetition, out):
         if scenario["baseline"] is None:
             raise SystemExit(f"{scenario_name} has no baseline equivalent")
         env.update(PHASE0_SCENARIO=scenario["baseline"], PHASE0_DURATION=str(duration),
-                   PHASE0_WARMUP=str(args.warmup), PHASE0_OUTPUT=str(run_dir / "instrument.json"),
+                   PHASE0_WARMUP=str(warmup), PHASE0_OUTPUT=str(run_dir / "instrument.json"),
                    PHASE0_MAX_SAMPLES="8192", PHASE0_TRACE="off" if kind == "old-off" else "on")
     busy = system_busy(1.0)
     if scenario.get("stimulus") == "music":
@@ -300,7 +302,7 @@ def run_one(args, build, scenario_name, repetition, out):
     result = {"schema_version": 1, "scenario": scenario_name, "build": name, "kind": kind,
               "repetition": repetition, "argv": argv, "pre_launch_machine_busy_percent": busy,
               "launched_qpc": launched_qpc, "qpc_frequency": qpc_frequency(), "events": [],
-              "samples": [], "screenshots": [], "warmup_seconds": args.warmup,
+              "samples": [], "screenshots": [], "warmup_seconds": warmup,
               "requested_seconds": duration, "valid": False, "invalid_reason": None}
     handle = None
     try:
@@ -321,7 +323,7 @@ def run_one(args, build, scenario_name, repetition, out):
         scenario_size(primary, scenario)
         win.u.SetCursorPos(20, 20)
         result["initial_windows"] = [window_state(h) for h in hwnds]
-        time.sleep(args.warmup)
+        time.sleep(warmup)
         handle = k.OpenProcess(0x0400 | 0x0010, False, proc.pid)
         if not handle:
             raise c.WinError(c.get_last_error())

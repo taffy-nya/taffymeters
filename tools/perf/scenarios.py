@@ -106,6 +106,15 @@ SCENARIOS = {
         "segments": [(0.0, "visible", None), (10.0, "hidden", "minimize")],
         "plots": 1, "windows": 1,
     },
+    # Threshold 5: hidden with continuous History (a Spectrogram keeps 8 s). The warmup
+    # fills that History before measuring; restored shows the frozen view catching up.
+    "history-hidden": {
+        "session": session(window(leaf(module("spectrogram")))),
+        "baseline": None, "duration": 25.0, "warmup": 9.0,
+        "segments": [(0.0, "visible", None), (10.0, "hidden", "minimize"),
+                     (20.0, "restored", "restore")],
+        "plots": 1, "windows": 1,
+    },
     "sw-hide": {
         "session": session(window(quad(spectrum(), spectrum(), spectrum(), spectrum()))),
         "baseline": None, "duration": 15.0,
