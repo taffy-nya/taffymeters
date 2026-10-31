@@ -161,6 +161,24 @@ SCENARIOS = {
         "segments": [(0.0, "visible", None), (5.0, "silence", "stimulus-stop")],
         "plots": 1, "windows": 1,
     },
+    # 7-1 task 5: one scrolling image filling the window; the fast variant shows the
+    # shortest time, so new columns arrive at the highest rate.
+    "quality-wave": {
+        "session": session(window(leaf(module("waveform")))),
+        "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
+        "plots": 1, "windows": 1,
+    },
+    "quality-wave-fast": {
+        "session": session(window(leaf(module(
+            "waveform", view={"visible_seconds": {"number": 0.25}})))),
+        "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
+        "plots": 1, "windows": 1,
+    },
+    "quality-spec": {
+        "session": session(window(leaf(module("spectrogram")))),
+        "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
+        "plots": 1, "windows": 1,
+    },
     # Source alive, zero analysis: one empty window.
     "zero-analysis": {
         "session": session({"display": 0, "frame": FRAME}),
