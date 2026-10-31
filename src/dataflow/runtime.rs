@@ -290,7 +290,8 @@ impl Dataflow {
         Self::spawn_with(descriptor, endpoint, telemetry, false)
     }
 
-    /// Enable `fill_silence` for loopback sources that stop delivering samples while idle.
+    /// `fill_silence`: the source stops delivering samples while idle (loopback), so a
+    /// running source without samples is silent. Any source that loses its device is.
     pub(crate) fn spawn_with(
         descriptor: Arc<AudioDescriptor>,
         mut endpoint: ProcessingEndpoint,
@@ -299,13 +300,12 @@ impl Dataflow {
     ) -> io::Result<(Self, DataflowHandle)> {
         #[cfg(feature = "perf-trace")]
         crate::perf::worker_started();
-        let silence = fill_silence.then(|| {
-            super::silence::SilenceFill::new(
-                Arc::clone(&telemetry),
-                descriptor.sample_rate_hz,
-                usize::from(descriptor.channel_count),
-            )
-        });
+        let silence = super::silence::SilenceFill::new(
+            Arc::clone(&telemetry),
+            descriptor.sample_rate_hz,
+            usize::from(descriptor.channel_count),
+            fill_silence,
+        );
         let (command_sender, command_receiver) = sync_channel(CONTROL_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -542,7 +542,7 @@ impl Drop for Dataflow {
 struct Worker<'a> {
     engine: &'a mut Engine,
     endpoint: &'a mut ProcessingEndpoint,
-    silence: Option<super::silence::SilenceFill>,
+    silence: super::silence::SilenceFill,
     commands: Receiver<Command>,
     stop: Arc<AtomicBool>,
     metrics: &'a Metrics,
@@ -571,37 +571,46 @@ fn run_worker(worker: Worker<'_>) {
     while !stop.load(Ordering::Acquire) {
         let before_commands = published();
         let mut command_budget_exhausted = true;
+        let mut handled_command = false;
         for _ in 0..COMMAND_BUDGET_PER_TICK {
-            match commands.try_recv() {
-                Ok(Command::Subscribe { id, spec, response }) => {
-                    let _ = response.send(engine.subscribe(id, spec, true));
-                }
-                Ok(Command::Update { id, spec, response }) => {
-                    let _ = response.send(engine.update(id, spec));
-                }
-                Ok(Command::UpdateShared {
-                    binding,
-                    specs,
-                    response,
-                }) => {
-                    let _ = response.send(engine.update_shared(binding, specs));
-                }
-                Ok(Command::SetVisible(id, visible)) => engine.set_visible(id, visible),
-                Ok(Command::SetAnalysisPaused(id, paused)) => engine.set_paused(id, paused),
-                Ok(Command::ResetState(id)) => engine.reset_state(id),
-                Ok(Command::Remove(id)) => engine.remove(id),
-                Ok(Command::ResumeBoundary(continuity)) => engine.resume_at(continuity),
-                #[cfg(test)]
-                Ok(Command::BlockWorkerForTest { entered, release }) => {
-                    entered.wait();
-                    release.wait();
-                }
+            let command = match commands.try_recv() {
+                Ok(command) => command,
                 Err(TryRecvError::Empty) => {
                     command_budget_exhausted = false;
                     break;
                 }
                 Err(TryRecvError::Disconnected) => return,
+            };
+            handled_command = true;
+            match command {
+                Command::Subscribe { id, spec, response } => {
+                    let _ = response.send(engine.subscribe(id, spec, true));
+                }
+                Command::Update { id, spec, response } => {
+                    let _ = response.send(engine.update(id, spec));
+                }
+                Command::UpdateShared {
+                    binding,
+                    specs,
+                    response,
+                } => {
+                    let _ = response.send(engine.update_shared(binding, specs));
+                }
+                Command::SetVisible(id, visible) => engine.set_visible(id, visible),
+                Command::SetAnalysisPaused(id, paused) => engine.set_paused(id, paused),
+                Command::ResetState(id) => engine.reset_state(id),
+                Command::Remove(id) => engine.remove(id),
+                Command::ResumeBoundary(continuity) => engine.resume_at(continuity),
+                #[cfg(test)]
+                Command::BlockWorkerForTest { entered, release } => {
+                    entered.wait();
+                    release.wait();
+                }
             }
+        }
+        if handled_command {
+            // New or reset analysis during settled silence has yet to come to rest.
+            silence.unsettle(Instant::now());
         }
         if published() != before_commands {
             wake();
@@ -609,9 +618,7 @@ fn run_worker(worker: Worker<'_>) {
         #[cfg(feature = "perf-trace")]
         crate::perf::worker_counters(|| (metrics.snapshot(), probe.sample()));
         if let Some(mut block) = endpoint.try_pop() {
-            if let Some(silence) = &mut silence {
-                silence.captured(&mut block, Instant::now());
-            }
+            silence.captured(&mut block, Instant::now());
             #[cfg(feature = "perf-trace")]
             crate::perf::popped(&block);
             #[cfg(any(test, feature = "automation"))]
@@ -628,14 +635,15 @@ fn run_worker(worker: Worker<'_>) {
             if let Some(block_end) = block_end {
                 processed_frontier.store(block_end, Ordering::Release);
             }
-        } else if let Some(block) = silence
-            .as_mut()
-            .and_then(|silence| silence.due(Instant::now()))
-        {
+        } else if let Some(block) = silence.due(Instant::now()) {
             let before = published();
             #[cfg(feature = "perf-trace")]
             crate::perf::popped(block);
             engine.process_block(block);
+            if engine.at_rest(silence.since()) {
+                engine.flush_pcm();
+                silence.settle();
+            }
             if published() != before {
                 wake();
             }

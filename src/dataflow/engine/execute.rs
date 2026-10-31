@@ -83,6 +83,16 @@ impl Engine {
         }
     }
 
+    /// Publishes PCM still pending when silence filling ends.
+    pub(crate) fn flush_pcm(&mut self) {
+        if let Some(source) = self.plan.source
+            && self.node(source).ring_demanded
+        {
+            self.stage_pcm(source);
+            self.publish();
+        }
+    }
+
     pub(crate) fn resume_at(&mut self, continuity: u64) {
         self.minimum_continuity = continuity;
         self.active_continuity = continuity;
@@ -133,6 +143,7 @@ impl Engine {
             *clock = 0;
         }
         self.expected_sequence = None;
+        self.pcm_published_from = None;
         self.expected_start_frame = None;
         self.discontinuity_count = self.discontinuity_count.wrapping_add(1);
     }
@@ -225,6 +236,7 @@ impl Engine {
             if let Kernel::Loudness {
                 analyzer,
                 start_frame,
+                ..
             } = &mut self.node_mut(id).kernel
             {
                 if end <= *start_frame {
@@ -308,7 +320,9 @@ impl Engine {
 
     fn run_hop(&mut self, fft_index: usize, context: &StageContext) {
         let fft_id = self.plan.ffts[fft_index].0;
-        self.node_mut(fft_id).produced = true;
+        let node = self.node_mut(fft_id);
+        node.produced = true;
+        node.produced_through = context.processed_through_frame;
         self.stage_values(fft_id, context);
         let sample_rate = self.descriptor.sample_rate_hz;
         let mut evaluations = 0;
@@ -440,6 +454,7 @@ impl Engine {
         let Kernel::Loudness {
             analyzer,
             start_frame,
+            ..
         } = &node.kernel
         else {
             unreachable!("planned Loudness node");
@@ -448,6 +463,9 @@ impl Engine {
             return;
         }
         let momentary_lufs = analyzer.lufs();
+        if let Kernel::Loudness { published_lufs, .. } = &mut self.node_mut(id).kernel {
+            *published_lufs = momentary_lufs;
+        }
         let version = self.next_version();
         let ring = self
             .node_mut(id)
@@ -505,6 +523,7 @@ impl Engine {
             pending.clear();
         }
         *pending_frames = 0;
+        self.pcm_published_from = Some(*pending_start);
         self.staged.push((source, frame));
     }
 

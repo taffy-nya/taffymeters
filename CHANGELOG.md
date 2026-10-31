@@ -24,6 +24,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Switching to a low-sample-rate input no longer permanently lowers a Spectrum's maximum frequency.
 - `THIRD_PARTY_LICENSES.txt` in release packages carries every dependency's copyright notice, including those of the embedded fonts, instead of template placeholders.
 - An open or minimized settings window no longer raises CPU use, including while moving the mouse over a window.
+- When the sound stops, peak markers and slowly smoothed curves fall all the way down instead of stopping after 6 seconds, and meters with nothing left to fall stop redrawing sooner. They also fall back when the audio device is lost.
 
 ## [0.2.0] - 2026-10-24
 

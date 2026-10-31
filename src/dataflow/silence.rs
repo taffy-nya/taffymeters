@@ -1,6 +1,6 @@
-//! System loopback emits no samples while idle. Bounded worker-generated silence
-//! lets stateful analysis settle; later captured blocks shift by the inserted
-//! silence to keep the analysis timeline continuous.
+//! System loopback emits no samples while idle, and a lost device none at all.
+//! Worker-generated silence lets stateful analysis settle; later captured blocks shift
+//! by the inserted silence to keep the analysis timeline continuous.
 
 use std::{
     sync::Arc,
@@ -11,9 +11,9 @@ use crate::audio::{AudioBlock, SourceState, SourceTelemetry};
 
 /// Shorter than the time views' grace so they see silent samples before marking a gap.
 const GRACE: Duration = Duration::from_millis(100);
-/// Longest silence inserted per pause in the source: enough for the peak markers
-/// (hold up to 3 s, then falling) and the 400 ms loudness window to settle.
-const LIMIT: Duration = Duration::from_secs(6);
+/// Filling normally ends once the analysis is at rest; this bounds very long holds
+/// and releases.
+const LIMIT: Duration = Duration::from_secs(30);
 const BLOCK_SECONDS: f64 = 0.01;
 
 pub(super) struct SilenceFill {
@@ -30,10 +30,22 @@ pub(super) struct SilenceFill {
     quiet_since: Instant,
     /// Silent source frames inserted in the current idle interval.
     filled: u64,
+    /// Engine frame where the current idle interval's silence starts.
+    since: u64,
+    /// A running source without samples is silent (loopback); otherwise only a lost
+    /// device is.
+    infer: bool,
+    /// The analysis came to rest in this idle interval.
+    settled: bool,
 }
 
 impl SilenceFill {
-    pub(super) fn new(telemetry: Arc<SourceTelemetry>, sample_rate: u32, channels: usize) -> Self {
+    pub(super) fn new(
+        telemetry: Arc<SourceTelemetry>,
+        sample_rate: u32,
+        channels: usize,
+        infer: bool,
+    ) -> Self {
         let block_frames = ((f64::from(sample_rate) * BLOCK_SECONDS) as usize).max(1);
         Self {
             telemetry,
@@ -45,6 +57,9 @@ impl SilenceFill {
             next: None,
             quiet_since: Instant::now(),
             filled: 0,
+            since: 0,
+            infer,
+            settled: false,
         }
     }
 
@@ -55,28 +70,36 @@ impl SilenceFill {
             block.start_frame.saturating_add(block.frame_count as u64),
             block.sequence.wrapping_add(1),
         ));
-        self.quiet_since = now;
-        self.filled = 0;
+        self.restart(now);
     }
 
     pub(super) fn due(&mut self, now: Instant) -> Option<&AudioBlock> {
-        if self.telemetry.state() != SourceState::Running {
+        let lost = match self.telemetry.state() {
+            SourceState::Running => false,
+            SourceState::DeviceLost => true,
             // A paused (or stopped) source is not silent; its pause never counts.
-            self.quiet_since = now;
-            self.filled = 0;
+            _ => {
+                self.restart(now);
+                return None;
+            }
+        };
+        if self.settled || !(lost || self.infer) {
             return None;
         }
         let (start_frame, sequence) = self.next?;
         let quiet = now.saturating_duration_since(self.quiet_since);
-        if quiet < GRACE {
+        if !lost && quiet < GRACE {
             return None;
         }
-        let due = (quiet.min(LIMIT).as_secs_f64() * self.sample_rate) as u64;
-        let frames = due
+        let frames = self
+            .frames_due(now)
             .saturating_sub(self.filled)
             .min(self.block_frames as u64) as usize;
         if frames == 0 {
             return None;
+        }
+        if self.filled == 0 {
+            self.since = start_frame;
         }
         self.block.start_frame = start_frame;
         self.block.sequence = sequence;
@@ -88,12 +111,71 @@ impl SilenceFill {
         self.filled += frames as u64;
         Some(&self.block)
     }
+
+    /// Engine frame where the silence being filled starts.
+    pub(super) fn since(&self) -> u64 {
+        self.since
+    }
+
+    pub(super) fn settle(&mut self) {
+        self.settled = true;
+    }
+
+    /// After a demand change during settled silence: fill from now on, not the time since
+    /// settling, which the time views already showed as a gap.
+    pub(super) fn unsettle(&mut self, now: Instant) {
+        if self.settled {
+            self.settled = false;
+            self.filled = self.filled.max(self.frames_due(now));
+        }
+    }
+
+    fn frames_due(&self, now: Instant) -> u64 {
+        let quiet = now.saturating_duration_since(self.quiet_since);
+        (quiet.min(LIMIT).as_secs_f64() * self.sample_rate) as u64
+    }
+
+    fn restart(&mut self, now: Instant) {
+        self.quiet_since = now;
+        self.filled = 0;
+        self.settled = false;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::create_block_transport;
+    use crate::audio::{ProcessingEndpoint, create_block_transport};
+
+    /// A filler that has seen one 480-frame block captured at `start`.
+    fn after_one_block(
+        infer: bool,
+    ) -> (
+        SilenceFill,
+        Arc<SourceTelemetry>,
+        ProcessingEndpoint,
+        Instant,
+    ) {
+        let telemetry = Arc::new(SourceTelemetry::new());
+        telemetry.set_state(SourceState::Running);
+        let (mut capture, mut processing) =
+            create_block_transport(1, 4, 480, Arc::clone(&telemetry)).unwrap();
+        let mut fill = SilenceFill::new(Arc::clone(&telemetry), 48_000, 1, infer);
+        let start = Instant::now();
+        capture.write(&[0.5_f32; 480]);
+        let mut block = processing.try_pop().unwrap();
+        fill.captured(&mut block, start);
+        processing.recycle(block);
+        (fill, telemetry, processing, start)
+    }
+
+    fn drain(fill: &mut SilenceFill, now: Instant) -> u64 {
+        let mut frames = 0;
+        while let Some(silent) = fill.due(now) {
+            frames += silent.frame_count as u64;
+        }
+        frames
+    }
 
     #[test]
     fn silence_stands_in_after_the_grace_in_real_time_up_to_the_limit_and_shifts_later_blocks() {
@@ -101,7 +183,7 @@ mod tests {
         telemetry.set_state(SourceState::Running);
         let (mut capture, mut processing) =
             create_block_transport(1, 4, 480, Arc::clone(&telemetry)).unwrap();
-        let mut fill = SilenceFill::new(Arc::clone(&telemetry), 48_000, 1);
+        let mut fill = SilenceFill::new(Arc::clone(&telemetry), 48_000, 1, true);
         let start = Instant::now();
         assert!(
             fill.due(start + Duration::from_secs(1)).is_none(),
@@ -125,8 +207,9 @@ mod tests {
             covered += silent.frame_count as u64;
         }
         assert_eq!(covered, 480 + 48_000);
+        assert_eq!(fill.since(), 480);
 
-        while fill.due(start + Duration::from_secs(60)).is_some() {}
+        drain(&mut fill, start + Duration::from_secs(60));
         assert_eq!(
             fill.inserted_frames,
             (LIMIT.as_secs_f64() * 48_000.0) as u64
@@ -143,6 +226,50 @@ mod tests {
         assert!(
             fill.due(start + Duration::from_millis(70_050)).is_none(),
             "the pause did not count"
+        );
+    }
+
+    #[test]
+    fn rest_ends_filling_until_audio_returns() {
+        let (mut fill, _telemetry, _processing, start) = after_one_block(true);
+        assert!(fill.due(start + Duration::from_secs(1)).is_some());
+        fill.settle();
+        assert_eq!(drain(&mut fill, start + Duration::from_secs(10)), 0);
+
+        let mut block = AudioBlock::silence(1, 480);
+        fill.captured(&mut block, start + Duration::from_secs(10));
+        assert!(
+            fill.due(start + Duration::from_millis(10_200)).is_some(),
+            "the next silence fills again"
+        );
+    }
+
+    #[test]
+    fn a_new_demand_after_rest_fills_from_now_not_the_settled_time() {
+        let (mut fill, _telemetry, _processing, start) = after_one_block(true);
+        drain(&mut fill, start + Duration::from_secs(1));
+        fill.settle();
+        fill.unsettle(start + Duration::from_secs(5));
+        assert_eq!(drain(&mut fill, start + Duration::from_secs(5)), 0);
+        assert_eq!(
+            drain(&mut fill, start + Duration::from_millis(5_500)),
+            24_000,
+            "half a second since the demand changed"
+        );
+        assert_eq!(fill.since(), 480, "the same silence continues");
+    }
+
+    #[test]
+    fn a_lost_device_fills_without_grace_even_where_silence_is_not_inferred() {
+        let (mut fill, telemetry, _processing, start) = after_one_block(false);
+        assert!(
+            fill.due(start + Duration::from_secs(1)).is_none(),
+            "a running microphone without samples is not silent"
+        );
+        telemetry.set_state(SourceState::DeviceLost);
+        assert_eq!(
+            drain(&mut fill, start + Duration::from_millis(1_050)),
+            50_400
         );
     }
 }

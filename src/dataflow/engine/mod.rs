@@ -4,6 +4,7 @@
 mod execute;
 mod graph;
 mod plan;
+mod rest;
 
 use std::{
     collections::HashMap,
@@ -189,6 +190,8 @@ enum Kernel {
     Loudness {
         analyzer: LoudnessAnalyzer,
         start_frame: u64,
+        /// NaN until the first publication.
+        published_lufs: f32,
     },
 }
 
@@ -218,8 +221,10 @@ impl Kernel {
             Self::Loudness {
                 analyzer,
                 start_frame,
+                published_lufs,
             } => {
                 analyzer.reset();
+                *published_lufs = f32::NAN;
                 start_frame
             }
             _ => return,
@@ -257,6 +262,10 @@ struct Node {
     /// reactivation the FFT window still holds older audio).
     accept_from: u64,
     produced: bool,
+    /// Source frame of an FFT's latest result.
+    produced_through: u64,
+    /// Scratch for `Engine::at_rest`, valid only during that call.
+    rest: bool,
     ring: Option<RingAttach>,
 }
 
@@ -318,6 +327,8 @@ pub(super) struct Engine {
     minimum_continuity: u64,
     active_continuity: u64,
     current_frontier: u64,
+    /// Start frame of the latest published PCM chunk.
+    pcm_published_from: Option<u64>,
     /// Frames since the last time-domain publication; None without time demand.
     clock: Option<usize>,
     publish_interval_frames: usize,
@@ -353,6 +364,7 @@ impl Engine {
             minimum_continuity: 0,
             active_continuity: 0,
             current_frontier: 0,
+            pcm_published_from: None,
             clock: None,
             publish_interval_frames,
         }

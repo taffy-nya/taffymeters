@@ -77,6 +77,7 @@ impl Engine {
             Some(NodeSpec::Loudness) => Kernel::Loudness {
                 analyzer: LoudnessAnalyzer::new(sample_rate, channels),
                 start_frame: self.current_frontier,
+                published_lufs: f32::NAN,
             },
         };
         let node = Node {
@@ -93,6 +94,8 @@ impl Engine {
             ring_served: false,
             accept_from: 0,
             produced: false,
+            produced_through: 0,
+            rest: false,
             ring: None,
         };
         let id = if let Some(id) = self.free_nodes.pop() {
