@@ -22,8 +22,8 @@ const ROW_CAPACITY: usize = 8_192;
 const POP_CAPACITY: usize = 8_192;
 /// Four counter samples per second for the same two minutes.
 const COUNTER_CAPACITY: usize = 512;
-/// The largest built-in measurement layouts hold eight plots; more count as overflow.
-const PLOTS_PER_ROW: usize = 8;
+/// The largest measurement layout (daily-heavy) holds twelve plots; more count as overflow.
+const PLOTS_PER_ROW: usize = 16;
 const POP_COLUMNS: [&str; 4] = ["start_frame", "frames", "callback", "pop"];
 const COUNTER_COLUMNS: [&str; 16] = [
     "qpc",
@@ -507,7 +507,7 @@ impl PerfTrace {
             callback_allocations: CALLBACK_ALLOCATIONS.load(Ordering::Relaxed),
             callback_max_ticks: CALLBACK_MAX_TICKS.load(Ordering::Relaxed),
             dropped_blocks: DROPPED_BLOCKS.load(Ordering::Relaxed),
-            row_columns: "see Row in src/perf.rs; ticks are QPC",
+            row_columns: "see Row in src/diagnostics/perf.rs; ticks are QPC",
             rows: &self.rows,
             pop_columns: POP_COLUMNS,
             pops,
