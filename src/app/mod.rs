@@ -6,6 +6,11 @@
 //! per-window repaints would starve unfocused windows, because Windows keeps picking the
 //! focused window's pending WM_PAINT.
 
+#[cfg(windows)]
+mod fonts;
+#[cfg(windows)]
+pub(super) mod instance;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     num::{NonZeroU32, NonZeroUsize},
@@ -43,7 +48,7 @@ pub(crate) struct App {
     #[cfg(feature = "automation")]
     trace: SharedTrace,
     #[cfg(feature = "perf-trace")]
-    perf: Option<crate::perf::PerfTrace>,
+    perf: Option<crate::diagnostics::perf::PerfTrace>,
 }
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -67,7 +72,7 @@ impl App {
     }
 
     #[cfg(feature = "perf-trace")]
-    pub(crate) fn with_perf(mut self, perf: crate::perf::PerfTrace) -> Self {
+    pub(crate) fn with_perf(mut self, perf: crate::diagnostics::perf::PerfTrace) -> Self {
         self.perf = Some(perf);
         self
     }
@@ -153,7 +158,7 @@ pub(crate) fn run(app: App) -> Result<(), String> {
         });
     });
     #[cfg(windows)]
-    crate::fonts::install_fallbacks(&ctx);
+    fonts::install_fallbacks(&ctx);
     app.install_waker(&proxy);
     #[cfg(windows)]
     app.save_on_session_end();
@@ -263,7 +268,7 @@ impl Host {
             self.settings_at = None;
         }
         #[cfg(feature = "perf-trace")]
-        let perf_started = crate::perf::now();
+        let perf_started = crate::diagnostics::perf::now();
         if windows {
             // Before clearing the wake flag: a wake-up in between must see this batch's start.
             self.app.pacer.begin_pass(Instant::now());
@@ -292,7 +297,7 @@ impl Host {
             return;
         }
         #[cfg(feature = "perf-trace")]
-        let perf_pass = crate::perf::UiPass::begin();
+        let perf_pass = crate::diagnostics::perf::UiPass::begin();
         if windows {
             self.app.wake_pending.store(false, Ordering::Release);
         }
@@ -318,7 +323,7 @@ impl Host {
         }
         #[cfg(feature = "perf-trace")]
         if let Some(perf) = &mut self.app.perf {
-            let ended = crate::perf::now();
+            let ended = crate::diagnostics::perf::now();
             perf.end(perf_pass, ended);
         }
         let (request, closed) = {
@@ -476,7 +481,7 @@ impl Host {
     fn draw(
         &mut self,
         target: Target,
-        #[cfg(feature = "perf-trace")] perf_pass: &crate::perf::UiPass,
+        #[cfg(feature = "perf-trace")] perf_pass: &crate::diagnostics::perf::UiPass,
     ) -> bool {
         let Self {
             app,
@@ -491,7 +496,8 @@ impl Host {
         };
         // D9: only the pass body counts as UI wall; input, egui's run and painting do not.
         #[cfg(feature = "perf-trace")]
-        let (call_started, body_before) = (crate::perf::now(), perf_pass.body_so_far());
+        let (call_started, body_before) =
+            (crate::diagnostics::perf::now(), perf_pass.body_so_far());
         egui_winit::update_viewport_info(&mut native.info, ctx, &native.window, false);
         let mut input = native.state.take_egui_input(&native.window);
         input.time = Some(app.started_at.elapsed().as_secs_f64());
@@ -500,7 +506,7 @@ impl Host {
         let mut drawn = false;
         let output = ctx.run_ui(input, |ui| {
             #[cfg(feature = "perf-trace")]
-            let body_started = crate::perf::now();
+            let body_started = crate::diagnostics::perf::now();
             drawn = match target {
                 Target::Workspace(window_id) => window_pass(
                     &app.workspace,

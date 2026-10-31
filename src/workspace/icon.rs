@@ -18,6 +18,6 @@ static SMALL: LazyLock<Arc<IconData>> = LazyLock::new(|| {
 });
 
 /// egui-winit only sets ICON_SMALL on the windows it creates (32 px at 200% scaling).
-pub(crate) fn small() -> Arc<IconData> {
+pub(super) fn small() -> Arc<IconData> {
     Arc::clone(&SMALL)
 }

@@ -30,7 +30,7 @@ pub(crate) struct Trace {
         Instant,
         crate::audio::Generation,
         crate::dataflow::RuntimeMetrics,
-        crate::probe::WorkerSample,
+        crate::diagnostics::probe::WorkerSample,
     )>,
 }
 

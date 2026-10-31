@@ -202,7 +202,7 @@ fn dispatch(args: &[String]) -> Result<i32, (i32, String)> {
         }
         Some("crash") => {
             let values = parse_run(&args[1..], &["--config-dir"]).map_err(usage)?;
-            crate::crash::install(PathBuf::from(&values[0]));
+            crate::diagnostics::crash::install(PathBuf::from(&values[0]));
             panic!("automation crash entry");
         }
         _ => Err(usage("expected run, compare, preview or crash".into())),

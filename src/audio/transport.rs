@@ -137,9 +137,11 @@ impl CaptureEndpoint {
     {
         let complete_frames = data.len() / self.channels;
         #[cfg(feature = "perf-trace")]
-        let _counting = crate::probe::count_allocations_into(&crate::perf::CALLBACK_ALLOCATIONS);
+        let _counting = crate::diagnostics::probe::count_allocations_into(
+            &crate::diagnostics::perf::CALLBACK_ALLOCATIONS,
+        );
         #[cfg(feature = "perf-trace")]
-        let callback_ticks = crate::perf::callback_begin(complete_frames);
+        let callback_ticks = crate::diagnostics::perf::callback_begin(complete_frames);
         let remainder = data.len() % self.channels;
         if remainder != 0 {
             self.telemetry.add_invalid_samples(remainder as u64);
@@ -156,7 +158,7 @@ impl CaptureEndpoint {
             let Some(mut block) = self.free.try_pop() else {
                 self.telemetry.add_dropped_block();
                 #[cfg(feature = "perf-trace")]
-                crate::perf::dropped_block();
+                crate::diagnostics::perf::dropped_block();
                 frame_offset += frame_count;
                 continue;
             };
@@ -191,7 +193,7 @@ impl CaptureEndpoint {
                 // The paired free queue guarantees room; never wait in the callback if that fails.
                 self.telemetry.add_dropped_block();
                 #[cfg(feature = "perf-trace")]
-                crate::perf::dropped_block();
+                crate::diagnostics::perf::dropped_block();
             }
             frame_offset += frame_count;
         }
@@ -202,7 +204,7 @@ impl CaptureEndpoint {
             worker.unpark();
         }
         #[cfg(feature = "perf-trace")]
-        crate::perf::callback_end(callback_ticks);
+        crate::diagnostics::perf::callback_end(callback_ticks);
     }
 }
 
@@ -220,7 +222,7 @@ impl ProcessingEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::allocations_during;
+    use crate::diagnostics::probe::allocations_during;
 
     #[test]
     fn callback_write_is_allocation_free_and_preserves_complete_blocks() {

@@ -546,7 +546,7 @@ impl Engine {
                 };
                 let newest = frame.processed_through_frame;
                 #[cfg(feature = "perf-trace")]
-                crate::perf::published(newest);
+                crate::diagnostics::perf::published(newest);
                 ring.frames.push_back(frame);
                 match attach.keep_frames {
                     None => {

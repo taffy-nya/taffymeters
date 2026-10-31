@@ -24,18 +24,9 @@ pub mod theme;
 mod app;
 #[cfg(feature = "automation")]
 mod automation;
-mod crash;
-#[cfg(windows)]
-mod fonts;
-mod icon;
-#[cfg(windows)]
-mod instance;
+mod diagnostics;
 mod live;
-#[cfg(feature = "perf-trace")]
-mod perf;
 mod persistence;
-#[cfg(any(test, feature = "automation", feature = "perf-trace"))]
-mod probe;
 mod workspace;
 
 pub use live::{LiveAudio, LiveAudioConfig};
@@ -56,10 +47,10 @@ fn main() {
         }
     }
     #[cfg(feature = "perf-trace")]
-    let perf = match perf::take_arg(&mut args) {
+    let perf = match diagnostics::perf::take_arg(&mut args) {
         Ok(dir) => dir.map(|dir| {
-            perf::enable();
-            perf::PerfTrace::new(dir)
+            diagnostics::perf::enable();
+            diagnostics::perf::PerfTrace::new(dir)
         }),
         Err(error) => exit_with_error(&error),
     };
@@ -70,11 +61,11 @@ fn main() {
         Err(error) => exit_with_error(&error),
     };
     #[cfg(windows)]
-    let _instance = match instance::claim(&root) {
-        Ok(instance::Claim::First(instance)) => Some(instance),
-        Ok(instance::Claim::Running { pid }) => {
+    let _instance = match app::instance::claim(&root) {
+        Ok(app::instance::Claim::First(instance)) => Some(instance),
+        Ok(app::instance::Claim::Running { pid }) => {
             eprintln!("already running with {}", root.display());
-            instance::raise(pid);
+            app::instance::raise(pid);
             std::process::exit(0);
         }
         Err(error) => {
@@ -82,7 +73,7 @@ fn main() {
             None
         }
     };
-    crash::install(root.clone());
+    diagnostics::crash::install(root.clone());
     let store = persistence::WorkspaceStore::new(root);
     let local = store.load_local();
     let (live, unavailable) = live::open_chosen(&local.settings.input, &live::open_system)

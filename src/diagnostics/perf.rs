@@ -14,7 +14,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::{audio::AudioBlock, dataflow::RuntimeMetrics, probe::WorkerSample};
+use crate::{audio::AudioBlock, dataflow::RuntimeMetrics, diagnostics::probe::WorkerSample};
 
 /// Sized for a run of about two minutes: 60 passes/s and the 100 blocks/s of a 10 ms
 /// WASAPI period. Memory is committed up front, so larger tables would inflate private bytes.

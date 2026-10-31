@@ -205,7 +205,7 @@ impl DataReader {
             {
                 *slot = Some(Arc::clone(frame));
                 #[cfg(feature = "perf-trace")]
-                crate::perf::read(frame.processed_through_frame);
+                crate::diagnostics::perf::read(frame.processed_through_frame);
             }
         }
         true
@@ -227,7 +227,7 @@ impl DataReader {
             .cloned();
         #[cfg(feature = "perf-trace")]
         if let Some(frame) = &frame {
-            crate::perf::read(frame.processed_through_frame);
+            crate::diagnostics::perf::read(frame.processed_through_frame);
         }
         frame
     }
@@ -272,7 +272,7 @@ impl DataReader {
                     gap_before,
                 });
                 #[cfg(feature = "perf-trace")]
-                crate::perf::read(frame.processed_through_frame);
+                crate::diagnostics::perf::read(frame.processed_through_frame);
             }
         }
         drop(store);

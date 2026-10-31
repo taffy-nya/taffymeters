@@ -37,7 +37,7 @@ Workspace
 
 ## Modules and analysis
 
-- A module type is a `ModuleFactory` registered in the `Registry` (`extensions.rs`). An instance declares what analysis it needs as a `DataSpec`, has view settings described by descriptors, and draws through `RenderTarget` (`render.rs`).
+- A module type is a `ModuleFactory` registered in the `Registry` (`extensions.rs`). An instance declares what analysis it needs as a `DataSpec`, has view settings described by descriptors, and draws through `RenderTarget` (`render/`).
 - A `DataSpec` is a small graph of nodes: `Channel`, `Fft`, `Tilt`, `Smooth`, `Gain`, `Peak`, `Levels`, `Loudness`. Each output keeps either its latest result or the last few seconds (history).
 - The worker merges every subscription into one graph (`dataflow/engine/`). Stateless nodes with identical parameters are shared, so two panels showing the same FFT compute it once; stateful nodes (smoothing, peak hold) belong to their panel unless explicitly shared.
 - Nodes with no subscriber don't run. Changing a panel's settings forks only the nodes that differ.
@@ -56,11 +56,12 @@ Workspace
 | `src/audio/` | Input descriptor, block transport, source status; `inputs/` holds WASAPI capture (loopback and microphones) and the default-device watch |
 | `src/dataflow/` | `DataSpec`, node graph engine, FFT, history and level kernels, worker runtime |
 | `src/modules/` | Built-in modules, one directory each, with their styles |
-| `src/module.rs`, `src/render.rs` | Module contract and drawing interface |
+| `src/module.rs`, `src/render/` | Module contract; drawing interface and its egui backend |
 | `src/extensions.rs` | Registry and factories |
 | `src/live.rs` | Opening an input and starting its worker |
 | `src/workspace/` | Workspace, layout, windows, snapping, settings window |
 | `src/persistence/` | Session, preset and local settings files, built-in presets |
 | `src/theme.rs`, `src/settings/` | Theme colors; UI-independent setting descriptors |
-| `src/main.rs`, `src/instance.rs`, `src/crash.rs` | Startup, one instance per config directory, crash logs |
+| `src/main.rs`, `src/app/` | Startup; native host (winit event loop, egui-wgpu painter), one instance per config directory, CJK font fallbacks |
+| `src/diagnostics/` | Crash logs; allocation probes and the `perf-trace` measurement hooks |
 | `src/automation/` | Test harness and CLI, only with the `automation` feature |

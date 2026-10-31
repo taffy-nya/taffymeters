@@ -121,7 +121,7 @@ pub struct DataflowHandle {
     #[cfg(any(test, feature = "automation"))]
     processed_through_frame: Arc<AtomicU64>,
     #[cfg(any(test, feature = "automation"))]
-    probe: Arc<crate::probe::WorkerProbe>,
+    probe: Arc<crate::diagnostics::probe::WorkerProbe>,
 }
 
 /// Owns one subscription's demand; dropping it removes the demand.
@@ -299,7 +299,7 @@ impl Dataflow {
         fill_silence: bool,
     ) -> io::Result<(Self, DataflowHandle)> {
         #[cfg(feature = "perf-trace")]
-        crate::perf::worker_started();
+        crate::diagnostics::perf::worker_started();
         let silence = super::silence::SilenceFill::new(
             Arc::clone(&telemetry),
             descriptor.sample_rate_hz,
@@ -324,7 +324,7 @@ impl Dataflow {
         #[cfg(any(test, feature = "automation"))]
         let worker_frontier = Arc::clone(&processed_through_frame);
         #[cfg(any(test, feature = "automation", feature = "perf-trace"))]
-        let probe = Arc::new(crate::probe::WorkerProbe::default());
+        let probe = Arc::new(crate::diagnostics::probe::WorkerProbe::default());
         #[cfg(any(test, feature = "automation", feature = "perf-trace"))]
         let worker_probe = Arc::clone(&probe);
         let worker = thread::Builder::new()
@@ -483,7 +483,7 @@ impl DataflowHandle {
     }
 
     #[cfg(any(test, feature = "automation"))]
-    pub(crate) fn worker_sample(&self) -> crate::probe::WorkerSample {
+    pub(crate) fn worker_sample(&self) -> crate::diagnostics::probe::WorkerSample {
         self.probe.sample()
     }
 
@@ -550,7 +550,7 @@ struct Worker<'a> {
     #[cfg(any(test, feature = "automation"))]
     processed_frontier: Arc<AtomicU64>,
     #[cfg(feature = "perf-trace")]
-    probe: &'a crate::probe::WorkerProbe,
+    probe: &'a crate::diagnostics::probe::WorkerProbe,
 }
 
 fn run_worker(worker: Worker<'_>) {
@@ -616,11 +616,11 @@ fn run_worker(worker: Worker<'_>) {
             wake();
         }
         #[cfg(feature = "perf-trace")]
-        crate::perf::worker_counters(|| (metrics.snapshot(), probe.sample()));
+        crate::diagnostics::perf::worker_counters(|| (metrics.snapshot(), probe.sample()));
         if let Some(mut block) = endpoint.try_pop() {
             silence.captured(&mut block, Instant::now());
             #[cfg(feature = "perf-trace")]
-            crate::perf::popped(&block);
+            crate::diagnostics::perf::popped(&block);
             #[cfg(any(test, feature = "automation"))]
             let block_end = u64::try_from(block.frame_count)
                 .ok()
@@ -638,7 +638,7 @@ fn run_worker(worker: Worker<'_>) {
         } else if let Some(block) = silence.due(Instant::now()) {
             let before = published();
             #[cfg(feature = "perf-trace")]
-            crate::perf::popped(block);
+            crate::diagnostics::perf::popped(block);
             engine.process_block(block);
             if engine.at_rest(silence.since()) {
                 engine.flush_pcm();

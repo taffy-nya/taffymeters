@@ -1,4 +1,4 @@
-//! Produces raw RGBA icons for `src/icon.rs` and embeds Windows icon/version resources.
+//! Produces raw RGBA icons for `src/workspace/icon.rs` and embeds Windows icon/version resources.
 
 use std::{env, fs, path::Path};
 
