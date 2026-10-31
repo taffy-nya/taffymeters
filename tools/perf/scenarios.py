@@ -140,6 +140,27 @@ SCENARIOS = {
                      (10.0, "paused-settings", "open-settings")],
         "plots": 1, "windows": 1,
     },
+    # 7-1 task 6: the stimulus stops at 5 s, so loopback delivers nothing; the worker
+    # fills silence until the analysis is at rest, then the time views scroll empty.
+    "settle-spectrum": {
+        "session": session(window(leaf(spectrum()))),
+        "baseline": None, "duration": 25.0,
+        "segments": [(0.0, "visible", None), (5.0, "silence", "stimulus-stop")],
+        "plots": 1, "windows": 1,
+    },
+    "settle-meter": {
+        "session": session(window(split("left_right", leaf(module("level_meter")),
+                                        leaf(module("loudness_meter"))))),
+        "baseline": None, "duration": 25.0,
+        "segments": [(0.0, "visible", None), (5.0, "silence", "stimulus-stop")],
+        "plots": 2, "windows": 1,
+    },
+    "settle-pcm": {
+        "session": session(window(leaf(module("oscilloscope")))),
+        "baseline": None, "duration": 25.0,
+        "segments": [(0.0, "visible", None), (5.0, "silence", "stimulus-stop")],
+        "plots": 1, "windows": 1,
+    },
     # Source alive, zero analysis: one empty window.
     "zero-analysis": {
         "session": session({"display": 0, "frame": FRAME}),
@@ -168,6 +189,12 @@ SCENARIOS = {
         "baseline": None, "duration": 10.0, "segments": [(0.0, "visible", None)],
         "plots": 8, "windows": 4,
     },
+}
+
+# Every module type, including the time views that scroll empty after settling.
+SCENARIOS["settle-mixed"] = {
+    **SCENARIOS["ext-mixed"], "duration": 25.0,
+    "segments": [(0.0, "visible", None), (5.0, "silence", "stimulus-stop")],
 }
 
 LOCAL = {"format_version": 1, "input": {"kind": "system_default"}}

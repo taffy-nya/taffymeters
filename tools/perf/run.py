@@ -177,6 +177,10 @@ def git(*args):
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True).stdout.strip()
 
 
+def play(path):
+    winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
+
+
 def stimulus(path):
     """Protocol 3.1: 1 s stereo PCM16, Left 440 Hz, Right 880 Hz, -36 dBFS peak."""
     pcm = array.array("h")
@@ -330,6 +334,11 @@ def run_one(args, build, scenario_name, repetition, out):
                 elif action == "pause":
                     win.u.SetForegroundWindow(primary)
                     win.keys(0x20)  # Space
+                elif action == "stimulus-stop":
+                    # Loopback then delivers no packets at all, as in real silence.
+                    winsound.PlaySound(None, 0)
+                elif action == "stimulus-start":
+                    play(args.output / "stimulus.wav")
                 result["events"].append({"qpc": before, "done_qpc": qpc(), "elapsed": elapsed,
                                          "segment": current, "action": action,
                                          "window": window_state(primary)})
@@ -386,6 +395,8 @@ def run_one(args, build, scenario_name, repetition, out):
                 proc.wait(timeout=10)
         result["exit_code"] = proc.returncode
     finally:
+        if any(action == "stimulus-stop" for _, _, action in scenario["segments"]):
+            play(args.output / "stimulus.wav")
         if handle:
             k.CloseHandle(handle)
         stdout.close()
@@ -445,7 +456,7 @@ def main():
     stimulus(wav)
     runs = []
     try:
-        winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
+        play(wav)
         time.sleep(1.0)
         for repetition in range(1, args.rounds + 1):
             order = args.build if repetition % 2 else list(reversed(args.build))
