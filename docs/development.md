@@ -57,7 +57,9 @@ python tools/perf/summarize.py <run dir>
 python tools/perf/churn.py --exe <automation exe> --output <new dir>
 ```
 
-`run.py` plays a looping 440/880 Hz tone on the default playback device for the whole session (the app captures it through loopback), opens each scenario from a fresh `--config-dir`, and moves, resizes, minimizes and closes the windows itself; keep the desktop otherwise idle. `--build old=old:<exe>` also drives the pre-rewrite probe used as the comparison baseline. `churn.py` repeatedly splits, closes and opens windows through the settings window with real input and checks that live objects return to their starting counts.
+`run.py` plays a looping 440/880 Hz tone on the default playback device for the whole session (the app captures it through loopback); scenarios marked `stimulus: music` (`daily-bar`, `daily-heavy`) instead restart a music excerpt at every run, decoded with `ffmpeg`, which must be on PATH (see `tools/perf/assets/README.md`). Each run opens its scenario from a fresh `--config-dir`, and the tool moves, resizes, minimizes and closes the windows itself; keep the desktop otherwise idle and the system volume fixed, since loopback may capture the signal after the volume control.
+
+Prefer headless and offscreen checks while developing. For a performance change, screen it with the two or three scenarios it affects at `--rounds 3`, then confirm a change worth keeping with five rounds: three pairs can point the wrong way. `--build old=old:<exe>` also drives the pre-rewrite probe used as the comparison baseline. `churn.py` repeatedly splits, closes and opens windows through the settings window with real input and checks that live objects return to their starting counts.
 
 ## Releasing
 
