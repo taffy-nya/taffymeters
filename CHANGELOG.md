@@ -23,7 +23,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Loading a preset no longer resets the reference level and frame rate limit.
 - Switching to a low-sample-rate input no longer permanently lowers a Spectrum's maximum frequency.
 - `THIRD_PARTY_LICENSES.txt` in release packages carries every dependency's copyright notice, including those of the embedded fonts, instead of template placeholders.
-- An open or minimized settings window no longer raises CPU use, including while moving the mouse over a window.
+- An open or minimized settings window adds much less CPU use than before, and moving the mouse over a window no longer redraws the settings window.
 - When the sound stops, peak markers and slowly smoothed curves fall all the way down instead of stopping after 6 seconds, and meters with nothing left to fall stop redrawing sooner. They also fall back when the audio device is lost.
 - Waveform and Spectrogram are sharp on high-DPI displays instead of being drawn at a lower resolution and stretched. Waveform no longer leaves its left edge empty for a while after its window grows.
 
