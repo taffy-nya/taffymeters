@@ -15,6 +15,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Dragging a divider moves only that divider: dividers inside the panels next to it, including ones nested in another direction, stay where they are, and the drag stops when a neighboring panel reaches its minimum size.
 - A divider you dragged keeps its place: splitting or closing a panel evens out only the panels between such dividers, instead of resizing the whole row and rescaling the panels inside it.
 - Closing a panel gives its space to a neighbor next to it, the same way whatever the order in which the panels were created.
+- The Bar presets give the panels new widths that line up on a 16-point grid on a 1440-point-wide screen, where the Stereometer is square, and their Waveforms show half a second instead of four and keep only that much history.
 
 ### Fixed
 

@@ -9,8 +9,8 @@
   "displays": [
     {
       "work_area": [
-        1920.0,
-        1032.0
+        1440.0,
+        936.0
       ]
     }
   ],
@@ -19,16 +19,16 @@
       "display": 0,
       "frame": [
         0.0,
-        920.0,
-        1920.0,
-        1032.0
+        824.0,
+        1440.0,
+        936.0
       ],
       "always_on_top": true,
       "locked": true,
       "layout": {
         "node": "split",
         "axis": "left_right",
-        "ratio": 0.13333333,
+        "ratio": 0.16666667,
         "manual": true,
         "first": {
           "node": "leaf",
@@ -50,7 +50,7 @@
         "second": {
           "node": "split",
           "axis": "left_right",
-          "ratio": 0.24358974,
+          "ratio": 0.28,
           "manual": true,
           "first": {
             "node": "leaf",
@@ -73,7 +73,7 @@
           "second": {
             "node": "split",
             "axis": "left_right",
-            "ratio": 0.33898305,
+            "ratio": 0.35185185,
             "manual": true,
             "first": {
               "node": "split",
@@ -84,6 +84,17 @@
                 "node": "leaf",
                 "module": {
                   "type_id": "taffymeters.waveform",
+                  "data": {
+                    "nodes": [],
+                    "outputs": [
+                      {
+                        "keep": {
+                          "seconds": 0.5
+                        },
+                        "node": null
+                      }
+                    ]
+                  },
                   "view": {
                     "channel": {
                       "channel": "left"
@@ -95,7 +106,7 @@
                       "number": 1.0
                     },
                     "visible_seconds": {
-                      "number": 4.0
+                      "number": 0.5
                     }
                   }
                 }
@@ -104,6 +115,17 @@
                 "node": "leaf",
                 "module": {
                   "type_id": "taffymeters.waveform",
+                  "data": {
+                    "nodes": [],
+                    "outputs": [
+                      {
+                        "keep": {
+                          "seconds": 0.5
+                        },
+                        "node": null
+                      }
+                    ]
+                  },
                   "view": {
                     "channel": {
                       "channel": "right"
@@ -115,7 +137,7 @@
                       "number": 1.0
                     },
                     "visible_seconds": {
-                      "number": 4.0
+                      "number": 0.5
                     }
                   }
                 }
@@ -124,7 +146,7 @@
             "second": {
               "node": "split",
               "axis": "left_right",
-              "ratio": 0.05128205,
+              "ratio": 0.057142857,
               "manual": true,
               "first": {
                 "node": "leaf",
@@ -140,7 +162,7 @@
               "second": {
                 "node": "split",
                 "axis": "left_right",
-                "ratio": 0.02702703,
+                "ratio": 0.030303031,
                 "manual": true,
                 "first": {
                   "node": "leaf",
@@ -151,7 +173,7 @@
                 "second": {
                   "node": "split",
                   "axis": "left_right",
-                  "ratio": 0.19444444,
+                  "ratio": 0.21875,
                   "manual": true,
                   "first": {
                     "node": "leaf",
