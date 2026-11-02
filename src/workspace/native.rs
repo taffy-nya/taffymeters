@@ -6,20 +6,20 @@ use std::{
     cell::RefCell,
     sync::{
         LazyLock, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicIsize, Ordering},
+        atomic::{AtomicIsize, AtomicU64, Ordering},
     },
 };
 
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-    Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
+    Graphics::Gdi::{GetMonitorInfoW, HMONITOR, InvalidateRect, MONITORINFO},
     System::Threading::GetCurrentThreadId,
     UI::{
         HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, GetKeyState, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
-            VK_ESCAPE, VK_LBUTTON, VK_MENU,
+            GetAsyncKeyState, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
+            RegisterHotKey, UnregisterHotKey, VK_ESCAPE, VK_LBUTTON, VK_MENU,
         },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
@@ -244,7 +244,7 @@ pub(super) fn begin_move(request: &MoveRequest, displays: Vec<Display>) -> bool 
         (raise, native.handle(request.leader))
     };
     if let Some(leader) = leader {
-        grab_alt_escape(leader);
+        grab_escape(leader);
     }
     for handle in raise {
         // SAFETY: a tracked window of this thread; z-order only.
@@ -265,38 +265,77 @@ pub(super) fn begin_move(request: &MoveRequest, displays: Vec<Display>) -> bool 
     true
 }
 
-const ALT_ESCAPE_HOTKEY: i32 = 0x7466;
-static ALT_ESCAPE_TARGET: AtomicIsize = AtomicIsize::new(0);
+/// Escape under the modifiers a drag may hold. Hotkeys match modifiers exactly, and
+/// Windows claims Alt+Esc and Shift+Alt+Esc (window cycling) and Ctrl+Esc (Start);
+/// combinations the system reserves fail to register and are skipped.
+const ESCAPE_HOTKEYS: [(i32, u32); 6] = [
+    (0x7466, MOD_ALT),
+    (0x7467, MOD_ALT | MOD_SHIFT),
+    (0x7468, MOD_CONTROL),
+    (0x7469, MOD_CONTROL | MOD_ALT),
+    (0x746A, MOD_CONTROL | MOD_SHIFT),
+    (0x746B, MOD_CONTROL | MOD_ALT | MOD_SHIFT),
+];
+static ESCAPE_TARGET: AtomicIsize = AtomicIsize::new(0);
+/// `WindowId + 1` of a divider drag whose held Escape hotkey fired; 0 when none.
+static ESCAPE_FIRED: AtomicU64 = AtomicU64::new(0);
 
-/// Intercept Alt+Esc during drags: otherwise Windows sends the window to the back
-/// instead of delivering Escape to cancel the move.
-fn grab_alt_escape(leader: isize) {
-    release_alt_escape();
-    // SAFETY: a window of this thread; WM_HOTKEY is posted to it.
-    if unsafe {
-        RegisterHotKey(
-            leader as HWND,
-            ALT_ESCAPE_HOTKEY,
-            MOD_ALT | MOD_NOREPEAT,
-            u32::from(VK_ESCAPE),
-        )
-    } != 0
-    {
-        ALT_ESCAPE_TARGET.store(leader, Ordering::Relaxed);
+fn escape_hotkey(id: WPARAM) -> bool {
+    ESCAPE_HOTKEYS
+        .iter()
+        .any(|(hotkey, _)| *hotkey as WPARAM == id)
+}
+
+/// Intercept modified Escape during drags: otherwise Windows, for example, sends the
+/// window to the back on Alt+Esc instead of delivering Escape to cancel the move.
+fn grab_escape(leader: isize) {
+    release_escape();
+    for (id, modifiers) in ESCAPE_HOTKEYS {
+        // SAFETY: a window of this thread; WM_HOTKEY is posted to it.
+        unsafe {
+            RegisterHotKey(
+                leader as HWND,
+                id,
+                modifiers | MOD_NOREPEAT,
+                u32::from(VK_ESCAPE),
+            )
+        };
+    }
+    ESCAPE_TARGET.store(leader, Ordering::Relaxed);
+}
+
+fn release_escape() {
+    let target = ESCAPE_TARGET.swap(0, Ordering::Relaxed);
+    if target != 0 {
+        for (id, _) in ESCAPE_HOTKEYS {
+            // SAFETY: hotkeys this module registered for that window; unregistering
+            // one that failed to register is a harmless error.
+            unsafe { UnregisterHotKey(target as HWND, id) };
+        }
     }
 }
 
-fn release_alt_escape() {
-    let target = ALT_ESCAPE_TARGET.swap(0, Ordering::Relaxed);
-    if target != 0 {
-        // SAFETY: the hotkey this module registered for that window.
-        unsafe { UnregisterHotKey(target as HWND, ALT_ESCAPE_HOTKEY) };
+/// A divider drag holds the Escape hotkeys for its window too; `None` gives them back
+/// unless a native move holds them.
+pub(super) fn hold_escape(window: Option<WindowId>) {
+    let handle = window.and_then(|window| native().handle(window));
+    match handle {
+        Some(handle) => grab_escape(handle),
+        None if !native().tracker.moving() => release_escape(),
+        None => {}
     }
+    ESCAPE_FIRED.store(0, Ordering::Relaxed);
+}
+
+pub(super) fn take_escape(window: WindowId) -> bool {
+    ESCAPE_FIRED
+        .compare_exchange(window.0 + 1, 0, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
 }
 
 fn end_move() {
     native().tracker.end();
-    release_alt_escape();
+    release_escape();
 }
 
 fn cancel_move() {
@@ -308,7 +347,7 @@ fn cancel_move() {
         native.swallow_escape_up = true;
         native.swallow_keymenu |= alt_down();
     }
-    release_alt_escape();
+    release_escape();
     apply();
 }
 
@@ -469,9 +508,14 @@ unsafe extern "system" fn subclass(
             end_move();
         }
         WM_CAPTURECHANGED if lparam as HWND != hwnd && leading() => end_move(),
-        WM_HOTKEY if wparam == ALT_ESCAPE_HOTKEY as usize => {
+        WM_HOTKEY if escape_hotkey(wparam) => {
             if leading() {
                 cancel_move();
+            } else {
+                ESCAPE_FIRED.store(window.0 + 1, Ordering::Relaxed);
+                // Wake a pass to see it even while the pointer rests.
+                // SAFETY: a window of this thread; invalidation only.
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
             }
             return 0;
         }
@@ -578,8 +622,8 @@ unsafe extern "system" fn subclass(
                 native.tracker.forget(window);
                 native.handles.retain(|(id, _)| *id != window);
             }
-            if !native().tracker.moving() {
-                release_alt_escape();
+            if ESCAPE_TARGET.load(Ordering::Relaxed) == hwnd as isize {
+                release_escape();
             }
             // SAFETY: removing this module's own subclass from the window.
             unsafe { RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID) };

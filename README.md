@@ -27,7 +27,7 @@ Requires 64-bit Windows 10 or 11 with a Direct3D 12 capable GPU. Without one, Wi
 | | |
 |---|---|
 | Split a panel | Hover its right or bottom edge and click `+` |
-| Resize panels | Drag the divider; hold Alt for free positioning, double-click to even out |
+| Resize panels | Drag the divider; hold Alt for free positioning, Ctrl to snap, Shift to move aligned dividers; double-click to even out |
 | Move / resize a window | Drag inside it / drag its edge; hold Alt to stop snapping |
 | Adjust a panel's range | Mouse wheel or Ctrl + wheel over it |
 | Settings | Right-click; while open, click a panel to edit it |

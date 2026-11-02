@@ -6,14 +6,14 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use egui::{
-    self, Align2, Color32, CursorIcon, FontId, Id, PointerButton, Rect, Response, Sense, Stroke,
-    Vec2, ViewportCommand, pos2,
+    self, Align2, Color32, CursorIcon, FontId, Id, PointerButton, Pos2, Rect, Response, Sense,
+    Stroke, Vec2, ViewportCommand, pos2,
 };
 
 use super::{
     ModuleInstanceId, MoveTarget, Side, SplitId, WindowId, Workspace, WorkspaceAction,
     desktop::{self, Edge},
-    layout::{Axis, DividerGeometry},
+    layout::{Axis, DividerDragPlan, DividerGeometry, LayoutGeometry, Snap},
     settings_window::SettingsItem,
 };
 use crate::{
@@ -228,13 +228,27 @@ pub(crate) struct ControlTarget {
     pub(crate) pass_token: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// One divider drag; every frame recomputes the layout from the start snapshot.
+#[derive(Clone, Debug)]
 pub(crate) struct DividerDrag {
-    pub(crate) split_id: SplitId,
-    pub(crate) start_ratio: f32,
-    current_ratio: f32,
+    plan: DividerDragPlan,
     pixels_per_point: f32,
-    cancelled: bool,
+    position: f32,
+    aligned: bool,
+}
+
+impl DividerDrag {
+    pub(crate) fn split_id(&self) -> SplitId {
+        self.plan.hit()
+    }
+
+    pub(super) fn original(&self) -> Vec<(SplitId, f32, bool)> {
+        self.plan.original()
+    }
+
+    fn moves(&self, id: SplitId) -> bool {
+        self.plan.moves(id, self.aligned)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,6 +340,26 @@ fn split_zone(rect: Rect, side: Side) -> Rect {
             ),
             pos2(rect.max.x - right, rect.max.y),
         ),
+    }
+}
+
+fn divider_line(divider: &DividerGeometry) -> [Pos2; 2] {
+    match divider.axis {
+        Axis::LeftRight => [
+            pos2(divider.position, divider.parent.min.y),
+            pos2(divider.position, divider.parent.max.y),
+        ],
+        Axis::TopBottom => [
+            pos2(divider.parent.min.x, divider.position),
+            pos2(divider.parent.max.x, divider.position),
+        ],
+    }
+}
+
+fn resize_cursor(divider: &DividerGeometry) -> CursorIcon {
+    match divider.axis {
+        Axis::LeftRight => CursorIcon::ResizeHorizontal,
+        Axis::TopBottom => CursorIcon::ResizeVertical,
     }
 }
 
@@ -502,14 +536,12 @@ impl Workspace {
             .windows
             .get_mut(&window_id)
             .expect("the window was checked at the start of the pass");
-        if let Some(drag) = window.ui.divider_drag
-            && (drag.pixels_per_point - pixels_per_point).abs() > f32::EPSILON
-        {
-            // Old logical coordinates are meaningless at the new scale.
-            let _ = window
-                .layout
-                .set_ratio(drag.split_id, drag.start_ratio, false);
-            window.ui.divider_drag = None;
+        // Logical coordinates from another scale or content size are meaningless now.
+        if window.ui.divider_drag.as_ref().is_some_and(|drag| {
+            (drag.pixels_per_point - pixels_per_point).abs() > f32::EPSILON
+                || drag.plan.rect().size() != rect.size()
+        }) {
+            window.cancel_divider_drag();
         }
         window.content_size = rect.size();
         let min_size = self.window_min_size(&self.windows[&window_id]);
@@ -585,7 +617,20 @@ impl Workspace {
         for action in actions {
             let _ = self.apply_action(action);
         }
+        self.hold_escape_for_divider_drag();
         repaint
+    }
+
+    fn hold_escape_for_divider_drag(&mut self) {
+        let held = self
+            .windows
+            .iter()
+            .find(|(_, window)| window.ui.divider_drag.is_some())
+            .map(|(id, _)| *id);
+        if held != self.escape_held {
+            self.escape_held = held;
+            self.desktop.hold_escape(held);
+        }
     }
 
     fn handle_shortcuts(&mut self, window_id: WindowId, ui: &egui::Ui) {
@@ -597,6 +642,7 @@ impl Workspace {
                 input.key_pressed(egui::Key::Space),
             )
         });
+        let escape = escape || self.desktop.take_escape(window_id);
         if escape && !egui::Popup::is_any_open(ctx) {
             let pending_detach = self
                 .windows
@@ -612,15 +658,8 @@ impl Workspace {
                 .windows
                 .get_mut(&window_id)
                 .expect("the window was checked at the start of the pass");
-            if let Some(drag) = window
-                .ui
-                .divider_drag
-                .as_mut()
-                .filter(|drag| !drag.cancelled)
-            {
-                drag.cancelled = true;
-                let (split_id, ratio) = (drag.split_id, drag.start_ratio);
-                let _ = window.layout.set_ratio(split_id, ratio, false);
+            if window.ui.divider_drag.is_some() {
+                window.cancel_divider_drag();
             } else if self.move_source.is_some() {
                 let _ = self.apply_action(WorkspaceAction::CancelMove);
             } else if let Some(pending) = pending_detach {
@@ -643,12 +682,15 @@ impl Workspace {
 
     fn split_entry(
         &self,
+        window_id: WindowId,
+        geometry: &LayoutGeometry,
         leaf: ModuleInstanceId,
         leaf_rect: Rect,
         side: Side,
         hidden: bool,
     ) -> Option<Rect> {
-        (!hidden && self.can_split_in(leaf, side, leaf_rect.size()))
+        let layout = &self.windows[&window_id].layout;
+        (!hidden && self.can_split_in(layout, geometry, leaf, side))
             .then(|| split_zone(leaf_rect, side))
     }
 
@@ -707,8 +749,9 @@ impl Workspace {
                 });
             }
             // Chrome must not leak pointer input into the Module; locking suppresses it all.
-            let entries =
-                SPLIT_SIDES.map(|side| self.split_entry(leaf, leaf_rect, side, no_entries));
+            let entries = SPLIT_SIDES.map(|side| {
+                self.split_entry(window_id, &geometry, leaf, leaf_rect, side, no_entries)
+            });
             let pointer = (body.contains_pointer() && !popup_open && !picking && !locked)
                 .then(|| ui.input(|input| input.pointer.hover_pos()))
                 .flatten()
@@ -761,7 +804,9 @@ impl Workspace {
         let dragging = ui.input(|input| input.pointer.is_decidedly_dragging());
         for &(leaf, leaf_rect) in &geometry.leaves {
             for side in SPLIT_SIDES {
-                let Some(zone) = self.split_entry(leaf, leaf_rect, side, no_entries) else {
+                let Some(zone) =
+                    self.split_entry(window_id, &geometry, leaf, leaf_rect, side, no_entries)
+                else {
                     continue;
                 };
                 let response = ui.interact(
@@ -800,7 +845,15 @@ impl Workspace {
             }
         }
 
-        self.dividers(window_id, ui, &geometry.dividers, locked, controls, actions);
+        self.dividers(
+            window_id,
+            ui,
+            rect,
+            &geometry.dividers,
+            locked,
+            controls,
+            actions,
+        );
         repaint
     }
 
@@ -971,53 +1024,50 @@ impl Workspace {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dividers(
         &mut self,
         window_id: WindowId,
         ui: &mut egui::Ui,
+        rect: Rect,
         dividers: &[DividerGeometry],
         locked: bool,
         controls: &mut Controls,
         actions: &mut Vec<WorkspaceAction>,
     ) {
+        let stroke = |color| Stroke::new(1.0_f32, color);
+        let normal = color32(self.chrome.color(ColorRole::Divider));
+        let accent = color32(self.chrome.color(ColorRole::Accent));
+        if locked {
+            for divider in dividers {
+                ui.painter()
+                    .line_segment(divider_line(divider), stroke(normal));
+            }
+            return;
+        }
         let pixels_per_point = ui.ctx().pixels_per_point();
-        let grid = !ui.input(|input| input.modifiers.alt);
+        // Shift-alignment tolerance: one physical pixel.
+        let tolerance = 1.0 / pixels_per_point;
+        let modifiers = ui.input(|input| input.modifiers);
+        let snap = if modifiers.ctrl {
+            Snap::Fractions
+        } else if modifiers.alt {
+            Snap::Off
+        } else {
+            Snap::Grid
+        };
+        let aligned = modifiers.shift;
+        let mut hovered = None;
         let mut drag_seen = false;
         for divider in dividers {
-            let line = match divider.axis {
-                Axis::LeftRight => [
-                    pos2(divider.position, divider.parent.min.y),
-                    pos2(divider.position, divider.parent.max.y),
-                ],
-                Axis::TopBottom => [
-                    pos2(divider.parent.min.x, divider.position),
-                    pos2(divider.parent.max.x, divider.position),
-                ],
-            };
-            if locked {
-                let color = color32(self.chrome.color(ColorRole::Divider));
-                ui.painter().line_segment(line, Stroke::new(1.0_f32, color));
-                continue;
-            }
             let response = ui.interact(
                 divider.hit_rect(),
                 Id::new(("taffymeters.divider", window_id.0, divider.id.0)),
                 Sense::click_and_drag(),
             );
             controls.record(ControlKey::Divider(divider.id), &response);
-            let window = self
-                .windows
-                .get_mut(&window_id)
-                .expect("the window was checked at the start of the pass");
-            let active = window
-                .ui
-                .divider_drag
-                .is_some_and(|drag| drag.split_id == divider.id);
-            if response.hovered() || active {
-                ui.ctx().set_cursor_icon(match divider.axis {
-                    Axis::LeftRight => CursorIcon::ResizeHorizontal,
-                    Axis::TopBottom => CursorIcon::ResizeVertical,
-                });
+            if response.hovered() {
+                hovered = Some(*divider);
             }
             if response.double_clicked() {
                 actions.push(WorkspaceAction::ResetSplit {
@@ -1025,72 +1075,97 @@ impl Workspace {
                     split_id: divider.id,
                 });
             }
-            if response.drag_started_by(PointerButton::Primary) {
-                let ratio = window
-                    .layout
-                    .split(divider.id)
-                    .map_or(0.5, |split| split.ratio);
-                window.ui.divider_drag = Some(DividerDrag {
-                    split_id: divider.id,
-                    start_ratio: ratio,
-                    current_ratio: ratio,
+            if response.drag_started_by(PointerButton::Primary)
+                && let Some(plan) = self.windows[&window_id].layout.drag_plan(
+                    rect,
+                    &|id| self.module_min_size(id),
+                    divider.id,
+                    tolerance,
+                )
+            {
+                self.window_ui_mut(window_id).divider_drag = Some(DividerDrag {
+                    position: plan.start(),
+                    plan,
                     pixels_per_point,
-                    cancelled: false,
+                    aligned,
                 });
             }
-            if let Some(drag) = window
+            let Some(drag) = self.windows[&window_id]
                 .ui
                 .divider_drag
-                .as_mut()
-                .filter(|drag| drag.split_id == divider.id)
-            {
-                drag_seen = true;
-                if !drag.cancelled
-                    && response.dragged()
-                    && let Some(pointer) = response.interact_pointer_pos()
-                {
-                    let ratio = divider.ratio_for_pointer(divider.axis.coordinate(pointer), grid);
-                    drag.current_ratio = ratio;
-                    actions.push(WorkspaceAction::SetSplitRatio {
-                        window_id,
-                        split_id: divider.id,
-                        ratio,
-                        manual: false,
-                    });
+                .as_ref()
+                .filter(|drag| drag.split_id() == divider.id)
+            else {
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(resize_cursor(divider));
                 }
-                if response.drag_stopped() {
-                    let drag = window
-                        .ui
-                        .divider_drag
-                        .take()
-                        .expect("the active divider drag was matched above");
-                    if !drag.cancelled
-                        && (drag.current_ratio - drag.start_ratio).abs() > f32::EPSILON
-                    {
-                        actions.push(WorkspaceAction::SetSplitRatio {
-                            window_id,
-                            split_id: divider.id,
-                            ratio: drag.current_ratio,
-                            manual: true,
-                        });
-                    }
-                }
-            }
-            let color = if response.hovered() || active {
-                color32(self.chrome.color(ColorRole::Accent))
-            } else {
-                color32(self.chrome.color(ColorRole::Divider))
+                continue;
             };
-            ui.painter().line_segment(line, Stroke::new(1.0_f32, color));
+            drag_seen = true;
+            ui.ctx().set_cursor_icon(resize_cursor(divider));
+            let layout = &self.windows[&window_id].layout;
+            let (mut position, mut moves_aligned) = (drag.position, drag.aligned);
+            if response.dragged()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                position = drag
+                    .plan
+                    .position(divider.axis.coordinate(pointer), snap, aligned);
+                moves_aligned = aligned;
+                actions.push(WorkspaceAction::SetSplits {
+                    window_id,
+                    splits: layout.drag_updates(&drag.plan, position, aligned),
+                });
+            }
+            let finished = response.drag_stopped().then(|| {
+                let mut splits = layout.drag_updates(&drag.plan, position, moves_aligned);
+                let moved = (position - drag.plan.start()).abs() > f32::EPSILON;
+                for split in &mut splits {
+                    split.2 |= moved && drag.plan.moves(split.0, moves_aligned);
+                }
+                splits
+            });
+            let state = self.window_ui_mut(window_id);
+            if let Some(splits) = finished {
+                state.divider_drag = None;
+                actions.push(WorkspaceAction::SetSplits { window_id, splits });
+            } else if let Some(drag) = state.divider_drag.as_mut() {
+                drag.position = position;
+                drag.aligned = moves_aligned;
+            }
         }
-        // The dragged split disappeared (closed leaf / moved module): end the capture.
         let window = self
             .windows
             .get_mut(&window_id)
             .expect("the window was checked at the start of the pass");
-        if !drag_seen && window.ui.divider_drag.is_some() {
-            window.ui.divider_drag = None;
+        // Nothing can finish a drag whose divider took no input this pass.
+        if !drag_seen {
+            window.cancel_divider_drag();
         }
+        let drag = window.ui.divider_drag.as_ref();
+        let highlighted = |divider: &DividerGeometry| match (drag, hovered) {
+            (Some(drag), _) => drag.moves(divider.id),
+            (None, Some(hovered)) => {
+                hovered.id == divider.id
+                    || (aligned
+                        && hovered.axis == divider.axis
+                        && (hovered.position - divider.position).abs() <= tolerance)
+            }
+            (None, None) => false,
+        };
+        for divider in dividers {
+            let color = if highlighted(divider) { accent } else { normal };
+            ui.painter()
+                .line_segment(divider_line(divider), stroke(color));
+        }
+    }
+
+    fn window_ui_mut(&mut self, window_id: WindowId) -> &mut WindowUiState {
+        &mut self
+            .windows
+            .get_mut(&window_id)
+            .expect("the window was checked at the start of the pass")
+            .ui
     }
 
     fn resize_edges(ui: &mut egui::Ui, rect: Rect, controls: &mut Controls) {

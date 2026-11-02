@@ -78,10 +78,8 @@ impl Workspace {
     ) -> Result<ActionOutcome, WorkspaceError> {
         let window = self.window_mut(window_id)?;
         window.locked = enabled;
-        if enabled && let Some(drag) = window.ui.divider_drag.take() {
-            let _ = window
-                .layout
-                .set_ratio(drag.split_id, drag.start_ratio, false);
+        if enabled {
+            window.cancel_divider_drag();
         }
         Ok(ActionOutcome::Applied)
     }

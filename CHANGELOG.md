@@ -6,6 +6,20 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl-drag a divider to snap it to halves, thirds and quarters of its row or column, or to line it up with another divider; Shift-drag moves every divider aligned with it.
+
+### Changed
+
+- Dragging a divider moves only that divider: dividers inside the panels next to it, including ones nested in another direction, stay where they are, and the drag stops when a neighboring panel reaches its minimum size.
+- A divider you dragged keeps its place: splitting or closing a panel evens out only the panels between such dividers, instead of resizing the whole row and rescaling the panels inside it.
+- Closing a panel gives its space to a neighbor next to it, the same way whatever the order in which the panels were created.
+
+### Fixed
+
+- `Esc` cancels a divider drag while Alt is held too, instead of Windows sending the window to the back.
+
 ## [0.2.1] - 2026-11-01
 
 ### Added

@@ -1169,11 +1169,9 @@ fn s04() -> Result<Value, String> {
             .ok_or("no split")?;
     action(
         &mut h.ws,
-        WorkspaceAction::SetSplitRatio {
+        WorkspaceAction::SetSplits {
             window_id: FIRST_WINDOW,
-            split_id: split,
-            ratio: 0.3,
-            manual: true,
+            splits: vec![(split, 0.3, true)],
         },
     )?;
     let before = fingerprint(&h.ws);
@@ -1307,11 +1305,9 @@ fn s04() -> Result<Value, String> {
             .ok_or("no split after restore")?;
     action(
         &mut h.ws,
-        WorkspaceAction::SetSplitRatio {
+        WorkspaceAction::SetSplits {
             window_id: *last,
-            split_id: split,
-            ratio: 0.6,
-            manual: true,
+            splits: vec![(split, 0.6, true)],
         },
     )?;
     action(&mut h.ws, WorkspaceAction::CloseWindow { window_id: *last })?;

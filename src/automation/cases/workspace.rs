@@ -65,7 +65,7 @@ fn root_split(ws: &Workspace, index: usize) -> Result<(SplitId, f32, bool), Stri
         .ok_or_else(|| "missing split".to_owned())
 }
 
-/// Split, equalize, manual ratios, close with sibling fill, size rejection.
+/// Split, equalize, Custom dividers bound the equalized interval, close, size rejection.
 fn w01() -> Result<Value, String> {
     let (ws, _driver) = workspace()?;
     let mut h = Harness::new(ws);
@@ -101,18 +101,31 @@ fn w01() -> Result<Value, String> {
     let (first_split, _, _) = root_split(&h.ws, 0)?;
     action(
         &mut h.ws,
-        WorkspaceAction::SetSplitRatio {
+        WorkspaceAction::SetSplits {
             window_id: FIRST_WINDOW,
-            split_id: first_split,
-            ratio: 0.25,
-            manual: true,
+            splits: vec![(first_split, 0.25, true)],
         },
     )?;
     let d = split(&mut h.ws, c, Side::Right)?;
     let (kept_id, kept_ratio, kept_manual) = root_split(&h.ws, 0)?;
+    h.frame(vec![]);
+    let leaf_widths = |h: &Harness| -> Result<Vec<f32>, String> {
+        Ok(h.ws
+            .observation()
+            .window(FIRST_WINDOW)
+            .ok_or("root closed")?
+            .leaf_rects
+            .iter()
+            .map(|(_, r)| r.width())
+            .collect())
+    };
+    let after_split = leaf_widths(&h)?;
     check(
-        kept_id == first_split && (kept_ratio - 0.25).abs() < 1e-6 && kept_manual,
-        "adding a leaf rewrote a manually adjusted ratio",
+        kept_id == first_split
+            && (kept_ratio - 0.25).abs() < 1e-6
+            && kept_manual
+            && after_split[1..].iter().all(|w| (w - 225.0).abs() < 0.5),
+        &format!("a split crossed or moved a Custom divider: {after_split:?}"),
     )?;
     settle_subscriptions(&h.ws, 4)?;
     let objects: Vec<usize> = [a, c, d]
@@ -127,6 +140,14 @@ fn w01() -> Result<Value, String> {
     check(
         leaves(&h.ws, FIRST_WINDOW) == vec![a, c, d] && after == objects,
         "closing a leaf disturbed the remaining instances",
+    )?;
+    h.frame(vec![]);
+    let after_close = leaf_widths(&h)?;
+    check(
+        root_split(&h.ws, 0)? == (first_split, kept_ratio, true)
+            && (after_close[0] - 225.0).abs() < 0.5
+            && after_close[1..].iter().all(|w| (w - 337.5).abs() < 0.5),
+        &format!("closing B moved the Custom divider or skipped equalizing: {after_close:?}"),
     )?;
     settle_subscriptions(&h.ws, 3)?;
     h.frame(vec![]);

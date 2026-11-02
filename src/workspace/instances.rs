@@ -95,7 +95,7 @@ impl Workspace {
         let window_id = self.located(instance_id)?;
         let new = self.create_module(type_id)?;
         let window = self.window_mut(window_id)?;
-        if let Err(error) = window.layout.replace_leaf(instance_id, new) {
+        if let Err(error) = window.edit_layout().replace_leaf(instance_id, new) {
             self.modules.remove(&new);
             return Err(error.into());
         }
@@ -115,7 +115,7 @@ impl Workspace {
     ) -> Result<ActionOutcome, WorkspaceError> {
         let window_id = self.located(instance_id)?;
         let window = self.window_mut(window_id)?;
-        window.layout.remove_leaf(instance_id)?;
+        window.edit_layout().remove_leaf(instance_id)?;
         if self.move_source == Some(instance_id) {
             self.move_source = None;
         }

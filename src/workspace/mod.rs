@@ -133,11 +133,10 @@ pub(crate) enum WorkspaceAction {
         style_id: &'static str,
     },
     TogglePause,
-    SetSplitRatio {
+    /// Assigns each split's desired ratio and Custom state; all or nothing.
+    SetSplits {
         window_id: WindowId,
-        split_id: SplitId,
-        ratio: f32,
-        manual: bool,
+        splits: Vec<(SplitId, f32, bool)>,
     },
     ResetSplit {
         window_id: WindowId,
@@ -426,6 +425,21 @@ impl WindowState {
         })
     }
 
+    /// Structural edits go through here: a divider drag replays a snapshot of the tree,
+    /// so it is cancelled (restoring its start) before the tree changes.
+    fn edit_layout(&mut self) -> &mut Layout {
+        self.cancel_divider_drag();
+        &mut self.layout
+    }
+
+    fn cancel_divider_drag(&mut self) {
+        if let Some(drag) = self.ui.divider_drag.take() {
+            self.layout
+                .set_splits(&drag.original())
+                .expect("the tree has not changed since the drag started");
+        }
+    }
+
     pub(crate) fn viewport_builder(&self, id: WindowId) -> egui::ViewportBuilder {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("Taffymeters #{}", id.0))
@@ -488,6 +502,8 @@ pub(crate) struct Workspace {
     autosave: Autosave,
     desktop: Arc<dyn DesktopProbe + Send + Sync>,
     published_groups: Vec<(WindowId, u64)>,
+    /// The window whose divider drag holds the desktop's modified-Escape shortcuts.
+    escape_held: Option<WindowId>,
     theme: ThemeSettings,
     chrome: Palette,
     /// The chosen input; the running source may differ when it could not be opened.
@@ -551,6 +567,7 @@ impl Workspace {
             autosave: Autosave::default(),
             desktop,
             published_groups: Vec::new(),
+            escape_held: None,
             chrome: theme.global_palette(),
             theme,
             input: InputConfig::default(),
@@ -587,6 +604,7 @@ impl Workspace {
     pub(crate) fn set_desktop(&mut self, desktop: Arc<dyn DesktopProbe + Send + Sync>) {
         self.desktop = desktop;
         self.published_groups.clear();
+        self.escape_held = None;
         for window in self.windows.values_mut() {
             window.tracked = false;
         }
@@ -776,12 +794,7 @@ impl Workspace {
                 style_id,
             } => self.set_style(instance_id, style_id),
             WorkspaceAction::TogglePause => self.toggle_pause(),
-            WorkspaceAction::SetSplitRatio {
-                window_id,
-                split_id,
-                ratio,
-                manual,
-            } => self.set_split_ratio(window_id, split_id, ratio, manual),
+            WorkspaceAction::SetSplits { window_id, splits } => self.set_splits(window_id, &splits),
             WorkspaceAction::ResetSplit {
                 window_id,
                 split_id,

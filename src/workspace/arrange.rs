@@ -1,40 +1,66 @@
-use egui::{Rect, Vec2};
+use egui::{Pos2, Rect, Vec2};
 
 use super::{
     ActionOutcome, INITIAL_WINDOW_SIZE, ModuleInstanceId, MoveTarget, PendingDetach, Side, SplitId,
     WindowId, WindowState, Workspace, WorkspaceError,
-    layout::{Layout, fits},
+    layout::{Layout, LayoutGeometry},
     persist,
 };
 
 impl Workspace {
-    fn can_place_beside(&self, target: ModuleInstanceId, side: Side, incoming_min: Vec2) -> bool {
-        let Some(window_id) = self.window_of(target) else {
+    /// `layout` is the window's layout as it will be when `incoming` arrives.
+    fn can_place_beside(
+        &self,
+        window_id: WindowId,
+        layout: &Layout,
+        target: ModuleInstanceId,
+        side: Side,
+        incoming: Vec2,
+    ) -> bool {
+        let Some(window) = self.windows.get(&window_id) else {
             return false;
         };
-        let Some(rect) = self.leaf_rect(window_id, target) else {
-            return false;
-        };
-        fits(
-            rect.size(),
-            side.axis(),
-            self.module_min_size(target),
-            incoming_min,
-        )
+        let min_leaf = |id| self.module_min_size(id);
+        let geometry = layout.geometry(
+            Rect::from_min_size(Pos2::ZERO, window.content_size),
+            &min_leaf,
+        );
+        layout.insertion_fits(&geometry, target, side, incoming, &min_leaf)
     }
 
     pub(crate) fn can_split(&self, instance: ModuleInstanceId, side: Side) -> bool {
-        self.window_of(instance)
-            .and_then(|window_id| self.leaf_rect(window_id, instance))
-            .is_some_and(|rect| self.can_split_in(instance, side, rect.size()))
+        self.window_of(instance).is_some_and(|window_id| {
+            let layout = &self.windows[&window_id].layout;
+            self.splittable(instance)
+                && self.can_place_beside(
+                    window_id,
+                    layout,
+                    instance,
+                    side,
+                    self.module_min_size(instance),
+                )
+        })
     }
 
-    pub(crate) fn can_split_in(&self, instance: ModuleInstanceId, side: Side, area: Vec2) -> bool {
+    /// `geometry` is the current geometry of the instance's window.
+    pub(crate) fn can_split_in(
+        &self,
+        layout: &Layout,
+        geometry: &LayoutGeometry,
+        instance: ModuleInstanceId,
+        side: Side,
+    ) -> bool {
         let min = self.module_min_size(instance);
+        self.splittable(instance)
+            && layout.insertion_fits(geometry, instance, side, min, &|id| {
+                self.module_min_size(id)
+            })
+    }
+
+    fn splittable(&self, instance: ModuleInstanceId) -> bool {
         self.modules
             .get(&instance)
             .is_some_and(|entry| entry.preserved.is_none())
-            && fits(area, side.axis(), min, min)
     }
 
     pub(crate) fn move_target_valid(&self, source: ModuleInstanceId, target: MoveTarget) -> bool {
@@ -43,11 +69,22 @@ impl Workspace {
         }
         match target {
             MoveTarget::Beside { instance_id, side } => {
+                let Some(window_id) = self.window_of(instance_id) else {
+                    return false;
+                };
+                let mut layout = self.windows[&window_id].layout.clone();
+                if layout.contains(source) && layout.remove_leaf(source).is_err() {
+                    return false;
+                }
                 instance_id != source
-                    && self
-                        .window_of(instance_id)
-                        .is_some_and(|window_id| !self.windows[&window_id].locked)
-                    && self.can_place_beside(instance_id, side, self.module_min_size(source))
+                    && !self.windows[&window_id].locked
+                    && self.can_place_beside(
+                        window_id,
+                        &layout,
+                        instance_id,
+                        side,
+                        self.module_min_size(source),
+                    )
             }
             MoveTarget::EmptyWindow(window_id) => {
                 self.windows.get(&window_id).is_some_and(|window| {
@@ -57,7 +94,7 @@ impl Workspace {
         }
     }
 
-    /// Preview the post-move layout: remove the source if already here, then re-equalize.
+    /// Preview the post-move layout: remove the source if already here, then insert.
     pub(crate) fn move_landing(
         &self,
         source: ModuleInstanceId,
@@ -107,11 +144,12 @@ impl Workspace {
             self.modules.remove(&new);
             return Err(WorkspaceError::CopyIncomplete(reason));
         }
-        if let Err(error) =
-            self.window_mut(window_id)?
-                .layout
-                .insert_beside(instance_id, side, new, split_id)
-        {
+        if let Err(error) = self.window_mut(window_id)?.edit_layout().insert_beside(
+            instance_id,
+            side,
+            new,
+            split_id,
+        ) {
             self.modules.remove(&new);
             return Err(error.into());
         }
@@ -119,16 +157,12 @@ impl Workspace {
         Ok(ActionOutcome::Created(new))
     }
 
-    pub(super) fn set_split_ratio(
+    pub(super) fn set_splits(
         &mut self,
         window_id: WindowId,
-        split_id: SplitId,
-        ratio: f32,
-        manual: bool,
+        splits: &[(SplitId, f32, bool)],
     ) -> Result<ActionOutcome, WorkspaceError> {
-        self.window_mut(window_id)?
-            .layout
-            .set_ratio(split_id, ratio, manual)?;
+        self.window_mut(window_id)?.layout.set_splits(splits)?;
         Ok(ActionOutcome::Applied)
     }
 
@@ -137,7 +171,9 @@ impl Workspace {
         window_id: WindowId,
         split_id: SplitId,
     ) -> Result<ActionOutcome, WorkspaceError> {
-        self.window_mut(window_id)?.layout.reset_chain(split_id)?;
+        self.window_mut(window_id)?
+            .edit_layout()
+            .reset_group(split_id)?;
         Ok(ActionOutcome::Applied)
     }
 
@@ -218,7 +254,7 @@ impl Workspace {
             .get_mut(&pending.source)
             .expect("the source window was located before detaching");
         source
-            .layout
+            .edit_layout()
             .remove_leaf(pending.instance_id)
             .expect("the instance was located in the source window");
         let source_empty = source.layout.is_empty();
@@ -265,7 +301,7 @@ impl Workspace {
             .get_mut(&source_id)
             .expect("the source window was located before moving");
         source
-            .layout
+            .edit_layout()
             .remove_leaf(instance_id)
             .expect("the instance was located in the source window");
         let source_empty = source.layout.is_empty();
@@ -281,11 +317,11 @@ impl Workspace {
                 },
                 Some(split_id),
             ) => window
-                .layout
+                .edit_layout()
                 .insert_beside(target_leaf, side, instance_id, split_id)
                 .expect("the target was validated before moving the module"),
             _ => window
-                .layout
+                .edit_layout()
                 .place_root(instance_id)
                 .expect("the target window was validated as empty"),
         }

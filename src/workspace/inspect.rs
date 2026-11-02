@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use egui::{Pos2, Rect, Vec2};
 
-use super::{Axis, ModuleInstanceId, SplitId, WindowId, Workspace};
+use super::{Axis, ModuleInstanceId, SplitId, WindowId, Workspace, window::DividerDrag};
 use crate::{
     audio::SourceStatus,
     dataflow::{ChannelSelection, DataController},
@@ -144,7 +144,7 @@ impl Workspace {
                         opened: window.opened,
                         pending_detach: window.pending_detach.map(|p| p.instance_id),
                         min_size: self.window_min_size(window),
-                        divider_drag: window.ui.divider_drag.map(|drag| drag.split_id),
+                        divider_drag: window.ui.divider_drag.as_ref().map(DividerDrag::split_id),
                         outer: window.outer,
                         edges: window.ui.edges.clone(),
                         module_outline: window.ui.module_outline,

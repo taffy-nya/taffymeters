@@ -43,6 +43,13 @@ pub(crate) trait DesktopProbe {
     fn place(&self, _moves: &[(WindowId, Pos2)]) -> bool {
         false
     }
+    /// Keep the platform's modified-Escape shortcuts (such as Alt+Esc) for `window` while
+    /// one of its dividers is dragged, so Escape still cancels; `None` gives them back.
+    fn hold_escape(&self, _window: Option<WindowId>) {}
+    /// Whether a held Escape shortcut fired for `window` since the last call.
+    fn take_escape(&self, _window: WindowId) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,6 +194,14 @@ impl DesktopProbe for NativeDesktop {
 
     fn place(&self, moves: &[(WindowId, Pos2)]) -> bool {
         super::native::place(moves)
+    }
+
+    fn hold_escape(&self, window: Option<WindowId>) {
+        super::native::hold_escape(window);
+    }
+
+    fn take_escape(&self, window: WindowId) -> bool {
+        super::native::take_escape(window)
     }
 }
 
