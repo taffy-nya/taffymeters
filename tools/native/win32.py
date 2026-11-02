@@ -182,22 +182,24 @@ def glide(start, end):
         time.sleep(0.012)
 
 
-def drag(start, end, alt=False, escape=False):
+def drag(start, end, alt=False, escape=False, hold=()):
+    """`hold` lists virtual keys pressed after the button and released after it."""
+    held = ((0x12,) if alt else ()) + tuple(hold)
     u.SetCursorPos(*start)
     time.sleep(0.2)
     mouse(2)
     time.sleep(0.12)
     try:
-        if alt:
-            key(0x12)
+        for code in held:
+            key(code)
         glide(start, end)
         time.sleep(0.2)
         if escape:
             keys(0x1B)
     finally:
         mouse(4)
-        if alt:
-            key(0x12, True)
+        for code in reversed(held):
+            key(code, True)
 
 
 def move(hwnd, x, y):

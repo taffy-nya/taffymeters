@@ -311,10 +311,159 @@ fn w02() -> Result<Value, String> {
         started == 1 && (root_split(&h.ws, 0)?.1 - 0.5).abs() < 1e-6,
         &format!("body drag should start exactly one window move: {started}"),
     )?;
+
+    // [A | (B | D) / (C | E)]: both inner rows split at 675.
+    let b = leaves(&h.ws, FIRST_WINDOW)[1];
+    let c = split(&mut h.ws, b, Side::Below)?;
+    split(&mut h.ws, b, Side::Right)?;
+    split(&mut h.ws, c, Side::Right)?;
+    h.frame(vec![]);
+    let (outer, _, _) = root_split(&h.ws, 0)?;
+    let (top, _, _) = root_split(&h.ws, 2)?;
+    let (bottom, _, _) = root_split(&h.ws, 3)?;
+    let right_edge = |h: &Harness, leaf: ModuleInstanceId| -> Result<f32, String> {
+        h.ws.observation()
+            .window(FIRST_WINDOW)
+            .and_then(|w| {
+                w.leaf_rects
+                    .iter()
+                    .find(|(id, _)| *id == leaf)
+                    .map(|(_, r)| r.max.x)
+            })
+            .ok_or_else(|| format!("leaf {} missing", leaf.0))
+    };
+    let edges = |h: &Harness| -> Result<[f32; 3], String> {
+        Ok([right_edge(h, a)?, right_edge(h, b)?, right_edge(h, c)?])
+    };
+    let near = |edges: [f32; 3], expected: [f32; 3]| {
+        edges
+            .iter()
+            .zip(expected)
+            .all(|(edge, expected)| (edge - expected).abs() < 0.01)
+    };
+    let alt = egui::Modifiers::ALT;
+    let shift_alt = egui::Modifiers { shift: true, ..alt };
+    h.drag(
+        ControlKey::Divider(outer),
+        &[pos2(400.0, y), pos2(300.0, y)],
+        alt,
+        None,
+    )?;
+    let nested = edges(&h)?;
+    check(
+        near(nested, [300.0, 675.0, 675.0]),
+        &format!("dragging the outer divider moved nested dividers: {nested:?}"),
+    )?;
+    h.drag(
+        ControlKey::Divider(top),
+        &[pos2(650.0, y), pos2(600.0, y)],
+        shift_alt,
+        None,
+    )?;
+    let shifted = edges(&h)?;
+    check(
+        near(shifted, [300.0, 600.0, 600.0]) && root_split(&h.ws, 2)?.2 && root_split(&h.ws, 3)?.2,
+        &format!("Shift drag did not move and mark the aligned divider: {shifted:?}"),
+    )?;
+    h.drag(
+        ControlKey::Divider(top),
+        &[pos2(650.0, y), pos2(712.0, y)],
+        alt,
+        None,
+    )?;
+    let single = edges(&h)?;
+    check(
+        near(single, [300.0, 712.0, 600.0]),
+        &format!("a plain drag moved an aligned divider: {single:?}"),
+    )?;
+    // Bottom row fractions are 450/500/600/700/750; the top divider at 712 is nearer.
+    // Alt is held too: Ctrl snapping wins over Alt's free positioning.
+    h.drag(
+        ControlKey::Divider(bottom),
+        &[pos2(650.0, y), pos2(715.0, y)],
+        egui::Modifiers { ctrl: true, ..alt },
+        None,
+    )?;
+    let parallel = edges(&h)?;
+    check(
+        near(parallel, [300.0, 712.0, 712.0]),
+        &format!("Ctrl drag missed the parallel divider: {parallel:?}"),
+    )?;
+    let splits = |h: &Harness| {
+        h.ws.observation()
+            .window(FIRST_WINDOW)
+            .map(|w| (w.splits.clone(), w.divider_drag))
+    };
+    let before = splits(&h);
+    h.drag(
+        ControlKey::Divider(top),
+        &[pos2(650.0, y), pos2(500.0, y), pos2(480.0, y)],
+        shift_alt,
+        Some(1),
+    )?;
+    check(
+        splits(&h) == before,
+        "Escape during a Shift drag did not restore every divider",
+    )?;
+
+    // A structural action mid-drag restores the drag start before it applies.
+    let top_ratio = root_split(&h.ws, 2)?.1;
+    let center = h.locate(&ControlKey::Divider(top))?.rect.center();
+    h.frame(vec![Event::PointerMoved(center)]);
+    h.frame(vec![primary(center, true)]);
+    h.frame(vec![Event::PointerMoved(center + vec2(-40.0, 0.0))]);
+    h.frame(vec![Event::PointerMoved(center + vec2(-80.0, 0.0))]);
+    let dragged = root_split(&h.ws, 2)?.1;
+    action(&mut h.ws, WorkspaceAction::CloseModule { instance_id: a })?;
+    h.frame(vec![primary(center + vec2(-80.0, 0.0), false)]);
+    h.frame(vec![]);
+    let observed = h.ws.observation();
+    let window = observed.window(FIRST_WINDOW).ok_or("root window missing")?;
+    let restored = window.splits.iter().find(|s| s.id == top).map(|s| s.ratio);
+    check(
+        (dragged - top_ratio).abs() > 0.01
+            && restored == Some(top_ratio)
+            && window.divider_drag.is_none(),
+        &format!(
+            "closing a module mid-drag kept the drag: {top_ratio} -> {dragged} -> {restored:?}"
+        ),
+    )?;
+
+    // So does a content size change: the snapshot's coordinates no longer apply.
+    let ratio_of = |h: &Harness| {
+        h.ws.observation()
+            .window(FIRST_WINDOW)
+            .and_then(|w| w.splits.iter().find(|s| s.id == top).map(|s| s.ratio))
+    };
+    let start = ratio_of(&h);
+    let size = h.window(FIRST_WINDOW)?.size;
+    let center = h.locate(&ControlKey::Divider(top))?.rect.center();
+    let aside = center + vec2(-80.0, 0.0);
+    h.frame(vec![Event::PointerMoved(center)]);
+    h.frame(vec![primary(center, true)]);
+    h.frame(vec![Event::PointerMoved(center + vec2(-40.0, 0.0))]);
+    h.frame(vec![Event::PointerMoved(aside)]);
+    let moved = ratio_of(&h);
+    h.set_size(size - vec2(40.0, 0.0));
+    h.frame(vec![Event::PointerMoved(aside + vec2(-10.0, 0.0))]);
+    h.frame(vec![primary(aside, false)]);
+    h.frame(vec![]);
+    let resized = ratio_of(&h);
+    check(
+        moved != start
+            && resized == start
+            && h.ws
+                .observation()
+                .window(FIRST_WINDOW)
+                .is_some_and(|w| w.divider_drag.is_none()),
+        &format!("resizing mid-drag kept the drag: {start:?} -> {moved:?} -> {resized:?}"),
+    )?;
     Ok(
         json!({"grid_position":528,"alt_position":601,"far_position":900.0 - MIN_EXTENT,
         "clamped_position":MIN_EXTENT,
-        "escape_restored":true,"double_click_ratio":0.5,"body_start_drag":1}),
+        "escape_restored":true,"double_click_ratio":0.5,"body_start_drag":1,
+        "nested_after_outer_drag":nested,"shift_drag":shifted,"plain_after_shift":single,
+        "ctrl_alt_parallel":parallel,"structural_cancel":true,"resize_cancel":true}),
     )
 }
 
